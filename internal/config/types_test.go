@@ -92,6 +92,19 @@ func TestGrafanaConfig_IsEmpty_IgnoresSessionCookie(t *testing.T) {
 	req.False(config.GrafanaConfig{Server: "value", SessionCookie: "stale-cookie-value"}.IsEmpty())
 }
 
+// TestGrafanaConfig_IsEmpty_IgnoresSession guards against the same class of regression as
+// TestGrafanaConfig_IsEmpty_IgnoresSessionCookie, but for the Session *SessionSource field: a
+// resolved SessionSource attached to an otherwise-empty "grafana: {}" block must not affect
+// emptiness either.
+func TestGrafanaConfig_IsEmpty_IgnoresSession(t *testing.T) {
+	req := require.New(t)
+
+	src := config.NewSessionSource("cookie-value", "https://grafana.example.com", nil, nil, "acct")
+
+	req.True(config.GrafanaConfig{Session: src}.IsEmpty())
+	req.False(config.GrafanaConfig{Server: "value", Session: src}.IsEmpty())
+}
+
 func TestGrafanaConfig_Validate_AllowsDiscoveredStackID(t *testing.T) {
 	req := require.New(t)
 

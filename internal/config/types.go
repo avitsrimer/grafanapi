@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 )
@@ -94,6 +95,13 @@ type GrafanaConfig struct {
 	// time from the platform Keychain (internal/keychain) and is never serialized to disk: no env
 	// tag (the cookie must never be a flag or env var) and json/yaml "-" tags.
 	SessionCookie string `json:"-" yaml:"-"`
+
+	// Session holds the shared, mutable SessionSource that rotates SessionCookie on a 401 and
+	// re-persists the fresh value to the Keychain. It is populated alongside SessionCookie during
+	// credential resolution (only when a cookie was actually loaded from the Keychain) and is
+	// never serialized to disk: no env tag, json/yaml "-" tags. Like SessionCookie, it must be
+	// zeroed in IsEmpty() so a resolved source never affects emptiness.
+	Session *SessionSource `json:"-" yaml:"-"`
 }
 
 func (grafana GrafanaConfig) validateNamespace(contextName string) error {
@@ -162,6 +170,7 @@ func (grafana GrafanaConfig) IsEmpty() bool {
 	// IsEmpty() == true, so Context.Validate() surfaces "grafana config is required" rather than
 	// the more confusing "server is required".
 	grafana.SessionCookie = ""
+	grafana.Session = nil
 
 	return grafana == GrafanaConfig{}
 }
@@ -197,14 +206,33 @@ type TLS struct {
 	NextProtos []string `json:"next-protos,omitempty" yaml:"next-protos,omitempty"`
 }
 
+// ToStdTLSConfig builds a "crypto/tls".Config from cfg, including the full TLS material: a root
+// CA pool from CAData (when set) and a client certificate from CertData/KeyData (when both are
+// set), in addition to Insecure/ServerName/NextProtos. Every direct HTTP client built from a
+// GrafanaConfig's TLS settings (the session-rotation client, the bootdata discovery client) must
+// use this helper so an mTLS/custom-CA context authenticates identically on every transport path.
 func (cfg *TLS) ToStdTLSConfig() *tls.Config {
-	// TODO: CertData, KeyData, CAData
-	return &tls.Config{
+	tlsConfig := &tls.Config{
 		//nolint:gosec
 		InsecureSkipVerify: cfg.Insecure,
 		ServerName:         cfg.ServerName,
 		NextProtos:         cfg.NextProtos,
 	}
+
+	if len(cfg.CAData) > 0 {
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM(cfg.CAData) {
+			tlsConfig.RootCAs = pool
+		}
+	}
+
+	if len(cfg.CertData) > 0 && len(cfg.KeyData) > 0 {
+		if cert, err := tls.X509KeyPair(cfg.CertData, cfg.KeyData); err == nil {
+			tlsConfig.Certificates = []tls.Certificate{cert}
+		}
+	}
+
+	return tlsConfig
 }
 
 // Minify returns a trimmed down version of the given configuration containing
