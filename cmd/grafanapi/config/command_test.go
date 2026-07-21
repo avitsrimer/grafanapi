@@ -80,11 +80,9 @@ func Test_ViewCommand(t *testing.T) {
   local:
     grafana:
       server: http://localhost:3000/
-      token: "**REDACTED**"
   prod:
     grafana:
       server: https://grafana.example.com/
-      token: "**REDACTED**"
 current-context: local`),
 		},
 	}
@@ -102,11 +100,9 @@ func Test_ViewCommand_raw(t *testing.T) {
   local:
     grafana:
       server: http://localhost:3000/
-      token: local_token
   prod:
     grafana:
       server: https://grafana.example.com/
-      token: prod_token
 current-context: local`),
 		},
 	}
@@ -124,7 +120,6 @@ func Test_ViewCommand_minify(t *testing.T) {
   local:
     grafana:
       server: http://localhost:3000/
-      token: "**REDACTED**"
 current-context: local`),
 		},
 	}
@@ -142,7 +137,6 @@ func Test_ViewCommand_minify_explicitContext(t *testing.T) {
   prod:
     grafana:
       server: https://grafana.example.com/
-      token: "**REDACTED**"
 current-context: prod`),
 		},
 	}
@@ -160,14 +154,12 @@ func Test_ViewCommand_outputJson(t *testing.T) {
   "contexts": {
     "local": {
       "grafana": {
-        "server": "http://localhost:3000/",
-        "token": "**REDACTED**"
+        "server": "http://localhost:3000/"
       }
     },
     "prod": {
       "grafana": {
-        "server": "https://grafana.example.com/",
-        "token": "**REDACTED**"
+        "server": "https://grafana.example.com/"
       }
     }
   },
@@ -236,14 +228,14 @@ func Test_UnsetCommand(t *testing.T) {
   dev:
     grafana:
       server: https://grafana-dev.example
-      user: remove-me-please
+      org-id: 99
 current-context: dev`
 
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	changeConfigTest := testutils.CommandTestCase{
 		Cmd:     config.Command(),
-		Command: []string{"unset", "--config", configFile, "contexts.dev.grafana.user"},
+		Command: []string{"unset", "--config", configFile, "contexts.dev.grafana.org-id"},
 		Assertions: []testutils.CommandAssertion{
 			testutils.CommandSuccess(),
 		},
@@ -275,13 +267,16 @@ func Test_ViewCommand_withEnvironmentVariables(t *testing.T) {
   prod:
     grafana:
       server: https://grafana.example.com/
-      token: token
-      org-id: 42
+      org-id: 84
 current-context: prod
 `),
 		},
+		// NOTE(Task 3): GRAFANA_TOKEN was removed along with GrafanaConfig.APIToken
+		// (session-cookie auth replaces it and is never settable via env var); this
+		// test now exercises GRAFANA_ORG_ID instead to keep coverage of env-var
+		// overrides applying on top of a partial config file.
 		Env: map[string]string{
-			"GRAFANA_TOKEN": "token",
+			"GRAFANA_ORG_ID": "84",
 		},
 	}
 
@@ -317,13 +312,16 @@ func Test_ViewCommand_withEnvironmentVariablesAndEmptyConfig(t *testing.T) {
   default:
     grafana:
       server: https://grafana.example.com/
-      token: token
+      org-id: 7
 current-context: default
 `),
 		},
+		// NOTE(Task 3): GRAFANA_TOKEN was removed along with GrafanaConfig.APIToken;
+		// GRAFANA_ORG_ID exercises the same "env vars populate an empty config"
+		// behavior with a still-supported field.
 		Env: map[string]string{
 			"GRAFANA_SERVER": "https://grafana.example.com/",
-			"GRAFANA_TOKEN":  "token",
+			"GRAFANA_ORG_ID": "7",
 		},
 	}
 

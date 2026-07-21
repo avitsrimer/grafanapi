@@ -327,18 +327,47 @@ grafanapi login update [--context NAME]
 - Modify: `internal/config/types_test.go`
 - Modify: `internal/config/editor_test.go` (add rejection test only)
 
-- [ ] Delete `User`/`Password`/`APIToken` fields and their `env`/`datapolicy` tags from
+- [x] Delete `User`/`Password`/`APIToken` fields and their `env`/`datapolicy` tags from
       `GrafanaConfig`; add in-memory `SessionCookie string` with `json:"-" yaml:"-"`.
-- [ ] Keep `IsEmpty()` correct (struct stays comparable); ensure `SessionCookie` does not break
+      (`SessionCookie` was already present from Task 2's ➕ prerequisite; only the three
+      legacy fields were removed here.)
+- [x] Keep `IsEmpty()` correct (struct stays comparable); ensure `SessionCookie` does not break
       equality semantics used by validation (only ever set alongside `Server`).
-- [ ] **Verify (no code change):** `editor.go` `SetValue`/`UnsetValue` are reflection/yaml-tag
+- [x] **Verify (no code change):** `editor.go` `SetValue`/`UnsetValue` are reflection/yaml-tag
       driven, so removing the struct fields makes `config set ...grafana.token` fail with
       "unable to locate path" automatically — no edit to `editor.go` needed; just confirm the behavior.
-- [ ] Write tests for success cases: parsing a config with only `server`/`org-id`/`stack-id`/`tls`;
+      Confirmed via `Test_SetValue_rejectsRemovedSecretFields` / `Test_UnsetValue_rejectsRemovedSecretFields`.
+- [x] Write tests for success cases: parsing a config with only `server`/`org-id`/`stack-id`/`tls`;
       `SessionCookie` never serialized by `config view`.
-- [ ] Write tests for error cases: `config set ...grafana.token X` (and user/password) is rejected
+- [x] Write tests for error cases: `config set ...grafana.token X` (and user/password) is rejected
       with the reflection-driven "unable to locate path" error.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
+- [x] ➕ Removing the three fields broke compilation/tests in packages outside this task's file
+      list, as anticipated by the task brief. Minimal fixes applied (Task 4/9 will properly finish
+      these):
+      - `internal/config/rest.go` (`NewNamespacedRESTConfig`): removed the dead
+        `BearerToken`/`Username`/`Password` switch (Task 4 replaces it with `WrapTransport` cookie
+        injection).
+      - `internal/grafana/client.go` (`ClientFromContext`): removed the dead `BasicAuth`/`APIKey`
+        assignment (Task 4 replaces it with `HTTPHeaders` cookie injection).
+      - `internal/server/grafana/requests.go` (`AuthenticateRequest`): emptied the dead
+        basic/bearer branches into a no-op (Task 4 sets the `Cookie` header here).
+      - `internal/config/loader_test.go`: fixed a compile error from the removed `APIToken` field
+        and adjusted `TestLoad_DoesNotLeakSecretsOnError` (a pre-existing secret-redaction
+        regression suite whose denylist is built from `datapolicy:"secret"`-tagged fields):
+        removed the now-moot "bad-token-separator"/"bad-password-indent" cases (they tested
+        redaction of the now-deleted `token`/`password` fields — Task 9 deletes/repurposes
+        those fixtures), repurposed `valid-config.yaml`/`validation-error.yaml` around the one
+        remaining secret field (TLS `key-data`), and dropped the equivalent lines from
+        `internal/config/testdata/config.yaml`.
+      - `cmd/grafanapi/config/testdata/config.yaml` and `partial-config.yaml`: dropped `token:`
+        keys (unknown-field strict-decode failures otherwise).
+      - `cmd/grafanapi/config/command_test.go`: dropped `token`/`"**REDACTED**"` expectations from
+        `view` output assertions; replaced the `Test_UnsetCommand` scenario (previously unsetting
+        `grafana.user`) with `grafana.org-id`; replaced the two `GRAFANA_TOKEN` env-var tests with
+        `GRAFANA_ORG_ID` equivalents (the removed field's env tag no longer overrides anything).
+      Full fixture/redaction redesign (friendly migration-message for legacy keys, deleting/
+      repurposing `bad-*.yaml`) remains Task 9's job per this plan.
 
 ### Task 4 — Cookie injection on both transport paths + serve proxy + bootdata
 

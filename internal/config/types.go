@@ -76,19 +76,6 @@ type GrafanaConfig struct {
 	// Required.
 	Server string `env:"GRAFANA_SERVER" json:"server,omitempty" yaml:"server,omitempty"`
 
-	// User to authenticate as with basic authentication.
-	// Optional.
-	User string `env:"GRAFANA_USER" json:"user,omitempty" yaml:"user,omitempty"`
-	// Password to use when using with basic authentication.
-	// Optional.
-	Password string `datapolicy:"secret" env:"GRAFANA_PASSWORD" json:"password,omitempty" yaml:"password,omitempty"`
-
-	// APIToken is a service account token.
-	// See https://grafana.com/docs/grafana/latest/administration/service-accounts/#add-a-token-to-a-service-account-in-grafana
-	// Note: if defined, the API Token takes precedence over basic auth credentials.
-	// Optional.
-	APIToken string `datapolicy:"secret" env:"GRAFANA_TOKEN" json:"token,omitempty" yaml:"token,omitempty"`
-
 	// OrgID specifies the organization targeted by this config.
 	// Note: required when targeting an on-prem Grafana instance.
 	// See StackID for Grafana Cloud instances.

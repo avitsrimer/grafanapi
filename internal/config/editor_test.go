@@ -115,6 +115,34 @@ func Test_SetValue_withUnknownField(t *testing.T) {
 	req.Error(err)
 }
 
+// Test_SetValue_rejectsRemovedSecretFields ensures the decommissioned auth
+// fields (User, Password, APIToken) can no longer be set through
+// `grafanapi config set`: since editor.go is reflection/yaml-tag driven and
+// GrafanaConfig no longer declares those fields, the lookup fails with the
+// same "unable to locate path" error as any other unknown field.
+func Test_SetValue_rejectsRemovedSecretFields(t *testing.T) {
+	for _, path := range []string{
+		"contexts.existing.grafana.user",
+		"contexts.existing.grafana.password",
+		"contexts.existing.grafana.token",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := require.New(t)
+			input := config.Config{
+				Contexts: map[string]*config.Context{
+					"existing": {
+						Grafana: &config.GrafanaConfig{Server: "url"},
+					},
+				},
+			}
+
+			err := config.SetValue(&input, path, "value")
+			req.Error(err)
+			req.ErrorContains(err, "unable to locate path")
+		})
+	}
+}
+
 func Test_UnsetValue(t *testing.T) {
 	testCases := []struct {
 		name           string
@@ -154,15 +182,15 @@ func Test_UnsetValue(t *testing.T) {
 			input: config.Config{
 				Contexts: map[string]*config.Context{
 					"existing": {
-						Grafana: &config.GrafanaConfig{Server: "url", User: "user"},
+						Grafana: &config.GrafanaConfig{Server: "url"},
 					},
 				},
 			},
-			path: "contexts.existing.grafana.user",
+			path: "contexts.existing.grafana.server",
 			expectedOutput: config.Config{
 				Contexts: map[string]*config.Context{
 					"existing": {
-						Grafana: &config.GrafanaConfig{Server: "url"},
+						Grafana: &config.GrafanaConfig{Server: ""},
 					},
 				},
 			},
@@ -205,4 +233,29 @@ func Test_UnsetValue_withUnknownField(t *testing.T) {
 
 	err := config.UnsetValue(&input, "unknown")
 	req.Error(err)
+}
+
+// Test_UnsetValue_rejectsRemovedSecretFields mirrors
+// Test_SetValue_rejectsRemovedSecretFields for `grafanapi config unset`.
+func Test_UnsetValue_rejectsRemovedSecretFields(t *testing.T) {
+	for _, path := range []string{
+		"contexts.existing.grafana.user",
+		"contexts.existing.grafana.password",
+		"contexts.existing.grafana.token",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := require.New(t)
+			input := config.Config{
+				Contexts: map[string]*config.Context{
+					"existing": {
+						Grafana: &config.GrafanaConfig{Server: "url"},
+					},
+				},
+			}
+
+			err := config.UnsetValue(&input, path)
+			req.Error(err)
+			req.ErrorContains(err, "unable to locate path")
+		})
+	}
 }

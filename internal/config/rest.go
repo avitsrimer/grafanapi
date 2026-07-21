@@ -42,14 +42,7 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 		}
 	}
 
-	// Authentication
-	switch {
-	case cfg.Grafana.APIToken != "":
-		rcfg.BearerToken = cfg.Grafana.APIToken
-	case cfg.Grafana.User != "":
-		rcfg.Username = cfg.Grafana.User
-		rcfg.Password = cfg.Grafana.Password
-	}
+	// Authentication: session-cookie injection is wired in Task 4 via rcfg.WrapTransport.
 
 	// Namespace
 	var namespace string

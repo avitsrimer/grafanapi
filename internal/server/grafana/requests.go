@@ -69,10 +69,7 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 	}
 }
 
-func AuthenticateRequest(config *config.GrafanaConfig, request *http.Request) {
-	if config.User != "" {
-		request.SetBasicAuth(config.User, config.Password)
-	} else if config.APIToken != "" {
-		request.Header.Set("Authorization", "Bearer "+config.APIToken)
-	}
+// AuthenticateRequest attaches the Grafana session cookie to request, when configured.
+// Session-cookie injection is wired in Task 4.
+func AuthenticateRequest(_ *config.GrafanaConfig, _ *http.Request) {
 }
