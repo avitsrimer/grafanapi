@@ -101,6 +101,12 @@ type GrafanaConfig struct {
 
 	// TLS contains TLS-related configuration settings.
 	TLS *TLS `json:"tls,omitempty" yaml:"tls,omitempty"`
+
+	// SessionCookie holds the resolved Grafana session cookie (see
+	// internal/config.CookieHeaderValue) for the current context. It is populated at config-load
+	// time from the platform Keychain (internal/keychain) and is never serialized to disk: no env
+	// tag (the cookie must never be a flag or env var) and json/yaml "-" tags.
+	SessionCookie string `json:"-" yaml:"-"`
 }
 
 func (grafana GrafanaConfig) validateNamespace(contextName string) error {

@@ -1,0 +1,110 @@
+package session_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/session"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestVerifyCookie_Success(t *testing.T) {
+	var (
+		pathCheck   string
+		cookieCheck string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pathCheck = r.URL.Path
+		cookieCheck = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "abc123",
+		},
+	}
+
+	err := session.VerifyCookie(t.Context(), gCtx)
+	require.NoError(t, err)
+	assert.Equal(t, "/api/user", pathCheck)
+	assert.Equal(t, config.CookieHeaderValue("abc123"), cookieCheck)
+}
+
+func TestVerifyCookie_Unauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "stale-cookie",
+		},
+	}
+
+	err := session.VerifyCookie(t.Context(), gCtx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, session.ErrUnauthorized)
+}
+
+func TestVerifyCookie_UnexpectedStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "abc123",
+		},
+	}
+
+	err := session.VerifyCookie(t.Context(), gCtx)
+	require.Error(t, err)
+	assert.False(t, session.IsUnauthorized(err))
+}
+
+func TestVerifyCookie_TLSSkipVerify(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "abc123",
+			TLS: &config.TLS{
+				Insecure: true,
+			},
+		},
+	}
+
+	err := session.VerifyCookie(t.Context(), gCtx)
+	require.NoError(t, err)
+}
+
+func TestVerifyCookie_NoGrafanaContext(t *testing.T) {
+	err := session.VerifyCookie(t.Context(), &config.Context{})
+	require.Error(t, err)
+}
+
+func TestVerifyCookie_InvalidServerAddress(t *testing.T) {
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        "://not-a-valid-url",
+			SessionCookie: "abc123",
+		},
+	}
+
+	err := session.VerifyCookie(t.Context(), gCtx)
+	require.Error(t, err)
+}

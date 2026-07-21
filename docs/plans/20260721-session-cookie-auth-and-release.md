@@ -298,21 +298,27 @@ grafanapi login update [--context NAME]
 - Create: `internal/session/session_test.go`
 - Create: `internal/session/errors_test.go`
 
-- [ ] In package `config`, add `SessionCookieName = "grafana_session"` and
+- [x] In package `config`, add `SessionCookieName = "grafana_session"` and
       `CookieHeaderValue(cookie string) string` → `"grafana_session=<cookie>"`. **Do not** import
       `internal/session` from `config` (would create `config`→`session`→`config`).
-- [ ] Implement `session.VerifyCookie` doing GET `/api/user` against `gCtx.Grafana.Server` (honoring
+- [x] Implement `session.VerifyCookie` doing GET `/api/user` against `gCtx.Grafana.Server` (honoring
       TLS) with the cookie header built via `config.CookieHeaderValue`; 200→nil, 401→`ErrUnauthorized`,
       other→wrapped error.
-- [ ] Implement `StaleSessionError` (with `Context`, `Parent`, and `Unwrap`) and `IsUnauthorized`
+- [x] Implement `StaleSessionError` (with `Context`, `Parent`, and `Unwrap`) and `IsUnauthorized`
       (covers `k8sapi.IsUnauthorized`, openapi 401, and `ErrUnauthorized`). **No**
       `TranslateUnauthorized` and **no** per-command re-verification (handled centrally in Task 8).
-- [ ] Reuse `internal/httputils` transport for the verify client (TLS-aware); no secrets logged.
-- [ ] Write tests for success cases: `config.CookieHeaderValue` formatting; `VerifyCookie` against an
+- [x] Reuse `internal/httputils` transport for the verify client (TLS-aware); no secrets logged.
+- [x] Write tests for success cases: `config.CookieHeaderValue` formatting; `VerifyCookie` against an
       `httptest.Server` returning 200 → nil; `IsUnauthorized` true/false table.
-- [ ] Write tests for error cases: `VerifyCookie` 401 → `ErrUnauthorized`; 500 → wrapped non-nil;
+- [x] Write tests for error cases: `VerifyCookie` 401 → `ErrUnauthorized`; 500 → wrapped non-nil;
       `StaleSessionError.Error()`/`Unwrap()` behavior.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
+- [x] ➕ `VerifyCookie(ctx, gCtx *config.Context)` reads `gCtx.Grafana.SessionCookie`, which did not
+      exist yet on `GrafanaConfig` (it was scheduled for Task 3). Added the field
+      (`SessionCookie string` with `json:"-" yaml:"-"`, no env tag) to `internal/config/types.go`
+      now as a minimal prerequisite so Task 2 compiles; the legacy `User`/`Password`/`APIToken`
+      field removal is left for Task 3 as planned — that task's "add SessionCookie" checkbox will
+      find the field already present.
 
 ### Task 3 — Remove decommissioned auth from config types & validation
 
