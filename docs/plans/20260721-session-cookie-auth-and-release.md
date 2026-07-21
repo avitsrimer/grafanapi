@@ -277,16 +277,16 @@ grafanapi login update [--context NAME]
 - Create: `internal/keychain/keychain_darwin_test.go` (`//go:build darwin`)
 - Create: `internal/keychain/keychain_other_test.go` (`//go:build !darwin`)
 
-- [ ] Define `Store` interface, `Service` const, `Account(name)`, `ErrNotFound`, `NewStore()`.
-- [ ] Implement darwin cgo `Set`/`Get`/`Delete` via `SecItemAdd`/`SecItemCopyMatching`/`SecItemDelete`
+- [x] Define `Store` interface, `Service` const, `Account(name)`, `ErrNotFound`, `NewStore()`.
+- [x] Implement darwin cgo `Set`/`Get`/`Delete` via `SecItemAdd`/`SecItemCopyMatching`/`SecItemDelete`
       (delete-then-add on `Set`; ACL-only, no accessibility attrs; map -25300 → `ErrNotFound`).
-- [ ] Implement `!darwin` stub returning `errors.New("keychain: unsupported platform")` for all ops.
-- [ ] Follow the repo Go symbol-ordering convention (consts, vars, funcs, types, methods).
-- [ ] Write tests for darwin success cases: Set→Get round-trips, Set overwrites, Delete removes,
+- [x] Implement `!darwin` stub returning `errors.New("keychain: unsupported platform")` for all ops.
+- [x] Follow the repo Go symbol-ordering convention (consts, vars, funcs, types, methods).
+- [x] Write tests for darwin success cases: Set→Get round-trips, Set overwrites, Delete removes,
       Get-after-Delete → `ErrNotFound`; use a test-only service/account and clean up in `t.Cleanup`.
-- [ ] Write tests for error cases: `!darwin` stub returns unsupported-platform for Set/Get/Delete;
+- [x] Write tests for error cases: `!darwin` stub returns unsupported-platform for Set/Get/Delete;
       darwin Get on a never-set account returns `ErrNotFound`.
-- [ ] Run tests — must pass before next task (also verify `GOOS=linux CGO_ENABLED=0 go build ./...`).
+- [x] Run tests — must pass before next task (also verify `GOOS=linux CGO_ENABLED=0 go build ./...`).
 
 ### Task 2 — Cookie header helper (package `config`) + `internal/session` (verify, error types)
 
