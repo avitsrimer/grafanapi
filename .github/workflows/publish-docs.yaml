@@ -1,6 +1,10 @@
 name: Publish documentation
 on:
   workflow_dispatch: ~
+  # GoReleaser (release.yaml) creates and publishes the GitHub release for `v*` tags; ship the
+  # matching documentation build once that release goes live.
+  release:
+    types: [published]
 
 permissions:
   contents: read

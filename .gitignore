@@ -4,6 +4,7 @@
 /vendor
 /localdata
 /resources
+/dist
 .idea
 .qodo
 
