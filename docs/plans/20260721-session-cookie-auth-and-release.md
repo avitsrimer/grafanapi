@@ -403,21 +403,28 @@ grafanapi login update [--context NAME]
 - Modify: `cmd/grafanapi/config/command.go` (`LoadConfig`/`LoadRESTConfig` resolve current context; `config check` resolves per-context)
 - Modify: `cmd/grafanapi/config/command_test.go`
 
-- [ ] Add `ResolveSessionCookie` that populates the current context's `SessionCookie` from the
+- [x] Add `ResolveSessionCookie` that populates the current context's `SessionCookie` from the
       Keychain (`ErrNotFound` → leave empty, no error).
-- [ ] **Ordering (critical):** `loader.go` applies overrides in slice order. The
+- [x] **Ordering (critical):** `loader.go` applies overrides in slice order. The
       `ResolveSessionCookie` override MUST run **before** the validator override in `LoadConfig`
       (because `Validate` → `validateNamespace` → `DiscoverStackID` needs the cookie), and in
       `LoadRESTConfig` the cookie must be resolved **before** `cfg.GetCurrentContext().ToRESTConfig(ctx)`.
-- [ ] Wire resolution into `LoadConfig`/`LoadRESTConfig`; in `config check`, resolve each context's
+- [x] Wire resolution into `LoadConfig`/`LoadRESTConfig`; in `config check`, resolve each context's
       cookie before its connectivity/version probes.
-- [ ] Inject the `keychain.Store` (use `keychain.NewStore()`; allow a test seam via a package-level
+- [x] Inject the `keychain.Store` (use `keychain.NewStore()`; allow a test seam via a package-level
       var or parameter so tests pass a fake store).
-- [ ] Write tests for success cases: fake store returns a cookie → `SessionCookie` populated and the
+- [x] Write tests for success cases: fake store returns a cookie → `SessionCookie` populated and the
       resulting REST/openapi clients carry the header.
-- [ ] Write tests for error cases: fake store returns `ErrNotFound` → load succeeds with empty
+- [x] Write tests for error cases: fake store returns `ErrNotFound` → load succeeds with empty
       cookie; a real store error surfaces as a load error.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
+- [x] ➕ `loadConfigTolerant` had a latent ordering bug independent of this task: the `--context`
+      flag override ran *after* `extraOverrides` (so `LoadConfig`'s validator, and now
+      `ResolveSessionCookie`, validated/resolved the file's `current-context` instead of the
+      context requested via `--context`). Fixed by moving the `--context` override immediately
+      after the env-var override and before `extraOverrides`, so both validation and credential
+      resolution act on the context the user actually asked for. Covered by
+      `Test_LoadConfig_resolvesCookieForFlagSelectedContext`.
 
 ### Task 6 — `login` command with prompter and validate-before-persist
 

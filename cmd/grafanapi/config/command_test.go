@@ -1,11 +1,51 @@
 package config_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
+	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/testutils"
+	"github.com/stretchr/testify/require"
 )
+
+// fakeKeychainStore is an in-memory keychain.Store used to test credential resolution wired into
+// Options.LoadConfig/LoadRESTConfig without touching the real platform Keychain.
+type fakeKeychainStore struct {
+	cookies  map[string]string
+	errOnGet error
+}
+
+func (f *fakeKeychainStore) Set(account, secret string) error {
+	if f.cookies == nil {
+		f.cookies = map[string]string{}
+	}
+
+	f.cookies[account] = secret
+
+	return nil
+}
+
+func (f *fakeKeychainStore) Get(account string) (string, error) {
+	if f.errOnGet != nil {
+		return "", f.errOnGet
+	}
+
+	cookie, ok := f.cookies[account]
+	if !ok {
+		return "", keychain.ErrNotFound
+	}
+
+	return cookie, nil
+}
+
+func (f *fakeKeychainStore) Delete(account string) error {
+	delete(f.cookies, account)
+
+	return nil
+}
 
 func Test_CurrentContextCommand(t *testing.T) {
 	testCase := testutils.CommandTestCase{
@@ -297,6 +337,144 @@ func Test_ViewCommand_withEnvVar(t *testing.T) {
 		},
 	}
 
+	testCase.Run(t)
+}
+
+func Test_LoadConfig_resolvesSessionCookieFromKeychain(t *testing.T) {
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{cookies: map[string]string{
+		keychain.Account("dev"): "cookie-value",
+	}}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	opts := &config.Options{ConfigFile: configFile}
+	loaded, err := opts.LoadConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "cookie-value", loaded.GetCurrentContext().Grafana.SessionCookie)
+}
+
+func Test_LoadConfig_missingKeychainItemLeavesCookieEmpty(t *testing.T) {
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	opts := &config.Options{ConfigFile: configFile}
+	loaded, err := opts.LoadConfig(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, loaded.GetCurrentContext().Grafana.SessionCookie)
+}
+
+func Test_LoadConfig_keychainErrorSurfacesAsLoadError(t *testing.T) {
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{errOnGet: errors.New("keychain: boom")}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	opts := &config.Options{ConfigFile: configFile}
+	_, err := opts.LoadConfig(context.Background())
+	require.ErrorContains(t, err, "keychain: boom")
+}
+
+func Test_LoadConfig_resolvesCookieForFlagSelectedContext(t *testing.T) {
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99
+  staging:
+    grafana:
+      server: https://grafana-staging.example
+      org-id: 100`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{cookies: map[string]string{
+		keychain.Account("staging"): "staging-cookie",
+	}}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	// --context selects "staging" even though "dev" is the file's current-context; the resolved
+	// cookie (and validation) must apply to "staging", not "dev".
+	opts := &config.Options{ConfigFile: configFile, Context: "staging"}
+	loaded, err := opts.LoadConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "staging", loaded.CurrentContext)
+	require.Equal(t, "staging-cookie", loaded.GetCurrentContext().Grafana.SessionCookie)
+}
+
+func Test_LoadRESTConfig_resolvesSessionCookieFromKeychain(t *testing.T) {
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{cookies: map[string]string{
+		keychain.Account("dev"): "cookie-value",
+	}}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	opts := &config.Options{ConfigFile: configFile}
+	restCfg, err := opts.LoadRESTConfig(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, restCfg.WrapTransport)
+}
+
+func Test_CheckCommand_reportsKeychainErrorPerContext(t *testing.T) {
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{errOnGet: errors.New("keychain: boom")}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Session cookie"),
+			testutils.CommandOutputContains("keychain: boom"),
+		},
+	}
 	testCase.Run(t)
 }
 

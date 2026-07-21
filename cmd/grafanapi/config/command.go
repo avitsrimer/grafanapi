@@ -12,11 +12,29 @@ import (
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/grafana"
+	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/resources/discovery"
 	"github.com/grafana/grafanapi/internal/secrets"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+// keychainStore resolves the Grafana session cookie from the platform Keychain during config
+// loading (see Options.LoadConfig, Options.LoadRESTConfig, and checkCmd). It is a package-level
+// var, defaulting to the real platform store, so tests can substitute a fake keychain.Store via
+// SetKeychainStore instead of touching the actual Keychain.
+//
+//nolint:gochecknoglobals // test seam for the platform Keychain; see SetKeychainStore.
+var keychainStore keychain.Store = keychain.NewStore()
+
+// SetKeychainStore overrides the keychain.Store used for session-cookie resolution. It exists for
+// tests; it returns a function that restores the previously configured store.
+func SetKeychainStore(store keychain.Store) func() {
+	previous := keychainStore
+	keychainStore = store
+
+	return func() { keychainStore = previous }
+}
 
 type Options struct {
 	ConfigFile string
@@ -35,7 +53,7 @@ func (opts *Options) BindFlags(flags *pflag.FlagSet) {
 // This function should only be used by config-related commands, to allow the
 // user to iterate on the configuration until it becomes valid.
 func (opts *Options) loadConfigTolerant(ctx context.Context, extraOverrides ...config.Override) (config.Config, error) {
-	overrides := append([]config.Override{
+	overrides := []config.Override{
 		// If Grafana-related env variables are set, use them to configure the
 		// current context and Grafana config.
 		func(cfg *config.Config) error {
@@ -59,9 +77,11 @@ func (opts *Options) loadConfigTolerant(ctx context.Context, extraOverrides ...c
 
 			return nil
 		},
-	}, extraOverrides...)
+	}
 
-	// The current context is being overridden by a flag
+	// The current context is being overridden by a flag. This must happen before
+	// extraOverrides (credential resolution, validation, ...) so those act on the context the
+	// user actually asked for, not the one recorded in the config file.
 	if opts.Context != "" {
 		overrides = append(overrides, func(cfg *config.Config) error {
 			if !cfg.HasContext(opts.Context) {
@@ -73,10 +93,17 @@ func (opts *Options) loadConfigTolerant(ctx context.Context, extraOverrides ...c
 		})
 	}
 
+	overrides = append(overrides, extraOverrides...)
+
 	return config.Load(ctx, opts.configSource(), overrides...)
 }
 
-// LoadConfig loads the configuration file (default, or explicitly set via flags) and validates it.
+// LoadConfig loads the configuration file (default, or explicitly set via flags), resolves the
+// current context's session cookie from the Keychain, and validates it.
+//
+// Credential resolution runs before validation: Context.Validate ultimately calls
+// GrafanaConfig.validateNamespace, which discovers the stack ID via an authenticated /bootdata
+// request, so the cookie must already be populated by the time validation runs.
 func (opts *Options) LoadConfig(ctx context.Context) (config.Config, error) {
 	validator := func(cfg *config.Config) error {
 		// Ensure that the current context actually exists.
@@ -87,10 +114,11 @@ func (opts *Options) LoadConfig(ctx context.Context) (config.Config, error) {
 		return cfg.GetCurrentContext().Validate()
 	}
 
-	return opts.loadConfigTolerant(ctx, validator)
+	return opts.loadConfigTolerant(ctx, config.ResolveSessionCookie(keychainStore), validator)
 }
 
-// LoadRESTConfig loads the configuration file and constructs a REST config from it.
+// LoadRESTConfig loads the configuration file (resolving the session cookie via LoadConfig) and
+// constructs a REST config from it.
 func (opts *Options) LoadRESTConfig(ctx context.Context) (config.NamespacedRESTConfig, error) {
 	cfg, err := opts.LoadConfig(ctx)
 	if err != nil {
@@ -338,6 +366,15 @@ func checkContext(cmd *cobra.Command, gCtx *config.Context) {
 
 	cmd.Println(io.Yellow(title))
 	cmd.Println(io.Yellow(strings.Repeat("=", titleLen)))
+
+	// Resolve this context's session cookie before validating/probing it: validation may trigger
+	// stack-ID discovery (an authenticated /bootdata request), and the connectivity/version
+	// probes below always need the cookie. Unlike Options.LoadConfig (which only resolves the
+	// current context via an Override), "config check" inspects every context, so it calls the
+	// per-context helper directly.
+	if err := config.ResolveContextSessionCookie(keychainStore, gCtx); err != nil {
+		io.Warning(stdout, "Session cookie: %s\n", io.Yellow(summarizeError(err)))
+	}
 
 	if err := gCtx.Validate(); err != nil {
 		io.Error(stdout, "Configuration: %s", io.Red(summarizeError(err)))
