@@ -4,13 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 
+	"github.com/go-openapi/runtime"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/resources"
+	"github.com/grafana/grafanapi/internal/session"
 	k8sapi "k8s.io/apimachinery/pkg/api/errors"
 )
+
+// staleSessionSuggestion is shown whenever the Grafana session cookie is rejected or missing,
+// pointing the user at the command that re-establishes it.
+const staleSessionSuggestion = "Run: grafanapi login update"
 
 func ErrorToDetailedError(err error) *DetailedError {
 	var converted bool
@@ -25,7 +32,8 @@ func ErrorToDetailedError(err error) *DetailedError {
 		convertFSErrors,        // FS-related
 		convertResourcesErrors, // Resources-related
 		convertNetworkErrors,   // Network-related errors
-		convertAPIErrors,       // API-related errors
+		convertSessionErrors,   // Stale/unauthorized Grafana session (openapi 401, StaleSessionError)
+		convertAPIErrors,       // API-related errors (k8s dynamic-client StatusError)
 	}
 
 	for _, converter := range errorConverters {
@@ -107,8 +115,9 @@ func convertAPIErrors(err error) (*DetailedError, bool) {
 	code := statusErr.Status().Code
 
 	switch {
-	case k8sapi.IsUnauthorized(statusErr),
-		k8sapi.IsForbidden(statusErr):
+	case k8sapi.IsUnauthorized(statusErr):
+		return staleSessionError(err), true
+	case k8sapi.IsForbidden(statusErr):
 		return &DetailedError{
 			Parent:  err,
 			Summary: fmt.Sprintf("%s - code %d", reason, code),
@@ -131,6 +140,40 @@ func convertAPIErrors(err error) (*DetailedError, bool) {
 		Parent:  err,
 		Summary: fmt.Sprintf("API error: %s - code %d", reason, code),
 	}, true
+}
+
+// convertSessionErrors handles Grafana session-cookie authentication failures that do not surface
+// as a k8s StatusError: a *session.StaleSessionError produced by login/login-update's own
+// validation path, and a 401 from the grafana-openapi-client-go transport (e.g. `config check` /
+// grafana.GetVersion). Both render as the same stale-session message with exit code 2. A raw k8s
+// 401 is handled by convertAPIErrors instead, since it needs the *k8sapi.StatusError type assertion
+// this function does not perform.
+func convertSessionErrors(err error) (*DetailedError, bool) {
+	staleErr := &session.StaleSessionError{}
+	if errors.As(err, &staleErr) {
+		return staleSessionError(err), true
+	}
+
+	apiErr := &runtime.APIError{}
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusUnauthorized {
+		return staleSessionError(err), true
+	}
+
+	return nil, false
+}
+
+// staleSessionError builds the user-facing DetailedError for any Grafana session-cookie
+// authentication failure (stale/expired/missing cookie), regardless of which transport surfaced
+// the underlying 401.
+func staleSessionError(err error) *DetailedError {
+	exitCode := 2
+
+	return &DetailedError{
+		Parent:      err,
+		Summary:     "Grafana session is stale or unauthorized",
+		Suggestions: []string{staleSessionSuggestion},
+		ExitCode:    &exitCode,
+	}
 }
 
 func convertResourcesErrors(err error) (*DetailedError, bool) {

@@ -491,19 +491,26 @@ Cobra, which bubbles to `main.handleError` → `fail.ErrorToDetailedError`. So a
 `convertAPIErrors`. `serve.go` keeps its existing proxy `401`→HTML handling untouched. Matches the
 jcli reference: 401 maps directly to an auth error with no re-verification round-trip.
 
-- [ ] In `convertAPIErrors`, extend the existing `k8sapi.IsUnauthorized(statusErr)` branch to emit
+- [x] In `convertAPIErrors`, extend the existing `k8sapi.IsUnauthorized(statusErr)` branch to emit
       `Summary:"Grafana session is stale or unauthorized"`, `Suggestions:["Run: grafanapi login
       update"]`, and `ExitCode: ptr(2)` (keep `IsForbidden` as its own permission message).
-- [ ] Add handling for the openapi-path 401 (config check / `grafana.GetVersion`) — detect the
+- [x] Add handling for the openapi-path 401 (config check / `grafana.GetVersion`) — detect the
       runtime `*runtime.APIError`/401 shape via `session.IsUnauthorized` and render the same
       stale-session `DetailedError`.
-- [ ] Add a `*session.StaleSessionError` branch (produced only by `login`/`login update` validation)
+- [x] Add a `*session.StaleSessionError` branch (produced only by `login`/`login update` validation)
       rendering the same message + exit code 2.
-- [ ] Write tests for success cases: non-401 errors (404/forbidden/network) pass through with their
+- [x] Write tests for success cases: non-401 errors (404/forbidden/network) pass through with their
       existing messages unchanged.
-- [ ] Write tests for error cases: a simulated k8s 401 `StatusError` → `DetailedError` with the
+- [x] Write tests for error cases: a simulated k8s 401 `StatusError` → `DetailedError` with the
       `login update` suggestion and exit code 2; an openapi 401 and a `*StaleSessionError` render the same.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
+- [x] ➕ Added a new unexported `convertSessionErrors` converter (registered in the
+      `errorConverters` slice ahead of `convertAPIErrors`) rather than folding the openapi/
+      `StaleSessionError` cases into `convertAPIErrors` itself: `convertAPIErrors` type-asserts on
+      `*k8sapi.StatusError` specifically, which a `*runtime.APIError` or `*session.StaleSessionError`
+      never satisfies, so a second converter function (not an additional branch) was the natural
+      fit. Both converters delegate to a shared unexported `staleSessionError(err)` helper to keep
+      the message/suggestion/exit-code triple in one place.
 
 ### Task 9 — Config/test fixture & redaction cleanup
 
