@@ -121,11 +121,19 @@ import "C"
 
 import (
 	"fmt"
+	"time"
 	"unsafe"
 )
 
 // errSecItemNotFound mirrors the Security framework status for a missing item.
 const errSecItemNotFound = -25300
+
+// keychainTimeout bounds how long a single Keychain operation is allowed to block before we give
+// up and report a timeout instead of hanging forever. It needs to be long enough for a real user
+// in an interactive session to notice and click "Always Allow" on the standard Keychain prompt,
+// but short enough that a non-interactive run (CI, a background job, an SSH session with no
+// display) fails fast instead of hanging indefinitely.
+const keychainTimeout = 15 * time.Second
 
 // newStore returns the cgo-backed darwin Store.
 //
@@ -146,59 +154,113 @@ type darwinStore struct{}
 // keychain. It does not prompt. It is atomic (update-or-add at the cgo layer, no
 // delete-then-add): a failing Set leaves any previously stored secret for account intact.
 func (darwinStore) Set(account, secret string) error {
-	cSvc := C.CString(Service)
-	defer C.free(unsafe.Pointer(cSvc))
-	cAcct := C.CString(account)
-	defer C.free(unsafe.Pointer(cAcct))
+	return runWithTimeout(keychainTimeout, func() error {
+		cSvc := C.CString(Service)
+		defer C.free(unsafe.Pointer(cSvc))
+		cAcct := C.CString(account)
+		defer C.free(unsafe.Pointer(cAcct))
 
-	val := []byte(secret)
-	var valPtr unsafe.Pointer
-	if len(val) > 0 {
-		valPtr = unsafe.Pointer(&val[0])
-	}
-	status := C.setItem(cSvc, cAcct, valPtr, C.int(len(val)))
-	if int(status) != 0 {
-		return fmt.Errorf("keychain set for account %q failed: OSStatus %d", account, int(status))
-	}
-	return nil
+		val := []byte(secret)
+		var valPtr unsafe.Pointer
+		if len(val) > 0 {
+			valPtr = unsafe.Pointer(&val[0])
+		}
+		status := C.setItem(cSvc, cAcct, valPtr, C.int(len(val)))
+		if int(status) != 0 {
+			return fmt.Errorf("keychain set for account %q failed: OSStatus %d", account, int(status))
+		}
+		return nil
+	})
 }
 
 // Get reads the secret for account. The ad-hoc code identity of the binary that created the item
 // is trusted by its ACL and reads it back silently; a binary with a different code identity hits
 // the standard keychain "Allow / Always Allow" prompt.
 func (darwinStore) Get(account string) (string, error) {
-	cSvc := C.CString(Service)
-	defer C.free(unsafe.Pointer(cSvc))
-	cAcct := C.CString(account)
-	defer C.free(unsafe.Pointer(cAcct))
+	return withTimeout(keychainTimeout, func() (string, error) {
+		cSvc := C.CString(Service)
+		defer C.free(unsafe.Pointer(cSvc))
+		cAcct := C.CString(account)
+		defer C.free(unsafe.Pointer(cAcct))
 
-	var data unsafe.Pointer
-	var n C.int
-	status := C.getItem(cSvc, cAcct, &data, &n) //nolint:gocritic // dupSubExpr false positive on cgo-generated call
-	if int(status) != 0 {
-		if int(status) == errSecItemNotFound {
+		var data unsafe.Pointer
+		var n C.int
+		status := C.getItem(cSvc, cAcct, &data, &n) //nolint:gocritic // dupSubExpr false positive on cgo-generated call
+		if int(status) != 0 {
+			if int(status) == errSecItemNotFound {
+				return "", fmt.Errorf("keychain get for account %q: %w", account, ErrNotFound)
+			}
+			return "", fmt.Errorf("keychain get for account %q failed: OSStatus %d", account, int(status))
+		}
+		if data == nil {
 			return "", fmt.Errorf("keychain get for account %q: %w", account, ErrNotFound)
 		}
-		return "", fmt.Errorf("keychain get for account %q failed: OSStatus %d", account, int(status))
-	}
-	if data == nil {
-		return "", fmt.Errorf("keychain get for account %q: %w", account, ErrNotFound)
-	}
-	defer C.free(data)
-	secret := C.GoStringN((*C.char)(data), n)
-	return secret, nil
+		defer C.free(data)
+		secret := C.GoStringN((*C.char)(data), n)
+		return secret, nil
+	})
 }
 
 // Delete removes the item for account. A missing item is reported as success.
 func (darwinStore) Delete(account string) error {
-	cSvc := C.CString(Service)
-	defer C.free(unsafe.Pointer(cSvc))
-	cAcct := C.CString(account)
-	defer C.free(unsafe.Pointer(cAcct))
+	return runWithTimeout(keychainTimeout, func() error {
+		cSvc := C.CString(Service)
+		defer C.free(unsafe.Pointer(cSvc))
+		cAcct := C.CString(account)
+		defer C.free(unsafe.Pointer(cAcct))
 
-	status := C.deleteItem(cSvc, cAcct)
-	if int(status) != 0 && int(status) != errSecItemNotFound {
-		return fmt.Errorf("keychain delete for account %q failed: OSStatus %d", account, int(status))
+		status := C.deleteItem(cSvc, cAcct)
+		if int(status) != 0 && int(status) != errSecItemNotFound {
+			return fmt.Errorf("keychain delete for account %q failed: OSStatus %d", account, int(status))
+		}
+		return nil
+	})
+}
+
+// withTimeout runs fn on a separate goroutine and waits at most timeout for it to return. It
+// exists because Security.framework calls (SecItemCopyMatching and friends, invoked from Set,
+// Get, and Delete above) can block indefinitely inside securityd: if the stored item's ACL does
+// not trust the calling binary — for example after a rebuild changes the process's ad-hoc code
+// signature — securityd waits on an authorization prompt that never appears in a non-interactive
+// session, and there is no cgo-level way to cancel an in-flight call. On timeout, withTimeout
+// returns a descriptive error and abandons the goroutine; that goroutine (and the cgo call/OS
+// thread it is parked on) leaks for the remaining lifetime of the process. That is an accepted
+// tradeoff here: grafanapi is a short-lived CLI, so a leaked goroutine simply exits with the
+// process rather than accumulating over time as it would in a long-running server.
+//
+// T is deliberately unconstrained (any) so this one helper covers both Get's string result and
+// the error-only Set/Delete (via runWithTimeout below); ireturn's "generic interface" warning is a
+// false positive here since most instantiations return concrete types, not interfaces.
+//
+//nolint:ireturn
+func withTimeout[T any](timeout time.Duration, fn func() (T, error)) (T, error) {
+	type result struct {
+		val T
+		err error
 	}
-	return nil
+
+	ch := make(chan result, 1)
+	go func() {
+		val, err := fn()
+		ch <- result{val: val, err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.val, r.err
+	case <-time.After(timeout):
+		var zero T
+		return zero, fmt.Errorf(
+			"keychain access timed out after %s: macOS may be waiting for a Keychain authorization "+
+				"dialog; run the command from an interactive terminal and click 'Always Allow', or "+
+				"delete the stale item via Keychain Access (service %q)", timeout, Service)
+	}
+}
+
+// runWithTimeout is withTimeout for operations (Set, Delete) that only ever return an error.
+func runWithTimeout(timeout time.Duration, fn func() error) error {
+	_, err := withTimeout(timeout, func() (struct{}, error) {
+		return struct{}{}, fn()
+	})
+	return err
 }
