@@ -621,14 +621,37 @@ should not hunt for redactor logic to edit.
 **Files:**
 - Modify: none (verification only; fix regressions in-place if found)
 
-- [ ] `make tests` (race) passes across all packages.
-- [ ] `make build` produces `./bin/grafanapi` on darwin/arm64 with `CGO_ENABLED=1`.
-- [ ] `make lint` passes (golangci-lint clean, including cgo files and build-tagged stubs).
-- [ ] `GOOS=linux CGO_ENABLED=0 go build ./... && go vet ./...` passes (stub cross-build).
-- [ ] `make reference-drift` passes after regenerating (`make docs` / `make reference`) — no
-      uncommitted drift in generated reference docs.
-- [ ] `goreleaser check` passes.
-- [ ] Run full suite once more — must pass before documentation task.
+- [x] `make tests` (race) passes across all packages. `devbox` is not installed on this machine;
+      ran `go test -race ./...` directly — all packages pass (or report `[no test files]`).
+- [x] `make build` produces `./bin/grafanapi` on darwin/arm64 with `CGO_ENABLED=1`. Ran the
+      underlying `go build` command from the Makefile's `build` target directly (with the same
+      `-ldflags` version injection); produced a Mach-O 64-bit arm64 executable that reports
+      `grafanapi version SNAPSHOT built from <commit> on <date>`.
+- [x] `make lint` passes (golangci-lint clean, including cgo files and build-tagged stubs). Ran
+      `golangci-lint run -c .golangci.yaml` directly (devbox unavailable): 14 pre-existing findings
+      (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck) remain, none introduced by this branch —
+      verified by checking out `main` into a scratch worktree and running the identical lint
+      command there: same 14 findings at the same locations (only the package prefix differs,
+      `cmd/grafanactl` on `main` vs. `cmd/grafanapi` on this branch, from the pre-existing rename).
+      No new findings on this branch's changed files.
+- [x] `GOOS=linux CGO_ENABLED=0 go build ./... && go vet ./...` passes (stub cross-build). Ran
+      directly; both the cross-build and cross-vet succeed, confirming the `!darwin` keychain stub
+      keeps linux builds green.
+- [x] `make reference-drift` passes after regenerating (`make docs` / `make reference`) — no
+      uncommitted drift in generated reference docs. Ran the three generators directly
+      (`scripts/cmd-reference`, `scripts/env-vars-reference`, `scripts/config-reference`, as
+      `make reference-drift` wraps): CLI reference picked up the new `login`/`login update`
+      commands (new files `docs/reference/cli/grafanapi_login.md`,
+      `docs/reference/cli/grafanapi_login_update.md`, and an updated `grafanapi.md` SEE ALSO
+      section); the environment-variables reference dropped the removed
+      `GRAFANA_TOKEN`/`GRAFANA_USER`/`GRAFANA_PASSWORD` entries; the configuration reference
+      dropped the removed `user`/`password`/`token` fields. This drift was expected (accumulated
+      since Tasks 3/6/7 changed the underlying command/config surface without regenerating docs);
+      regenerated files are included in this task's commit.
+- [x] `goreleaser check` passes. Ran `goreleaser check` (Homebrew-installed goreleaser 2.16.0,
+      since devbox is unavailable) against `.goreleaser.yaml` — validates cleanly.
+- [x] Run full suite once more — must pass before documentation task. Re-ran
+      `go test -race ./...` after regenerating the reference docs — still all green.
 
 ### Task 12 — Update documentation
 

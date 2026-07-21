@@ -10,17 +10,6 @@ contexts:
       # Server is the address of the Grafana server (https://hostname:port/path).
       # Required.
       server: string
-      # User to authenticate as with basic authentication.
-      # Optional.
-      user: string
-      # Password to use when using with basic authentication.
-      # Optional.
-      password: string
-      # APIToken is a service account token.
-      # See https://grafana.com/docs/grafana/latest/administration/service-accounts/#add-a-token-to-a-service-account-in-grafana
-      # Note: if defined, the API Token takes precedence over basic auth credentials.
-      # Optional.
-      token: string
       # OrgID specifies the organization targeted by this config.
       # Note: required when targeting an on-prem Grafana instance.
       # See StackID for Grafana Cloud instances.
@@ -68,6 +57,7 @@ contexts:
           - string
           - ...
           
+      
 # CurrentContext is the name of the context currently in use.
 current-context: string
 ```

@@ -13,5 +13,6 @@
 ### SEE ALSO
 
 * [grafanapi config](grafanapi_config.md)	 - View or manipulate configuration settings
+* [grafanapi login](grafanapi_login.md)	 - Authenticate to a Grafana instance using a session cookie
 * [grafanapi resources](grafanapi_resources.md)	 - Manipulate Grafana resources
 
