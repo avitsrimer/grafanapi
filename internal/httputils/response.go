@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"github.com/grafana/grafana-app-sdk/logging"
-	"github.com/grafana/grafanactl/internal/logs"
+	"github.com/grafana/grafanapi/internal/logs"
 )
 
 func Error(r *http.Request, w http.ResponseWriter, msg string, err error, code int) {

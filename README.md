@@ -1,11 +1,9 @@
 # Grafana CLI
 
-> [!WARNING]
-> **`grafanactl` is being deprecated.** We're bringing all our learnings and experience into the new, improved CLI tool [gcx](https://github.com/grafana/gcx). This repository will be archived on June 1st, 2026.
->
-> To migrate from `grafanactl` to `gcx`, search-and-replace `grafanactl` with `gcx`. For `grafanactl resources serve`, use `gcx dev serve` instead.
+> [!NOTE]
+> **This project is a fork of [grafana/grafanactl](https://github.com/grafana/grafanactl), renamed to `grafanapi`.** All credit for the original design and implementation goes to the Grafana Labs team and contributors. This fork is maintained independently of the upstream project.
 
-Grafana CLI (_grafanactl_) is a command-line tool designed to simplify interaction with Grafana instances.
+Grafana CLI (_grafanapi_) is a command-line tool designed to simplify interaction with Grafana instances.
 
 It enables users to authenticate, manage multiple environments, and perform administrative tasks through Grafana's REST API — all from the terminal.
 
@@ -13,7 +11,7 @@ Whether you're automating workflows in CI/CD pipelines or switching between stag
 
 ## Documentation
 
-See [the documentation](https://grafana.github.io/grafanactl/) to learn how to
+See [the documentation](https://grafana.github.io/grafanapi/) to learn how to
 install, configure and use the Grafana CLI.
 
 ## Maturity

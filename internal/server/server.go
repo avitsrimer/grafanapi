@@ -16,13 +16,13 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
 	"github.com/grafana/grafana-app-sdk/logging"
-	"github.com/grafana/grafanactl/internal/config"
-	"github.com/grafana/grafanactl/internal/httputils"
-	"github.com/grafana/grafanactl/internal/logs"
-	"github.com/grafana/grafanactl/internal/resources"
-	"github.com/grafana/grafanactl/internal/server/grafana"
-	"github.com/grafana/grafanactl/internal/server/handlers"
-	"github.com/grafana/grafanactl/internal/server/livereload"
+	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/httputils"
+	"github.com/grafana/grafanapi/internal/logs"
+	"github.com/grafana/grafanapi/internal/resources"
+	"github.com/grafana/grafanapi/internal/server/grafana"
+	"github.com/grafana/grafanapi/internal/server/handlers"
+	"github.com/grafana/grafanapi/internal/server/livereload"
 )
 
 type Config struct {
@@ -132,8 +132,8 @@ func (s *Server) Start(ctx context.Context) error {
 	})
 
 	r.Get("/", s.rootHandler)
-	r.Get("/grafanactl/{group}/{version}/{kind}/{name}", s.iframeHandler)
-	r.Handle("/grafanactl/assets/*", http.StripPrefix("/grafanactl/assets/", http.FileServer(http.FS(assetsFS))))
+	r.Get("/grafanapi/{group}/{version}/{kind}/{name}", s.iframeHandler)
+	r.Handle("/grafanapi/assets/*", http.StripPrefix("/grafanapi/assets/", http.FileServer(http.FS(assetsFS))))
 
 	//nolint:gosec
 	return http.ListenAndServe(fmt.Sprintf("%s:%d", s.config.ListenAddr, s.config.Port), r)

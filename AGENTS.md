@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**grafanactl** is a command-line tool for managing Grafana resources through the REST API. It supports Grafana 12 and above, enabling users to authenticate, manage multiple environments, and perform administrative tasks from the terminal. The tool is particularly useful for dashboards-as-code workflows and CI/CD automation.
+**grafanapi** is a command-line tool for managing Grafana resources through the REST API. It supports Grafana 12 and above, enabling users to authenticate, manage multiple environments, and perform administrative tasks from the terminal. The tool is particularly useful for dashboards-as-code workflows and CI/CD automation.
 
 ## Development Environment
 
@@ -26,7 +26,7 @@ devbox add go@1.24
 ### Build and Test
 
 ```bash
-# Build the binary to bin/grafanactl
+# Build the binary to bin/grafanapi
 make build
 
 # Run all tests
@@ -81,7 +81,7 @@ make clean
 
 ### Command Structure
 
-grafanactl follows the Cobra command pattern with two main command groups:
+grafanapi follows the Cobra command pattern with two main command groups:
 
 1. **config**: Manage configuration contexts for connecting to Grafana instances
    - `config set`: Set configuration values
@@ -104,7 +104,7 @@ grafanactl follows the Cobra command pattern with two main command groups:
 
 ### Core Packages
 
-**cmd/grafanactl/** - CLI command implementations
+**cmd/grafanapi/** - CLI command implementations
 - `root/`: Root command setup with logging and flags
 - `config/`: Configuration management commands
 - `resources/`: Resource manipulation commands
@@ -175,19 +175,19 @@ grafanactl follows the Cobra command pattern with two main command groups:
 
 ### Key Design Patterns
 
-1. **Context-Based Configuration**: Like kubectl, grafanactl uses named contexts to manage multiple Grafana instances. Each context contains server URL, authentication, and namespace (org-id or stack-id).
+1. **Context-Based Configuration**: Like kubectl, grafanapi uses named contexts to manage multiple Grafana instances. Each context contains server URL, authentication, and namespace (org-id or stack-id).
 
 2. **Kubernetes-Style Resources**: Resources are represented as unstructured objects following Kubernetes conventions (apiVersion, kind, metadata, spec). This enables compatibility with k8s tooling and patterns.
 
-3. **Resource Manager Metadata**: Tracks which tool manages each resource (grafanactl, UI, etc.) to prevent accidental overwrites. Only resources managed by grafanactl can be modified via grafanactl.
+3. **Resource Manager Metadata**: Tracks which tool manages each resource (grafanapi, UI, etc.) to prevent accidental overwrites. Only resources managed by grafanapi can be modified via grafanapi.
 
-4. **Three-Way Merge**: When pushing resources, grafanactl performs server-side apply semantics similar to kubectl, allowing multiple managers to coexist.
+4. **Three-Way Merge**: When pushing resources, grafanapi performs server-side apply semantics similar to kubectl, allowing multiple managers to coexist.
 
 5. **Dashboards as Code**: The `serve` command supports script-based dashboard generation with live preview, enabling code-first workflows with SDKs like grafana-foundation-sdk.
 
 ## Configuration
 
-Configuration is stored in `$XDG_CONFIG_HOME/grafanactl/config.yaml` (typically `~/.config/grafanactl/config.yaml`).
+Configuration is stored in `$XDG_CONFIG_HOME/grafanapi/config.yaml` (typically `~/.config/grafanapi/config.yaml`).
 
 ### Environment Variables
 
@@ -235,7 +235,7 @@ Flags set in Makefile via `-ldflags` on `main.version`, `main.commit`, `main.dat
 
 ### System Overview
 
-**grafanactl** is a ~12,500 line Go codebase that provides a kubectl-like interface for managing Grafana resources. It bridges Grafana's REST API with Kubernetes-style resource management patterns, enabling Infrastructure-as-Code workflows for Grafana dashboards, folders, and other resources.
+**grafanapi** is a ~12,500 line Go codebase that provides a kubectl-like interface for managing Grafana resources. It bridges Grafana's REST API with Kubernetes-style resource management patterns, enabling Infrastructure-as-Code workflows for Grafana dashboards, folders, and other resources.
 
 The tool's architecture is heavily influenced by Kubernetes client patterns, using k8s.io/client-go and k8s.io/apimachinery libraries to provide a consistent, familiar interface for developers already comfortable with kubectl.
 
@@ -244,7 +244,7 @@ The tool's architecture is heavily influenced by Kubernetes client patterns, usi
 The codebase follows a clean layered architecture:
 
 ```
-CLI Layer (cmd/grafanactl/)
+CLI Layer (cmd/grafanapi/)
     ↓
 Business Logic Layer (internal/resources/, internal/config/)
     ↓
@@ -263,7 +263,7 @@ The `Resource` type is the fundamental building block, wrapping `k8s.io/apimachi
 
 - **GrafanaMetaAccessor**: Provides typed access to Grafana-specific metadata (manager, source info)
 - **Source Tracking**: Each resource tracks its origin (file path, format) for round-tripping
-- **Manager Metadata**: Resources carry information about which tool manages them (grafanactl vs UI)
+- **Manager Metadata**: Resources carry information about which tool manages them (grafanapi vs UI)
 - **Collection Operations**: The `Resources` type provides filtering, grouping, and concurrent operations
 
 #### 2. Discovery System (`internal/resources/discovery/`)
@@ -313,7 +313,7 @@ Wraps k8s.io/client-go's dynamic client for Grafana:
    - Deduplicate by GVK+name
 
 3. Process resources
-   - ManagerFieldsAppender: Add grafanactl manager metadata
+   - ManagerFieldsAppender: Add grafanapi manager metadata
    - ServerFieldsStripper: Remove read-only fields (for dry-run)
 
 4. Push to Grafana (Pusher)
@@ -529,7 +529,7 @@ The codebase is designed for extension:
 **Resource Management**:
 - Manager metadata prevents accidental overwrites
 - Dry-run mode for safe testing
-- Include-managed flag required to modify non-grafanactl resources
+- Include-managed flag required to modify non-grafanapi resources
 
 ### Common Gotchas
 
@@ -622,7 +622,7 @@ Based on TODO comments in code:
    - *Current*: Uses "kubectl" as placeholder manager kind
    - *Impact*: Low - Functional but inaccurate in metadata
    - *Effort*: Low - String replacement and testing
-   - *Fix*: Replace with "grafanactl" as proper manager identifier
+   - *Fix*: Replace with "grafanapi" as proper manager identifier
 
 5. **Test Coverage Improvement**
    - *Current*: Estimated 40-50% coverage
@@ -765,7 +765,7 @@ Based on TODO comments in code:
 2. 🔄 Add streaming support for large resource sets
 3. 🔄 Implement watch operations for real-time updates
 4. 🔄 Add diff command (show changes before push, like kubectl diff)
-5. 🔄 Replace manager kind placeholder with "grafanactl"
+5. 🔄 Replace manager kind placeholder with "grafanapi"
 6. 🔄 Make rate limits configurable
 
 **Long-term (12+ months)**:
@@ -779,21 +779,21 @@ Based on TODO comments in code:
 ### Comparative Analysis
 
 **vs kubectl**:
-- ✅ grafanactl successfully adopts kubectl UX patterns
+- ✅ grafanapi successfully adopts kubectl UX patterns
 - ✅ Context-based configuration matches kubectl
 - ✅ Resource abstraction similar to K8s objects
 - ❌ kubectl has more mature three-way merge
 - ❌ kubectl has extensive plugin ecosystem
 
 **vs terraform**:
-- ✅ grafanactl is lighter-weight and dashboard-focused
+- ✅ grafanapi is lighter-weight and dashboard-focused
 - ✅ Better live development experience (serve command)
 - ❌ terraform has state management and planning
 - ❌ terraform has broader resource support
 
 **vs grizzly**:
-- ✅ grafanactl uses standard K8s patterns vs custom
-- ✅ grafanactl has discovery system
+- ✅ grafanapi uses standard K8s patterns vs custom
+- ✅ grafanapi has discovery system
 - ❌ grizzly has longer history and maturity
 - ❌ grizzly has template support
 

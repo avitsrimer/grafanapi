@@ -8,7 +8,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/go-openapi/strfmt"
 	goapi "github.com/grafana/grafana-openapi-client-go/client"
-	"github.com/grafana/grafanactl/internal/config"
+	"github.com/grafana/grafanapi/internal/config"
 )
 
 func ClientFromContext(ctx *config.Context) (*goapi.GrafanaHTTPAPI, error) {

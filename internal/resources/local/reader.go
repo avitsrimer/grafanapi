@@ -12,9 +12,9 @@ import (
 	"strings"
 
 	"github.com/grafana/grafana-app-sdk/logging"
-	"github.com/grafana/grafanactl/internal/format"
-	"github.com/grafana/grafanactl/internal/logs"
-	"github.com/grafana/grafanactl/internal/resources"
+	"github.com/grafana/grafanapi/internal/format"
+	"github.com/grafana/grafanapi/internal/logs"
+	"github.com/grafana/grafanapi/internal/resources"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/grafana/grafanactl/internal/secrets"
+	"github.com/grafana/grafanapi/internal/secrets"
 	"github.com/stretchr/testify/require"
 )
 

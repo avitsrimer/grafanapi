@@ -2,7 +2,7 @@ package process
 
 import (
 	"github.com/grafana/grafana/pkg/apimachinery/utils"
-	"github.com/grafana/grafanactl/internal/resources"
+	"github.com/grafana/grafanapi/internal/resources"
 )
 
 // ManagerFieldsAppender is a processor that appends manager and source fields to a resource.
@@ -16,14 +16,14 @@ func (m *ManagerFieldsAppender) Process(r *resources.Resource) error {
 	}
 
 	if !r.IsManaged() {
-		// If the resource is not managed by grafanactl,
+		// If the resource is not managed by grafanapi,
 		// we don't want to set the manager fields.
 		return nil
 	}
 
 	r.Raw.SetManagerProperties(utils.ManagerProperties{
 		Kind:     resources.ResourceManagerKind,
-		Identity: "grafanactl", // TODO: use version information to set the identity.
+		Identity: "grafanapi", // TODO: use version information to set the identity.
 	})
 
 	// TODO: should we set timestamp & checksum as well?

@@ -11,7 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/grafana/grafana-app-sdk/logging"
-	"github.com/grafana/grafanactl/internal/logs"
+	"github.com/grafana/grafanapi/internal/logs"
 )
 
 type Watcher struct {

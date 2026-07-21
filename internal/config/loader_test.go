@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/adrg/xdg"
-	"github.com/grafana/grafanactl/cmd/grafanactl/fail"
-	"github.com/grafana/grafanactl/internal/config"
-	"github.com/grafana/grafanactl/internal/testutils"
+	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
+	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/require"
 )
 

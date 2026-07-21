@@ -8,14 +8,14 @@ import (
 
 	folderv1beta1 "github.com/grafana/grafana/apps/folder/pkg/apis/folder/v1beta1"
 	"github.com/grafana/grafana/pkg/apimachinery/utils"
-	"github.com/grafana/grafanactl/internal/format"
+	"github.com/grafana/grafanapi/internal/format"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const (
-	// TODO: change once we have a proper manager kind for grafanactl.
+	// TODO: change once we have a proper manager kind for grafanapi.
 	ResourceManagerKind = utils.ManagerKindKubectl
 	// TODO: move this to grafana/grafana.
 	AnnotationSavedFromUI = "grafana.app/saved-from-ui"
@@ -157,7 +157,7 @@ func (r *Resource) SourceFormat() format.Format {
 	return r.Source.Format
 }
 
-// IsManaged returns true if the resource is managed by grafanactl.
+// IsManaged returns true if the resource is managed by grafanapi.
 func (r *Resource) IsManaged() bool {
 	return r.GetManagerKind() == ResourceManagerKind
 }
@@ -167,7 +167,7 @@ func (r *Resource) GetManagerKind() utils.ManagerKind {
 	m, ok := r.Raw.GetManagerProperties()
 	if !ok {
 		// If the manager properties are not set,
-		// we assume the resource will be managed by grafanactl.
+		// we assume the resource will be managed by grafanapi.
 		return ResourceManagerKind
 	}
 

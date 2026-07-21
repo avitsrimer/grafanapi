@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	"github.com/grafana/grafana/pkg/apimachinery/utils"
-	"github.com/grafana/grafanactl/internal/resources"
-	"github.com/grafana/grafanactl/internal/resources/process"
+	"github.com/grafana/grafanapi/internal/resources"
+	"github.com/grafana/grafanapi/internal/resources/process"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )

@@ -1,0 +1,63 @@
+## grafanapi resources delete
+
+Delete resources from Grafana
+
+### Synopsis
+
+Delete resources from Grafana.
+
+```
+grafanapi resources delete [RESOURCE_SELECTOR]... [flags]
+```
+
+### Examples
+
+```
+
+	# Delete a single dashboard
+	grafanapi resources delete dashboards/some-dashboard
+
+	# Delete multiple dashboards
+	grafanapi resources delete dashboards/some-dashboard,other-dashboard
+
+	# Delete a dashboard and a folder
+	grafanapi resources delete dashboards/some-dashboard folders/some-folder
+
+	# Delete every dashboard
+	grafanapi resources delete dashboards --force
+
+	# Delete every resource defined in the given directory
+	grafanapi resources delete -p ./unwanted-resources/
+
+	# Delete every dashboard defined in the given directory
+	grafanapi resources delete -p ./unwanted-resources/ dashboard
+
+```
+
+### Options
+
+```
+      --dry-run              If set, the delete operation will be simulated
+      --force                Delete all resources of the specified resource types
+  -h, --help                 help for delete
+      --max-concurrent int   Maximum number of concurrent operations (default 10)
+      --on-error string      How to handle errors during resource operations:
+                               ignore — continue processing all resources and exit 0
+                               fail   — continue processing all resources and exit 1 if any failed (default)
+                               abort  — stop on the first error and exit 1 (default "fail")
+  -p, --path strings         Path on disk containing the resources to delete
+```
+
+### Options inherited from parent commands
+
+```
+      --config string    Path to the configuration file to use
+      --context string   Name of the context to use
+      --no-color         Disable color output
+  -v, --verbose count    Verbose mode. Multiple -v options increase the verbosity (maximum: 3).
+```
+
+### SEE ALSO
+
+* [grafanapi resources](grafanapi_resources.md)	 - Manipulate Grafana resources
+
