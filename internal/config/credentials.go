@@ -24,10 +24,11 @@ func ResolveSessionCookie(store keychain.Store) Override {
 	}
 }
 
-// ResolveContextSessionCookie populates gCtx.Grafana.SessionCookie from store, keyed by
-// keychain.Account(gCtx.Name). A keychain.ErrNotFound result leaves the cookie empty rather than
-// failing: the context may simply not have completed `grafanapi login` yet. Any other store error
-// is returned as-is.
+// ResolveContextSessionCookie populates gCtx.Grafana.SessionCookie and gCtx.Grafana.Session from
+// store, keyed by keychain.Account(gCtx.Name). A keychain.ErrNotFound result leaves both nil/empty
+// rather than failing: the context may simply not have completed `grafanapi login` yet. Any other
+// store error is returned as-is. The SessionSource is only constructed when a cookie was actually
+// loaded, so unauthenticated contexts and login flows never get one (see session_source.go).
 func ResolveContextSessionCookie(store keychain.Store, gCtx *Context) error {
 	if gCtx == nil || gCtx.Grafana == nil {
 		return nil
@@ -43,6 +44,7 @@ func ResolveContextSessionCookie(store keychain.Store, gCtx *Context) error {
 	}
 
 	gCtx.Grafana.SessionCookie = cookie
+	gCtx.Grafana.Session = NewSessionSource(cookie, gCtx.Grafana.Server, gCtx.Grafana.TLS, store, keychain.Account(gCtx.Name))
 
 	return nil
 }

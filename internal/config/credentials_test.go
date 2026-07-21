@@ -126,3 +126,42 @@ func Test_ResolveContextSessionCookie_nilContextOrGrafana(t *testing.T) {
 	require.NoError(t, config.ResolveContextSessionCookie(store, nil))
 	require.NoError(t, config.ResolveContextSessionCookie(store, &config.Context{Name: "default"}))
 }
+
+func Test_ResolveContextSessionCookie_populatesSessionSource(t *testing.T) {
+	store := newFakeKeychainStore()
+	store.cookies[keychain.Account("default")] = "cookie-value"
+
+	gCtx := &config.Context{Name: "default", Grafana: &config.GrafanaConfig{Server: "http://localhost:3000/"}}
+
+	require.NoError(t, config.ResolveContextSessionCookie(store, gCtx))
+
+	require.Equal(t, "cookie-value", gCtx.Grafana.SessionCookie)
+	require.NotNil(t, gCtx.Grafana.Session)
+
+	cookie, gen := gCtx.Grafana.Session.Current()
+	require.Equal(t, "cookie-value", cookie)
+	require.Equal(t, uint64(0), gen)
+}
+
+func Test_ResolveContextSessionCookie_notFoundLeavesSessionNil(t *testing.T) {
+	store := newFakeKeychainStore()
+
+	gCtx := &config.Context{Name: "default", Grafana: &config.GrafanaConfig{Server: "http://localhost:3000/"}}
+
+	require.NoError(t, config.ResolveContextSessionCookie(store, gCtx))
+
+	require.Empty(t, gCtx.Grafana.SessionCookie)
+	require.Nil(t, gCtx.Grafana.Session)
+}
+
+func Test_ResolveContextSessionCookie_storeErrorLeavesSessionNil(t *testing.T) {
+	store := newFakeKeychainStore()
+	store.errOnGet = errors.New("keychain: boom")
+
+	gCtx := &config.Context{Name: "default", Grafana: &config.GrafanaConfig{Server: "http://localhost:3000/"}}
+
+	require.ErrorContains(t, config.ResolveContextSessionCookie(store, gCtx), "keychain: boom")
+
+	require.Empty(t, gCtx.Grafana.SessionCookie)
+	require.Nil(t, gCtx.Grafana.Session)
+}

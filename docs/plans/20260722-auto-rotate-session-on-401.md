@@ -476,18 +476,18 @@ LoadRESTConfig → resolve cookie + SessionSource from Keychain → NewNamespace
 - Modify: `internal/config/credentials.go` (`ResolveContextSessionCookie` also builds the source)
 - Modify: `internal/config/credentials_test.go` (source populated iff cookie loaded)
 
-- [ ] In `ResolveContextSessionCookie`, after populating `SessionCookie`, construct and assign
+- [x] In `ResolveContextSessionCookie`, after populating `SessionCookie`, construct and assign
       `gCtx.Grafana.Session` via `NewSessionSource(...)` using the same `store` and
       `keychain.Account(gCtx.Name)`; leave both nil on `keychain.ErrNotFound`.
-- [ ] Confirm both `LoadConfig`/`LoadRESTConfig` (via the `ResolveSessionCookie` Override) and
+- [x] Confirm both `LoadConfig`/`LoadRESTConfig` (via the `ResolveSessionCookie` Override) and
       `config check` (via the direct per-context call) get the source for free — no change needed in
       `cmd/grafanapi/config/command.go`.
-- [ ] Confirm `config view` / reference docs still never see the field (json/yaml `-`).
-- [ ] Write tests for success cases: fake store returns a cookie → `SessionCookie` and `Session` both
+- [x] Confirm `config view` / reference docs still never see the field (json/yaml `-`).
+- [x] Write tests for success cases: fake store returns a cookie → `SessionCookie` and `Session` both
       populated; `Session.Current()` returns the loaded cookie at generation 0.
-- [ ] Write tests for error cases: fake store returns `ErrNotFound` → both nil, load succeeds; a real
+- [x] Write tests for error cases: fake store returns `ErrNotFound` → both nil, load succeeds; a real
       store error still surfaces as a load error.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
 
 ### Task 3 — k8s REST path via `WrapWithSession` + fallback-rendering test
 
