@@ -34,7 +34,11 @@ func ClientFromContext(ctx *config.Context) (*goapi.GrafanaHTTPAPI, error) {
 		cfg.TLSConfig = ctx.Grafana.TLS.ToStdTLSConfig()
 	}
 
-	// Authentication: session-cookie injection is wired in Task 4 via cfg.HTTPHeaders.
+	if ctx.Grafana.SessionCookie != "" {
+		cfg.HTTPHeaders = map[string]string{
+			"Cookie": config.CookieHeaderValue(ctx.Grafana.SessionCookie),
+		}
+	}
 	if ctx.Grafana.OrgID != 0 {
 		cfg.OrgID = ctx.Grafana.OrgID
 	}

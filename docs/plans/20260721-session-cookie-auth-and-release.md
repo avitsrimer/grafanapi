@@ -379,21 +379,21 @@ grafanapi login update [--context NAME]
 - Modify: `internal/config/stack_id_test.go`
 - Modify: `internal/server/grafana/requests.go` (`AuthenticateRequest` sets `Cookie` header)
 
-- [ ] In `NewNamespacedRESTConfig`, delete the `BearerToken`/`Username`/`Password` switch; when
+- [x] In `NewNamespacedRESTConfig`, delete the `BearerToken`/`Username`/`Password` switch; when
       `SessionCookie != ""`, set `rcfg.WrapTransport` to a `transport.WrapperFunc` adding
       `Cookie: grafana_session=<v>` to each request.
-- [ ] In `ClientFromContext`, delete `BasicAuth`/`APIKey` assignment; set
+- [x] In `ClientFromContext`, delete `BasicAuth`/`APIKey` assignment; set
       `cfg.HTTPHeaders = map[string]string{"Cookie": config.CookieHeaderValue(...)}` when present
       (keep `OrgID` passthrough). `rest.go`/`stack_id.go` (in package `config`) call
       `CookieHeaderValue` directly — no `session` import from `config`.
-- [ ] Attach the cookie header to the `/bootdata` request in `DiscoverStackID`; update
+- [x] Attach the cookie header to the `/bootdata` request in `DiscoverStackID`; update
       `AuthenticateRequest` to set the `Cookie` header (remove basic/bearer branches).
-- [ ] Write tests for success cases: `httptest.Server` asserts the inbound `Cookie` header on the
+- [x] Write tests for success cases: `httptest.Server` asserts the inbound `Cookie` header on the
       k8s path (build a dynamic/discovery call or exercise the wrapped RoundTripper directly) and on
       the openapi path via `grafana.GetVersion`; bootdata test asserts the cookie is sent.
-- [ ] Write tests for error cases: no cookie present → no `Cookie` header added (unauthenticated
+- [x] Write tests for error cases: no cookie present → no `Cookie` header added (unauthenticated
       request still well-formed); TLS config still applied alongside the wrapper.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
 
 ### Task 5 — Credential resolution wired into config loading
 

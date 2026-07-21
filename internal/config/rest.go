@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"net/http"
 
 	authlib "github.com/grafana/authlib/types"
 	"k8s.io/client-go/rest"
@@ -42,7 +43,12 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 		}
 	}
 
-	// Authentication: session-cookie injection is wired in Task 4 via rcfg.WrapTransport.
+	if cfg.Grafana.SessionCookie != "" {
+		cookie := cfg.Grafana.SessionCookie
+		rcfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+			return &sessionCookieRoundTripper{cookie: cookie, next: rt}
+		}
+	}
 
 	// Namespace
 	var namespace string
@@ -64,4 +70,18 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 		Config:    rcfg,
 		Namespace: namespace,
 	}
+}
+
+// sessionCookieRoundTripper injects the Grafana session cookie into every outbound request
+// before delegating to the wrapped RoundTripper.
+type sessionCookieRoundTripper struct {
+	cookie string
+	next   http.RoundTripper
+}
+
+func (rt *sessionCookieRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Cookie", CookieHeaderValue(rt.cookie))
+
+	return rt.next.RoundTrip(req)
 }

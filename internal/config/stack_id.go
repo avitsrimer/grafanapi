@@ -30,6 +30,10 @@ func DiscoverStackID(ctx context.Context, cfg GrafanaConfig) (int64, error) {
 		return 0, err
 	}
 
+	if cfg.SessionCookie != "" {
+		req.Header.Set("Cookie", CookieHeaderValue(cfg.SessionCookie))
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err

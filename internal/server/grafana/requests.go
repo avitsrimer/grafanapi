@@ -70,6 +70,10 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 }
 
 // AuthenticateRequest attaches the Grafana session cookie to request, when configured.
-// Session-cookie injection is wired in Task 4.
-func AuthenticateRequest(_ *config.GrafanaConfig, _ *http.Request) {
+func AuthenticateRequest(cfg *config.GrafanaConfig, req *http.Request) {
+	if cfg == nil || cfg.SessionCookie == "" {
+		return
+	}
+
+	req.Header.Set("Cookie", config.CookieHeaderValue(cfg.SessionCookie))
 }
