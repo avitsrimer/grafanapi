@@ -537,20 +537,41 @@ should not hunt for redactor logic to edit.
 - Modify: `internal/secrets/yaml_test.go`, `internal/secrets/redactor_test.go` (drop token/password cases; keep TLS `key-data` secret coverage) — tests only, no redactor code change
 - Modify: `cmd/grafanapi/config/testdata/config.yaml`, `partial-config.yaml`; `cmd/grafanapi/config/command_test.go`
 
-- [ ] Remove `token`/`user`/`password` keys from all config fixtures; retain `server`/`org-id`/
-      `stack-id`/`tls`.
-- [ ] Replace the password/token parse-error fixtures with an equivalent non-secret parse-error
-      fixture so `loader_test.go` still covers annotated parse errors.
-- [ ] In `convertConfigErrors`, add a friendly message for the `UnmarshalError` caused by legacy
+- [x] Remove `token`/`user`/`password` keys from all config fixtures; retain `server`/`org-id`/
+      `stack-id`/`tls`. (Fixtures under `internal/config/testdata/` and
+      `cmd/grafanapi/config/testdata/` were already cleaned as a Task 3 compile-fix side effect;
+      verified no remaining fixture carries the removed keys.)
+- [x] Replace the password/token parse-error fixtures with an equivalent non-secret parse-error
+      fixture so `loader_test.go` still covers annotated parse errors. Deleted
+      `testdata/bad-password-indent.yaml` and `testdata/bad-token-separator.yaml`; added
+      `testdata/bad-config-syntax.yaml` (same invalid `;` separator syntax error, no secret-shaped
+      field) and a corresponding `"bad-config-syntax"` case in
+      `TestLoad_DoesNotLeakSecretsOnError`.
+- [x] In `convertConfigErrors`, add a friendly message for the `UnmarshalError` caused by legacy
       `token:`/`user:`/`password:` keys: explain those auth fields were removed and suggest
       `Run: grafanapi login` (best-effort match on the underlying strict-decode "unknown field" text).
-- [ ] Update `secrets` **tests** only: `datapolicy:"secret"` now covers just TLS `key-data`; the
+      Added `legacyAuthField`/`legacyAuthFieldNames` in `cmd/grafanapi/fail/convert.go`; the new
+      branch deliberately omits `Parent` so the raw parse error (whose annotated source is no
+      longer redacted, since the field no longer exists on `GrafanaConfig`) can never leak the
+      legacy secret value through the rendered error.
+- [x] Update `secrets` **tests** only: `datapolicy:"secret"` now covers just TLS `key-data`; the
       in-memory cookie is never serialized, so never redacted from files. (No redactor code change.)
-- [ ] Write tests for success cases: redaction still masks TLS `key-data`; `config view` output
-      contains no secret keys.
-- [ ] Write tests for error cases: a legacy config containing `token:`/`password:` fails strict
-      decode and renders the migration message pointing to `grafanapi login`.
-- [ ] Run tests — must pass before next task.
+      Verified `internal/secrets/yaml_test.go` and `internal/secrets/redactor_test.go` exercise the
+      redactor generically via their own local `testStruct`/root type with independent
+      `Token`/`Password`-tagged fields — they never referenced `GrafanaConfig` and needed no edits.
+- [x] Write tests for success cases: redaction still masks TLS `key-data`; `config view` output
+      contains no secret keys. (Already covered by the existing `"valid-config"` case in
+      `TestLoad_DoesNotLeakSecretsOnError` and the Task-3 `command_test.go` `view` assertions.)
+- [x] Write tests for error cases: a legacy config containing `token:`/`password:` fails strict
+      decode and renders the migration message pointing to `grafanapi login`. Added
+      `testdata/legacy-token-field.yaml` + a `"legacy-token-field"` case in
+      `TestLoad_DoesNotLeakSecretsOnError` (end-to-end, asserts no secret leak + migration message),
+      plus a unit-level `TestErrorToDetailedError_LegacyAuthFieldMigrationMessage` table test in
+      `cmd/grafanapi/fail/convert_test.go` covering all three legacy field names and the
+      unrelated-unknown-field fallback.
+- [x] Run tests — must pass before next task. `go build ./...`, `go test ./... -race`, and
+      `golangci-lint run` all pass (the 6 remaining lint findings are pre-existing and unrelated to
+      this task, confirmed via `git stash`).
 
 ### Task 10 — GoReleaser + release workflow (macOS/arm64 + Homebrew cask)
 

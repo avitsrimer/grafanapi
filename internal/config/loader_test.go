@@ -184,14 +184,52 @@ func TestLoad_DoesNotLeakSecretsOnError(t *testing.T) {
 		// checkSuccess asserts properties of the successfully-loaded Config.
 		checkSuccess func(t *testing.T, cfg config.Config)
 	}{
-		// NOTE(Task 3): the "bad-token-separator" (AC-1/AC-13) and "bad-password-indent"
-		// (AC-2) cases that used to live here tested redaction of the `token`/`password`
+		// NOTE(Task 9): the "bad-token-separator" (AC-1/AC-13) and "bad-password-indent"
+		// (AC-2) fixtures that used to live here tested redaction of the `token`/`password`
 		// keys. Those fields (and User) were removed from GrafanaConfig in favor of the
 		// session-cookie auth mechanism, so they are no longer part of the
 		// datapolicy:"secret" denylist and can no longer be meaningfully tested for
-		// redaction. Task 9 (config/test fixture & redaction cleanup) deletes
-		// testdata/bad-token-separator.yaml and testdata/bad-password-indent.yaml and
-		// repurposes them into a non-secret parse-error fixture.
+		// redaction. The two fixtures were deleted and replaced by "bad-config-syntax"
+		// below, which repurposes the same invalid-separator syntax error (`org-id; 1`)
+		// without any secret-shaped field, so annotated-source coverage for a plain parse
+		// error survives. Legacy-key handling itself (config that still contains a
+		// `token:`/`user:`/`password:` key) is covered by "legacy-token-field" below.
+		{
+			// A syntax error unrelated to any secret field: the config uses an invalid
+			// key/value separator (';' instead of ':'). This exercises the same
+			// AnnotatedSource parse-error path as "bad-tls-key-data-block" without
+			// involving a datapolicy:"secret" field, proving that redaction is a no-op
+			// (and therefore never a source of corruption) for ordinary parse errors.
+			name:    "bad-config-syntax",
+			fixture: "./testdata/bad-config-syntax.yaml",
+			wantErr: true,
+			checkRendered: func(t *testing.T, rendered string) {
+				t.Helper()
+				require.Contains(t, rendered, "org-id",
+					"the offending key must remain visible in the rendered error")
+			},
+		},
+		{
+			// Legacy-config decision (Task 9): a config that still carries a removed
+			// auth field (`token:`) now fails strict decode as an "unknown field"
+			// UnmarshalError. Because the field no longer exists on GrafanaConfig, it is
+			// no longer part of the datapolicy:"secret" denylist, so the redactor cannot
+			// mask it. convertConfigErrors detects the legacy-key shape instead and
+			// renders a friendly migration message *without* echoing the raw parse error
+			// (which would otherwise leak the literal secret value from the file) —
+			// asserting here that the real secret string never appears in the rendered
+			// output and that the message points at `grafanapi login`.
+			name:    "legacy-token-field",
+			fixture: "./testdata/legacy-token-field.yaml",
+			wantErr: true,
+			checkRendered: func(t *testing.T, rendered string) {
+				t.Helper()
+				require.NotContains(t, rendered, "glc_fixture_secret_value",
+					"the legacy token's literal value must never leak in the rendered error")
+				require.Contains(t, rendered, "grafanapi login",
+					"the migration message must point the user at grafanapi login")
+			},
+		},
 		{
 			// AC-3: parse error near a tls.key-data block scalar containing a PEM body.
 			// The key-data field is tagged datapolicy:"secret", so T1 redacts the block.

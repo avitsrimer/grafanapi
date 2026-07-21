@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/go-openapi/runtime"
 	"github.com/grafana/grafanapi/internal/config"
@@ -18,6 +19,14 @@ import (
 // staleSessionSuggestion is shown whenever the Grafana session cookie is rejected or missing,
 // pointing the user at the command that re-establishes it.
 const staleSessionSuggestion = "Run: grafanapi login update"
+
+// legacyAuthFieldNames lists the GrafanaConfig fields that were removed in favor of
+// session-cookie authentication. A config file that still contains one of these keys fails
+// strict YAML decoding as an "unknown field" error; convertConfigErrors recognizes that shape
+// and renders a migration message instead of the raw parse error.
+//
+//nolint:gochecknoglobals // read-only lookup table, not mutated after init
+var legacyAuthFieldNames = []string{"token", "user", "password"}
 
 func ErrorToDetailedError(err error) *DetailedError {
 	var converted bool
@@ -68,6 +77,24 @@ func convertConfigErrors(err error) (*DetailedError, bool) {
 
 	unmarshalErr := config.UnmarshalError{}
 	if errors.As(err, &unmarshalErr) {
+		if field, ok := legacyAuthField(unmarshalErr.Err); ok {
+			// Deliberately do NOT set Parent here: the underlying parse error's
+			// annotated source echoes the raw file bytes at the offending line, and
+			// because the field no longer exists on GrafanaConfig it is no longer part
+			// of the datapolicy:"secret" denylist, so the redactor never touches it.
+			// Rendering Parent would leak the literal legacy secret value.
+			return &DetailedError{
+				Summary: "Configuration uses a removed authentication field",
+				Details: fmt.Sprintf(
+					"The '%s' field in '%s' is no longer supported: grafanapi authenticates using a Grafana session cookie instead of API tokens or basic-auth credentials.",
+					field, unmarshalErr.File,
+				),
+				Suggestions: []string{
+					"Run: grafanapi login",
+				},
+			}, true
+		}
+
 		return &DetailedError{
 			Summary: "Could not parse configuration",
 			Details: fmt.Sprintf("Invalid configuration found in '%s'.", unmarshalErr.File),
@@ -229,4 +256,22 @@ func convertFSErrors(err error) (*DetailedError, bool) {
 	}
 
 	return nil, false
+}
+
+// legacyAuthField reports whether err is a strict-decode "unknown field" error caused by one of
+// the auth fields removed from GrafanaConfig (token, user, password), returning the offending
+// field name. goccy/go-yaml's strict-mode error text has the shape `unknown field "<name>"`.
+func legacyAuthField(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+
+	msg := err.Error()
+	for _, name := range legacyAuthFieldNames {
+		if strings.Contains(msg, fmt.Sprintf("unknown field %q", name)) {
+			return name, true
+		}
+	}
+
+	return "", false
 }
