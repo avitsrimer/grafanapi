@@ -73,6 +73,8 @@ configuration file.`,
 
 	opts.BindFlags(cmd.Flags())
 
+	cmd.AddCommand(updateCommand())
+
 	return cmd
 }
 

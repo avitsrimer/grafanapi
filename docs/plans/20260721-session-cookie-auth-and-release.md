@@ -468,16 +468,16 @@ grafanapi login update [--context NAME]
 - Modify: `cmd/grafanapi/login/command.go` (attach `update` subcommand)
 - Modify: `cmd/grafanapi/login/command_test.go` (add update cases)
 
-- [ ] Implement `login update`: load current (or `--context`) context; error if the context/server
+- [x] Implement `login update`: load current (or `--context`) context; error if the context/server
       is missing; prompt cookie only (no server prompt); validate against the stored server; on
       success overwrite the Keychain item; do not modify the config file.
-- [ ] Reuse the shared `prompter` and validation helpers from Task 6.
-- [ ] Ensure `--context` selects a non-current context correctly.
-- [ ] Write tests for success cases: fake prompter + 200 → keychain overwritten, config unchanged,
+- [x] Reuse the shared `prompter` and validation helpers from Task 6.
+- [x] Ensure `--context` selects a non-current context correctly.
+- [x] Write tests for success cases: fake prompter + 200 → keychain overwritten, config unchanged,
       server not re-prompted.
-- [ ] Write tests for error cases: unknown/empty context → error; 401 on validation → keychain not
+- [x] Write tests for error cases: unknown/empty context → error; 401 on validation → keychain not
       overwritten.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
 
 ### Task 8 — Centralized stale-session 401 rendering (fail/convert.go only)
 

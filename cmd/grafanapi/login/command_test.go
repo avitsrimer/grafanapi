@@ -270,6 +270,182 @@ func Test_LoginCommand_usesExistingContextName(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func Test_LoginUpdateCommand_success(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "fresh-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Refreshed session"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.lineN, "login update must never prompt for the server")
+	require.Equal(t, 1, prompter.secretN)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Equal(t, initialContents, string(written), "login update must not modify the configuration file")
+
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "fresh-cookie", cookie)
+}
+
+func Test_LoginUpdateCommand_explicitContextFlag(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n" +
+		"  default:\n    grafana:\n      server: https://unused.example.com\n" +
+		"  staging:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "fresh-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile, "--context", "staging"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	cookie, err := store.Get(keychain.Account("staging"))
+	require.NoError(t, err)
+	require.Equal(t, "fresh-cookie", cookie)
+
+	_, err = store.Get(keychain.Account("default"))
+	require.ErrorIs(t, err, keychain.ErrNotFound, "only the selected context's keychain item is touched")
+}
+
+func Test_LoginUpdateCommand_unknownContextFails(t *testing.T) {
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "fresh-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile, "--context", "missing"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains(`context "missing" is not configured`),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.secretN, "the cookie must never be prompted for an unknown context")
+}
+
+func Test_LoginUpdateCommand_noCurrentContextFails(t *testing.T) {
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "fresh-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("no context specified and no current context is set"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.secretN)
+}
+
+func Test_LoginUpdateCommand_validationFailureLeavesKeychainUntouched(t *testing.T) {
+	server := newTestUserServer(t, http.StatusUnauthorized)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "fresh-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("could not validate session cookie"),
+		},
+	}
+	testCase.Run(t)
+
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "stale-cookie", cookie, "a failed validation must not overwrite the existing keychain item")
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Equal(t, initialContents, string(written))
+}
+
+func Test_LoginUpdateCommand_emptyCookieFailsWithoutPersisting(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "   "}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("a session cookie is required"),
+		},
+	}
+	testCase.Run(t)
+
+	_, err := store.Get(keychain.Account("default"))
+	require.ErrorIs(t, err, keychain.ErrNotFound)
+}
+
 func Test_LoginCommand_explicitContextFlag(t *testing.T) {
 	server := newTestUserServer(t, http.StatusOK)
 
