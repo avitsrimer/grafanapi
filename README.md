@@ -9,6 +9,15 @@ It enables users to authenticate, manage multiple environments, and perform admi
 
 Whether you're automating workflows in CI/CD pipelines or switching between staging and production environments, Grafana CLI provides a flexible and scriptable way to manage your Grafana setup efficiently.
 
+This fork authenticates exclusively via a Grafana **session cookie**
+(`grafana_session`), stored in the macOS Keychain, and is distributed for
+**macOS (arm64) only**:
+
+```shell
+brew install avitsrimer/apps/grafanapi
+grafanapi login --server https://grafana.example.com
+```
+
 ## Documentation
 
 See [the documentation](https://grafana.github.io/grafanapi/) to learn how to

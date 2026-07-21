@@ -81,9 +81,13 @@ make clean
 
 ### Command Structure
 
-grafanapi follows the Cobra command pattern with two main command groups:
+grafanapi follows the Cobra command pattern with three main command groups:
 
-1. **config**: Manage configuration contexts for connecting to Grafana instances
+1. **login**: Authenticate to a Grafana instance using a session cookie
+   - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
+   - `login update`: Refresh a stale cookie for an existing context (server not re-prompted)
+
+2. **config**: Manage configuration contexts for connecting to Grafana instances
    - `config set`: Set configuration values
    - `config unset`: Unset configuration values
    - `config use-context`: Switch between configured contexts
@@ -92,7 +96,7 @@ grafanapi follows the Cobra command pattern with two main command groups:
    - `config view`: View the current configuration
    - `config check`: Validate the configuration
 
-2. **resources**: Manipulate Grafana resources (dashboards, folders, etc.)
+3. **resources**: Manipulate Grafana resources (dashboards, folders, etc.)
    - `resources get`: Get resources from Grafana
    - `resources list`: List resources
    - `resources pull`: Pull resources from Grafana to local files
@@ -106,6 +110,7 @@ grafanapi follows the Cobra command pattern with two main command groups:
 
 **cmd/grafanapi/** - CLI command implementations
 - `root/`: Root command setup with logging and flags
+- `login/`: `login` / `login update` — interactive session-cookie authentication
 - `config/`: Configuration management commands
 - `resources/`: Resource manipulation commands
 - `fail/`: Error handling and detailed error messages
@@ -114,8 +119,8 @@ grafanapi follows the Cobra command pattern with two main command groups:
 **internal/config/** - Configuration management
 - Context-based configuration (similar to kubectl contexts)
 - Support for multiple Grafana instances (contexts)
-- Authentication: basic auth, API tokens
-- Environment variable overrides (GRAFANA_SERVER, GRAFANA_TOKEN, etc.)
+- Authentication: Grafana session cookie (`grafana_session`), resolved from the macOS Keychain at load time — never a config-file field or env var
+- Environment variable overrides for non-secret fields (GRAFANA_SERVER, GRAFANA_ORG_ID, GRAFANA_STACK_ID)
 - Automatic Stack ID discovery for Grafana Cloud
 - TLS configuration support
 
@@ -166,8 +171,17 @@ grafanapi follows the Cobra command pattern with two main command groups:
 - REST client helpers
 - Request/response handling
 
+**internal/keychain/** - macOS Keychain credential store
+- `Store` interface (`Set`/`Get`/`Delete`) keyed by `"grafanapi:<context-name>"`
+- Darwin cgo implementation against `Security.framework` (build tag `darwin`)
+- `!darwin` stub returning an "unsupported platform" error (keeps cross-builds green)
+
+**internal/session/** - Session cookie verification and stale-session errors
+- `VerifyCookie`: validates a cookie via `GET /api/user`
+- `StaleSessionError`, `IsUnauthorized`: shared by `login`/`login update` and central 401 handling
+
 **internal/secrets/** - Secret management
-- Secure handling of sensitive configuration data
+- Secure handling of sensitive configuration data (currently just TLS key data; the session cookie is never serialized to disk)
 
 **internal/logs/** - Structured logging
 - slog-based logging with verbosity levels
@@ -191,13 +205,15 @@ Configuration is stored in `$XDG_CONFIG_HOME/grafanapi/config.yaml` (typically `
 
 ### Environment Variables
 
-Environment variables can override configuration values:
+Environment variables can override non-secret configuration values:
 - `GRAFANA_SERVER`: Grafana server URL
-- `GRAFANA_TOKEN`: API token for authentication
-- `GRAFANA_USER`: Username for basic auth
-- `GRAFANA_PASSWORD`: Password for basic auth
 - `GRAFANA_ORG_ID`: Organization ID (on-prem)
 - `GRAFANA_STACK_ID`: Stack ID (Grafana Cloud)
+
+There is no environment variable for the session cookie — it is never
+accepted via flag or env var, only through the interactive `grafanapi login`
+/ `grafanapi login update` prompts, and is resolved from the macOS Keychain at
+config-load time.
 
 ## Testing Patterns
 
@@ -230,6 +246,10 @@ Flags set in Makefile via `-ldflags` on `main.version`, `main.commit`, `main.dat
 - Uses vendored dependencies (committed to repo)
 - Documentation built with mkdocs (Python-based)
 - Feature toggle `kubernetesDashboards` must be enabled in Grafana for `resources serve`
+- Distributed for **macOS/arm64 only**: the Keychain credential store is cgo against
+  `Security.framework` and cannot be cross-compiled. Released via GoReleaser as a
+  Homebrew cask (`avitsrimer/homebrew-apps`); a `GOOS=linux CGO_ENABLED=0` build of the
+  rest of the codebase (using the `!darwin` keychain stub) still must stay green in CI.
 
 ## Codebase Architecture Insights
 
@@ -515,10 +535,13 @@ The codebase is designed for extension:
 ### Security Considerations
 
 **Credential Management**:
-- API tokens stored in config file with 0600 permissions
-- Password fields tagged with `datapolicy:"secret"` for redaction
-- TLS certificate data base64-encoded in config
-- Environment variables supported for CI/CD (avoid config files)
+- Grafana session cookie stored in the macOS Keychain (generic-password item,
+  ACL-only, one per context) — never written to the plaintext config file
+- Config file (0600 permissions) holds only non-secret context data (server,
+  org-id/stack-id, TLS); the in-memory `SessionCookie` field is `json:"-" yaml:"-"`
+- TLS key data remains the only `datapolicy:"secret"`-tagged, redacted field
+- Legacy `token`/`user`/`password` config keys are rejected by strict YAML
+  decoding, with a migration message pointing to `grafanapi login`
 
 **Network Security**:
 - TLS verification enabled by default
@@ -694,9 +717,9 @@ Based on TODO comments in code:
 ### Security Recommendations
 
 **Current Security Posture**:
-- ✅ API tokens via bearer authentication
-- ✅ Password fields tagged with `datapolicy:"secret"` for redaction
-- ✅ Environment variable support (avoid storing credentials in files)
+- ✅ Session cookie authenticated (`Cookie: grafana_session=...`), stored in the macOS Keychain
+- ✅ Config file never contains the secret; only TLS key data is `datapolicy:"secret"`-tagged
+- ✅ Cookie never accepted via flag or environment variable (interactive prompt only)
 - ✅ TLS verification enabled by default
 - ✅ Custom CA certificates and client certificate authentication supported
 
@@ -704,13 +727,14 @@ Based on TODO comments in code:
 
 1. **Config File Permission Validation** (High Priority)
    - *Issue*: No explicit file permission check in code
-   - *Risk*: Credentials exposed if file permissions too permissive
+   - *Risk*: Non-secret context data (server, org-id/stack-id) exposed if file permissions too permissive
    - *Fix*: Add validation on config load, warn if not 0600
 
-2. **Secret Encryption at Rest** (Medium Priority)
-   - *Issue*: Credentials stored in plaintext in config file
-   - *Risk*: Credentials compromised if file accessed
-   - *Fix*: Consider OS keychain integration (e.g., keyring libraries)
+2. **Secret Encryption at Rest** — ✅ Addressed
+   - The session cookie is stored in the macOS Keychain (ACL-only, bound to
+     the binary's ad-hoc cdhash) rather than in the plaintext config file.
+   - Remaining scope: this is macOS-only; there is no equivalent secret store
+     for other platforms (distribution is macOS/arm64-only by design).
 
 3. **Insecure TLS Warning** (Medium Priority)
    - *Issue*: TLS verification can be disabled with `Insecure: true`

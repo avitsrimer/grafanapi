@@ -661,16 +661,98 @@ should not hunt for redactor logic to edit.
 - Modify: `AGENTS.md` (= `CLAUDE.md` symlink) — auth section, new `login`/`login update`, keychain notes, macOS-only release
 - Move: this plan → `docs/plans/completed/20260721-session-cookie-auth-and-release.md`
 
-- [ ] Rewrite auth documentation: session-cookie only; document `login` / `login update`; remove all
+- [x] Rewrite auth documentation: session-cookie only; document `login` / `login update`; remove all
       references to API tokens, basic auth, and `GRAFANA_TOKEN`/`GRAFANA_USER`/`GRAFANA_PASSWORD`.
-- [ ] Document Homebrew install (`brew install avitsrimer/apps/grafanapi`) and the tarball fallback
+      Rewrote `docs/configuration.md` ("Authenticating" section covers `login`/`login update`,
+      validate-before-persist, Keychain storage, and the "Allow" prompt) and refreshed the
+      "Defining contexts"/"Using environment variables" sections to point at `login` instead of
+      `config set ...grafana.token`/`.user`/`.password`. Added a short auth/distribution note to
+      `README.md`.
+- [x] Document Homebrew install (`brew install avitsrimer/apps/grafanapi`) and the tarball fallback
       (`xattr -d com.apple.quarantine`); note macOS/arm64-only distribution and Keychain "Allow"
-      prompt on first read after a rebuild.
-- [ ] Regenerate all reference docs (`make reference`) and confirm no drift.
-- [ ] Update `AGENTS.md`/`CLAUDE.md` overview, auth notes, and remove stale token/basic-auth guidance.
-- [ ] Add a short review section to this plan (what changed, deviations), then move it to
-      `docs/plans/completed/`.
-- [ ] Run `make all` (lint, tests, build, docs) — must pass.
+      prompt on first read after a rebuild. Rewrote `docs/installation.md` with a "Homebrew
+      (recommended)" section, a "Prebuilt tarball" section covering the quarantine attribute, and
+      a macOS/arm64-only admonition up top.
+- [x] Regenerate all reference docs (`make reference`) and confirm no drift. `devbox`/`mkdocs` are
+      not installed on this machine; ran the three generator scripts directly
+      (`go run scripts/cmd-reference/*.go`, `scripts/env-vars-reference`, `scripts/config-reference`
+      — what `make reference` wraps) after deleting the three `docs/reference/*` subdirectories.
+      `git status --short docs/reference` reported no changes: the reference docs regenerated
+      from Tasks 3–11 (login/login-update CLI pages, trimmed env-var/config pages) were already
+      current — no drift.
+- [x] Update `AGENTS.md`/`CLAUDE.md` overview, auth notes, and remove stale token/basic-auth guidance.
+      Edited `AGENTS.md` (real file; `CLAUDE.md` is the existing symlink, untouched): added a
+      `login`/`login update` command group to "Command Structure"; updated the `internal/config`
+      bullet, "Environment Variables" list, and "Important Notes" (macOS/arm64-only distribution)
+      in the hand-written top section; updated the speculative "Codebase Architecture Insights"
+      section's Core Packages (added `internal/keychain`, `internal/session`, `cmd/grafanapi/login`),
+      "Security Considerations" (Credential Management), and "Security Recommendations" (posture
+      bullets, and marked the old "Secret Encryption at Rest" gap as ✅ addressed by the Keychain)
+      to reflect session-cookie auth instead of tokens/basic-auth. Left the unrelated speculative
+      technical-debt/roadmap entries alone — out of scope for this task.
+- [x] Add a short review section to this plan (what changed, deviations), then move it to
+      `docs/plans/completed/`. See the Review section below; moved via `git mv` in the same commit
+      as this task's doc changes.
+- [x] Run `make all` (lint, tests, build, docs) — must pass. `devbox` is not installed on this
+      machine (nor is `mkdocs`), so ran the underlying commands directly: `golangci-lint run -c
+      .golangci.yaml` (14 pre-existing findings, identical set/location to Task 11's verified
+      baseline — none introduced by this doc-only task), `go test -race ./...` (all green),
+      `go build ./...` (clean), and the three reference-generator scripts (no drift, see above).
+      `mkdocs build` itself could not be exercised (mkdocs not installed) — this is an environment
+      limitation, not a regression; the underlying Markdown/reference sources it would build from
+      are all consistent and drift-free.
+
+## Review
+
+**Summary:** All 12 tasks are complete. `grafanapi` now authenticates exclusively via a Grafana
+session cookie (`grafana_session`), stored in the macOS Keychain and injected as a `Cookie` header
+on both the k8s dynamic REST path and the openapi client path (plus the serve reverse-proxy and
+bootdata discovery requests). The legacy `User`/`Password`/`APIToken` config fields and their
+`GRAFANA_USER`/`GRAFANA_PASSWORD`/`GRAFANA_TOKEN` env vars are gone. `grafanapi login` / `grafanapi
+login update` provide validate-before-persist interactive authentication. A central `fail/convert.go`
+hook renders any 401 (k8s, openapi, or a `StaleSessionError`) as a "session is stale — run
+`grafanapi login update`" message with exit code 2. The release pipeline was rewritten to a
+darwin/arm64-only GoReleaser build publishing an unsigned Homebrew cask to `avitsrimer/homebrew-apps`,
+with a linux `CGO_ENABLED=0` stub cross-build kept green in CI. Documentation (README, installation,
+configuration, AGENTS.md/CLAUDE.md, and all auto-generated reference pages) has been brought in line
+with this design.
+
+**Deviations from the original plan (all previously logged in-place as ➕ items, summarized here):**
+- `SessionCookie` was added to `GrafanaConfig` one task early (Task 2, as a compile prerequisite)
+  instead of Task 3.
+- Task 3's field removal required minimal, anticipated fixes to `rest.go`, `internal/grafana/client.go`,
+  `internal/server/grafana/requests.go`, and several test fixtures/tests outside its own file list;
+  Task 4 then properly replaced those dead branches with real cookie injection, and Task 9 finished
+  the fixture/redaction cleanup.
+- `loadConfigTolerant`'s `--context` flag override ran after `extraOverrides` (a latent, unrelated
+  ordering bug) — fixed in Task 5 so `--context` resolution/validation/cookie-resolution all target
+  the context the user actually requested.
+- `login`'s prompter interface uses exported method names (`PromptLine`/`PromptSecret`) despite the
+  interface type itself staying unexported, per Go's per-package unexported-method interface
+  satisfaction rule (documented in Task 6).
+- `login` carries over an existing context's org-id/stack-id (not just TLS) when neither
+  `--org-id` nor `--stack-id` is passed, before attempting discovery (Task 6).
+- Task 8 used a second `convertSessionErrors` converter (registered ahead of `convertAPIErrors` in
+  `errorConverters`) rather than folding the openapi/`StaleSessionError` cases into
+  `convertAPIErrors`'s existing `*k8sapi.StatusError` type switch, since neither error type
+  satisfies that assertion.
+- Task 9 replaced the deleted `bad-password-indent.yaml`/`bad-token-separator.yaml` fixtures with a
+  new `bad-config-syntax.yaml` (same syntax-error shape, no secret-looking field) and added a
+  `legacy-token-field.yaml` fixture plus a `convertConfigErrors` migration-message branch for the
+  now-hard YAML strict-decode error on removed `token`/`user`/`password` keys.
+- Task 10 kept the existing `devbox run goreleaser` convention in `release.yaml` rather than
+  switching to `actions/setup-go` + `goreleaser-action`, for toolchain consistency with the rest of
+  the repo's workflows; it also fixed one pre-existing GoReleaser deprecation
+  (`archives[].builds` → `archives[].ids`) surfaced while validating.
+- Tasks 10–12 all ran validation commands directly (`go build`/`go test -race`/`golangci-lint run`/
+  `goreleaser check`/the reference-generator scripts) instead of through `make`/`devbox`, since
+  devbox is not installed on this machine; `mkdocs` is likewise unavailable, so `mkdocs build`
+  itself was never exercised end-to-end (only the Markdown/reference sources it consumes were
+  verified for correctness and drift-freedom).
+
+**Known follow-ups (not blockers, tracked in Post-Completion below):** the `HOMEBREW_TAP_TOKEN`
+secret, the `avitsrimer/homebrew-apps` tap repo, cutting a real release tag, and live end-to-end
+verification against a real Grafana instance all require the user and cannot be automated here.
 
 ## Post-Completion
 
