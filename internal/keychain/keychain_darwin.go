@@ -18,34 +18,40 @@ static CFStringRef makeString(const char *s) {
 	return CFStringCreateWithCString(kCFAllocatorDefault, s, kCFStringEncodingUTF8);
 }
 
-// setItem stores secret under service/account as a plain generic-password item. It first deletes
-// any existing item, then adds a fresh one with no access-control and no accessibility attribute,
-// so the item lands in the default (login) keychain and the creating binary's ad-hoc code
-// identity is added to its ACL. Returns the OSStatus (errSecSuccess on success).
+// setItem stores secret under service/account as a plain generic-password item, atomically:
+// it first attempts SecItemUpdate against the existing item, and only falls back to SecItemAdd
+// (creating a fresh item with no access-control and no accessibility attribute, so it lands in
+// the default (login) keychain with the creating binary's ad-hoc code identity added to its ACL)
+// when no item exists yet (errSecItemNotFound). There is deliberately no SecItemDelete step: a
+// delete-then-add sequence has a window where, if SecItemAdd then failed, the previously-stored
+// secret would already be gone with no way to recover it. Update-or-add has no such window — a
+// failing SecItemUpdate leaves the existing item untouched, and a failing SecItemAdd never had
+// a prior item to destroy. Returns the OSStatus (errSecSuccess on success).
 static int setItem(const char *service, const char *account, const void *secret, int secretLen) {
 	CFStringRef svc = makeString(service);
 	CFStringRef acct = makeString(account);
 	CFDataRef val = makeData(secret, secretLen);
 
-	// delete any prior item so the value is overwritten cleanly.
-	CFMutableDictionaryRef del = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+	CFMutableDictionaryRef query = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
 		&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-	CFDictionarySetValue(del, kSecClass, kSecClassGenericPassword);
-	CFDictionarySetValue(del, kSecAttrService, svc);
-	CFDictionarySetValue(del, kSecAttrAccount, acct);
-	SecItemDelete(del);
-	CFRelease(del);
+	CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+	CFDictionarySetValue(query, kSecAttrService, svc);
+	CFDictionarySetValue(query, kSecAttrAccount, acct);
 
-	CFMutableDictionaryRef add = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+	CFMutableDictionaryRef update = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
 		&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-	CFDictionarySetValue(add, kSecClass, kSecClassGenericPassword);
-	CFDictionarySetValue(add, kSecAttrService, svc);
-	CFDictionarySetValue(add, kSecAttrAccount, acct);
-	CFDictionarySetValue(add, kSecValueData, val);
+	CFDictionarySetValue(update, kSecValueData, val);
 
-	OSStatus status = SecItemAdd(add, NULL);
+	OSStatus status = SecItemUpdate(query, update);
+	if (status == errSecItemNotFound) {
+		// no existing item to update: add a fresh one, reusing the query dictionary as its
+		// class/service/account attributes.
+		CFDictionarySetValue(query, kSecValueData, val);
+		status = SecItemAdd(query, NULL);
+	}
 
-	CFRelease(add);
+	CFRelease(update);
+	CFRelease(query);
 	CFRelease(val);
 	CFRelease(acct);
 	CFRelease(svc);
@@ -121,11 +127,6 @@ import (
 // errSecItemNotFound mirrors the Security framework status for a missing item.
 const errSecItemNotFound = -25300
 
-// errSecMissingEntitlement is not expected for the plain file-based login keychain used here (the
-// item has no access-control, so ACL trust — not an entitlement — gates reads). The constant and
-// its hint remain only as a safety net.
-const errSecMissingEntitlement = -34018
-
 // newStore returns the cgo-backed darwin Store.
 //
 // We have to return an interface here.
@@ -135,17 +136,6 @@ func newStore() Store {
 	return darwinStore{}
 }
 
-// osStatusHint returns an actionable explanation for keychain OSStatus codes with a known cause,
-// or an empty string for codes without a specific hint.
-func osStatusHint(status int) string {
-	switch status {
-	case errSecMissingEntitlement:
-		return " (errSecMissingEntitlement: unexpected for the file-based login keychain)"
-	default:
-		return ""
-	}
-}
-
 // darwinStore is the cgo-backed Store. Items are plain generic-password entries in the default
 // (login) keychain; the item's trusted-application ACL is bound to the ad-hoc code identity of
 // the binary that created it, so that same binary reads it back without a prompt. It is not safe
@@ -153,7 +143,8 @@ func osStatusHint(status int) string {
 type darwinStore struct{}
 
 // Set stores secret under account as a plain generic-password item in the default (login)
-// keychain. It does not prompt.
+// keychain. It does not prompt. It is atomic (update-or-add at the cgo layer, no
+// delete-then-add): a failing Set leaves any previously stored secret for account intact.
 func (darwinStore) Set(account, secret string) error {
 	cSvc := C.CString(Service)
 	defer C.free(unsafe.Pointer(cSvc))
@@ -167,7 +158,7 @@ func (darwinStore) Set(account, secret string) error {
 	}
 	status := C.setItem(cSvc, cAcct, valPtr, C.int(len(val)))
 	if int(status) != 0 {
-		return fmt.Errorf("keychain set for account %q failed: OSStatus %d%s", account, int(status), osStatusHint(int(status)))
+		return fmt.Errorf("keychain set for account %q failed: OSStatus %d", account, int(status))
 	}
 	return nil
 }
@@ -188,7 +179,7 @@ func (darwinStore) Get(account string) (string, error) {
 		if int(status) == errSecItemNotFound {
 			return "", fmt.Errorf("keychain get for account %q: %w", account, ErrNotFound)
 		}
-		return "", fmt.Errorf("keychain get for account %q failed: OSStatus %d%s", account, int(status), osStatusHint(int(status)))
+		return "", fmt.Errorf("keychain get for account %q failed: OSStatus %d", account, int(status))
 	}
 	if data == nil {
 		return "", fmt.Errorf("keychain get for account %q: %w", account, ErrNotFound)
@@ -207,7 +198,7 @@ func (darwinStore) Delete(account string) error {
 
 	status := C.deleteItem(cSvc, cAcct)
 	if int(status) != 0 && int(status) != errSecItemNotFound {
-		return fmt.Errorf("keychain delete for account %q failed: OSStatus %d%s", account, int(status), osStatusHint(int(status)))
+		return fmt.Errorf("keychain delete for account %q failed: OSStatus %d", account, int(status))
 	}
 	return nil
 }

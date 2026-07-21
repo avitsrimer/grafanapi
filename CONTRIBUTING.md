@@ -84,6 +84,22 @@ You should receive a JSON response indicating Grafana is running.
 
 The repository includes a pre-configured test config file at `testdata/integration-test-config.yaml` that you can use to test `grafanapi` against the local Grafana instance.
 
+`grafanapi` authenticates using a Grafana session cookie rather than a config-file field or
+username/password (see [`docs/configuration.md`](docs/configuration.md#authenticating)), so the
+fixture doesn't (and can't) carry credentials. Log in once before running any other command
+against it:
+
+```console
+$ devbox run go run ./cmd/grafanapi --config testdata/integration-test-config.yaml login \
+    --context local --server http://localhost:3000 --org-id 1
+```
+
+Sign in to `http://localhost:3000` (`admin`/`admin`) in a browser first, then paste the value of
+the `grafana_session` cookie (Application/Storage → Cookies in your browser's developer tools) at
+the no-echo prompt. This validates the cookie and stores it in the macOS Keychain; the
+config file itself never contains it. If the cookie later goes stale, refresh it with
+`grafanapi --config testdata/integration-test-config.yaml login update`.
+
 #### View the test configuration
 
 ```console

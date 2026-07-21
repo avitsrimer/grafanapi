@@ -499,9 +499,34 @@ PROPERTY_NAME is a dot-delimited reference to the value to unset. It can either 
 				return err
 			}
 
-			return config.Write(cmd.Context(), configOpts.configSource(), cfg)
+			if err := config.Write(cmd.Context(), configOpts.configSource(), cfg); err != nil {
+				return err
+			}
+
+			// Unsetting an entire context removes it from the config file, but its stored
+			// session cookie would otherwise remain in the Keychain forever with nothing left
+			// to reference it. Best-effort clean it up too; a failure here (e.g. the !darwin
+			// stub, or the item simply never having existed) must not fail the command.
+			if contextName, ok := removedContextName(args[0]); ok {
+				if err := keychainStore.Delete(keychain.Account(contextName)); err != nil {
+					io.Warning(cmd.OutOrStdout(), "Could not remove the session cookie for context %q from the Keychain: %s\n", contextName, err)
+				}
+			}
+
+			return nil
 		},
 	}
 
 	return cmd
+}
+
+// removedContextName reports whether path unsets an entire context ("contexts.<name>", as opposed
+// to a nested field like "contexts.<name>.grafana.server"), returning the context name.
+func removedContextName(path string) (string, bool) {
+	parts := strings.Split(path, ".")
+	if len(parts) == 2 && parts[0] == "contexts" {
+		return parts[1], true
+	}
+
+	return "", false
 }

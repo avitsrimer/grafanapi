@@ -2,12 +2,15 @@ package fail_test
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/go-openapi/runtime"
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
 	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,9 +28,6 @@ func TestErrorToDetailedError_StaleSession(t *testing.T) {
 		"openapi 401 APIError": {
 			err: &runtime.APIError{OperationName: "getUser", Code: 401},
 		},
-		"StaleSessionError from login validation": {
-			err: &session.StaleSessionError{Context: "default", Parent: session.ErrUnauthorized},
-		},
 	}
 
 	for name, tc := range tests {
@@ -43,6 +43,27 @@ func TestErrorToDetailedError_StaleSession(t *testing.T) {
 			assert.Equal(t, tc.err, detailedErr.Parent)
 		})
 	}
+}
+
+// TestErrorToDetailedError_LoginRejected covers the login/login-update validation path: when
+// session.VerifyCookie itself returns (a wrapped) session.ErrUnauthorized -- as opposed to an
+// openapi 401, which login/login-update never produces -- the error must still resolve to a
+// detailed, exit-code-2 error, but with a message and suggestion distinct from the "stale session"
+// case: suggesting `grafanapi login update` here would either be circular (login update just
+// failed) or premature (login itself never succeeded).
+func TestErrorToDetailedError_LoginRejected(t *testing.T) {
+	err := fmt.Errorf("login: could not validate session cookie against https://grafana.example.com: %w", session.ErrUnauthorized)
+
+	detailedErr := fail.ErrorToDetailedError(err)
+
+	require.NotNil(t, detailedErr)
+	assert.Equal(t, "Grafana rejected the provided session cookie", detailedErr.Summary)
+	assert.NotEqual(t, "Grafana session is stale or unauthorized", detailedErr.Summary)
+	require.Len(t, detailedErr.Suggestions, 1)
+	assert.NotContains(t, detailedErr.Suggestions[0], "login update")
+	require.NotNil(t, detailedErr.ExitCode)
+	assert.Equal(t, 2, *detailedErr.ExitCode)
+	assert.Equal(t, err, detailedErr.Parent)
 }
 
 func TestErrorToDetailedError_NonStaleErrorsPassThroughUnchanged(t *testing.T) {
@@ -142,5 +163,30 @@ func TestErrorToDetailedError_LegacyAuthFieldMigrationMessage(t *testing.T) {
 		assert.Equal(t, "Could not parse configuration", detailedErr.Summary)
 		assert.Equal(t, parseErr, detailedErr.Parent)
 		assert.Empty(t, detailedErr.Suggestions)
+	})
+
+	// The cases above hand-construct the "unknown field" error string; this one instead runs the
+	// real strict-decode goccy/go-yaml path (the same codec internal/config/loader.go uses) so
+	// the match in legacyAuthField is verified against genuine error text, not a guess at its
+	// format that could silently drift out of sync with a future goccy/go-yaml version.
+	t.Run("real strict-decode error on a legacy field matches the same way", func(t *testing.T) {
+		var grafana config.GrafanaConfig
+		decodeErr := format.NewYAMLCodec().Decode(
+			strings.NewReader("token: some-secret-value\nserver: https://grafana.example.com\n"),
+			&grafana,
+		)
+		require.Error(t, decodeErr, "decoding a legacy 'token' key into GrafanaConfig must fail strict decoding")
+
+		err := config.UnmarshalError{File: "config.yaml", Err: decodeErr}
+
+		detailedErr := fail.ErrorToDetailedError(err)
+
+		require.NotNil(t, detailedErr)
+		assert.Equal(t, "Configuration uses a removed authentication field", detailedErr.Summary)
+		assert.Contains(t, detailedErr.Details, "'token'")
+		require.NoError(t, detailedErr.Parent)
+
+		rendered := detailedErr.Error()
+		assert.NotContains(t, rendered, "some-secret-value")
 	})
 }

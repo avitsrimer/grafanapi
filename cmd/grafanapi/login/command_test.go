@@ -1,11 +1,13 @@
 package login_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 
+	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
 	"github.com/grafana/grafanapi/cmd/grafanapi/login"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/testutils"
@@ -13,12 +15,22 @@ import (
 )
 
 // fakeKeychainStore is an in-memory keychain.Store used to assert what login persists (or
-// doesn't persist) without touching the real platform Keychain.
+// doesn't persist) without touching the real platform Keychain. setErr, when non-nil, is
+// returned by Set instead of storing the cookie, so tests can exercise the "keychain write
+// failed" error path. getErr, when non-nil, is returned by Get instead of the usual lookup, so
+// tests can simulate a transient keychain failure (as opposed to keychain.ErrNotFound) when login
+// checks for a prior cookie before overwriting it.
 type fakeKeychainStore struct {
 	cookies map[string]string
+	setErr  error
+	getErr  error
 }
 
 func (f *fakeKeychainStore) Set(account, secret string) error {
+	if f.setErr != nil {
+		return f.setErr
+	}
+
 	if f.cookies == nil {
 		f.cookies = map[string]string{}
 	}
@@ -29,6 +41,10 @@ func (f *fakeKeychainStore) Set(account, secret string) error {
 }
 
 func (f *fakeKeychainStore) Get(account string) (string, error) {
+	if f.getErr != nil {
+		return "", f.getErr
+	}
+
 	cookie, ok := f.cookies[account]
 	if !ok {
 		return "", keychain.ErrNotFound
@@ -170,11 +186,13 @@ func Test_LoginCommand_validationFailureLeavesConfigAndKeychainUntouched(t *test
 	restorePrompter := login.SetPrompter(prompter)
 	defer restorePrompter()
 
+	var gotErr error
 	testCase := testutils.CommandTestCase{
 		Cmd:     login.Command(),
 		Command: []string{"--config", configFile, "--server", server.URL},
 		Assertions: []testutils.CommandAssertion{
 			testutils.CommandErrorContains("could not validate session cookie"),
+			func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err },
 		},
 	}
 	testCase.Run(t)
@@ -185,6 +203,16 @@ func Test_LoginCommand_validationFailureLeavesConfigAndKeychainUntouched(t *test
 
 	_, err = store.Get(keychain.Account("default"))
 	require.ErrorIs(t, err, keychain.ErrNotFound)
+
+	// The 401 from session.VerifyCookie must route through fail's centralized rendering (rather
+	// than falling through to the generic "Unexpected error" fallback), with exit code 2 and a
+	// message specific to a rejected login prompt rather than the "run login update" wording used
+	// for a stale, previously-working session.
+	detailedErr := fail.ErrorToDetailedError(gotErr)
+	require.NotNil(t, detailedErr)
+	require.Equal(t, "Grafana rejected the provided session cookie", detailedErr.Summary)
+	require.NotNil(t, detailedErr.ExitCode)
+	require.Equal(t, 2, *detailedErr.ExitCode)
 }
 
 func Test_LoginCommand_emptyCookieFailsWithoutPersisting(t *testing.T) {
@@ -401,11 +429,13 @@ func Test_LoginUpdateCommand_validationFailureLeavesKeychainUntouched(t *testing
 	restorePrompter := login.SetPrompter(prompter)
 	defer restorePrompter()
 
+	var gotErr error
 	testCase := testutils.CommandTestCase{
 		Cmd:     login.Command(),
 		Command: []string{"update", "--config", configFile},
 		Assertions: []testutils.CommandAssertion{
 			testutils.CommandErrorContains("could not validate session cookie"),
+			func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err },
 		},
 	}
 	testCase.Run(t)
@@ -417,6 +447,16 @@ func Test_LoginUpdateCommand_validationFailureLeavesKeychainUntouched(t *testing
 	written, err := os.ReadFile(configFile)
 	require.NoError(t, err)
 	require.Equal(t, initialContents, string(written))
+
+	// Same as login's own validation-failure path: this must route through fail's centralized
+	// rendering with exit code 2, using the "rejected" wording rather than "stale session" -- the
+	// user just re-entered a cookie at this very `login update` prompt and it was rejected, so
+	// telling them to run `login update` again would be circular.
+	detailedErr := fail.ErrorToDetailedError(gotErr)
+	require.NotNil(t, detailedErr)
+	require.Equal(t, "Grafana rejected the provided session cookie", detailedErr.Summary)
+	require.NotNil(t, detailedErr.ExitCode)
+	require.Equal(t, 2, *detailedErr.ExitCode)
 }
 
 func Test_LoginUpdateCommand_emptyCookieFailsWithoutPersisting(t *testing.T) {
@@ -444,6 +484,224 @@ func Test_LoginUpdateCommand_emptyCookieFailsWithoutPersisting(t *testing.T) {
 
 	_, err := store.Get(keychain.Account("default"))
 	require.ErrorIs(t, err, keychain.ErrNotFound)
+}
+
+func Test_LoginCommand_preservesExistingTLSSettings(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n" +
+		"  default:\n    grafana:\n      server: https://old.example.com\n" +
+		"      org-id: 42\n      tls:\n        insecure-skip-verify: true\n" +
+		"        server-name: custom.example.com\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	// Logging in again (e.g. against a new server) must not drop the existing TLS block: only
+	// server/org-id/stack-id are explicitly overridden by login, TLS is always carried over.
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Contains(t, string(written), "insecure-skip-verify: true")
+	require.Contains(t, string(written), "server-name: custom.example.com")
+	require.Contains(t, string(written), "org-id: 42")
+}
+
+func Test_LoginCommand_keychainSetFailureLeavesConfigUntouched(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "contexts:"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{setErr: errors.New("keychain unavailable")}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("storing session cookie in keychain"),
+		},
+	}
+	testCase.Run(t)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Equal(t, initialContents, string(written), "the config file must not be written when the keychain Set fails")
+}
+
+func Test_LoginCommand_configWriteFailureRollsBackKeychainItem(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root ignores file permissions, so this test cannot force a write failure")
+	}
+
+	server := newTestUserServer(t, http.StatusOK)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+	// config.Load only needs read access; config.Write reopens the file for writing and must
+	// fail here, simulating any persistence failure that happens after the keychain Set already
+	// succeeded.
+	require.NoError(t, os.Chmod(configFile, 0o400))
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("writing configuration"),
+		},
+	}
+	testCase.Run(t)
+
+	_, err := store.Get(keychain.Account("default"))
+	require.ErrorIs(t, err, keychain.ErrNotFound, "a failed config write must roll back the keychain item login just created")
+}
+
+// Test_LoginCommand_configWriteFailureRestoresPriorKeychainItemOnRelogin covers the re-login flow
+// (login re-run against an already-authenticated context, which is expected to preserve the
+// context's existing org-id/stack-id/TLS): keychainStore.Set overwrites the previously-valid
+// cookie before config.Write runs, so if config.Write then fails, the rollback must restore the
+// prior cookie rather than deleting the account outright -- otherwise a working credential would
+// be destroyed by an unrelated config-write failure.
+func Test_LoginCommand_configWriteFailureRestoresPriorKeychainItemOnRelogin(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root ignores file permissions, so this test cannot force a write failure")
+	}
+
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+	// config.Load only needs read access; config.Write reopens the file for writing and must fail
+	// here, simulating any persistence failure that happens after the keychain Set already
+	// overwrote the prior cookie.
+	require.NoError(t, os.Chmod(configFile, 0o400))
+
+	store := &fakeKeychainStore{}
+	require.NoError(t, store.Set(keychain.Account("default"), "prior-valid-cookie"))
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "new-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("writing configuration"),
+		},
+	}
+	testCase.Run(t)
+
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "prior-valid-cookie", cookie,
+		"a failed config write during re-login must restore the prior cookie instead of deleting it")
+}
+
+// Test_LoginCommand_configWriteFailureLeavesItemOnTransientGetError covers the narrow case where
+// keychainStore.Get fails for a reason other than keychain.ErrNotFound while checking for a prior
+// cookie (e.g. a transient platform keychain error), and config.Write then also fails. login
+// cannot tell whether a prior cookie existed, so the rollback must not delete the keychain item --
+// deleting would risk destroying a working credential it simply failed to read. It must also not
+// pretend it restored anything; leaving the just-written cookie in place is the safe outcome.
+func Test_LoginCommand_configWriteFailureLeavesItemOnTransientGetError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root ignores file permissions, so this test cannot force a write failure")
+	}
+
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+	require.NoError(t, os.Chmod(configFile, 0o400))
+
+	store := &fakeKeychainStore{getErr: errors.New("keychain: transient failure")}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "new-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("writing configuration"),
+		},
+	}
+	testCase.Run(t)
+
+	// getErr only affects the "check for a prior cookie" read; Set still writes for real, so the
+	// new cookie must still be there afterwards -- the rollback must not have deleted it.
+	store.getErr = nil
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "new-cookie", cookie,
+		"a config write failure must not delete the keychain item when login couldn't tell whether a prior cookie existed")
+}
+
+func Test_LoginUpdateCommand_keychainSetFailureSurfacesError(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	store.setErr = errors.New("keychain unavailable")
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "fresh-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("storing session cookie in keychain"),
+		},
+	}
+	testCase.Run(t)
+
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "stale-cookie", cookie, "a failed keychain Set must not leave the stale cookie overwritten with a half-applied value")
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Equal(t, initialContents, string(written), "login update must never modify the configuration file, even on keychain failure")
 }
 
 func Test_LoginCommand_explicitContextFlag(t *testing.T) {

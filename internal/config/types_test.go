@@ -80,6 +80,18 @@ func TestGrafanaConfig_IsEmpty(t *testing.T) {
 	req.False(config.GrafanaConfig{Server: "value"}.IsEmpty())
 }
 
+// TestGrafanaConfig_IsEmpty_IgnoresSessionCookie guards against a regression where an
+// otherwise-empty "grafana: {}" block with a stale/orphaned Keychain entry (populated by
+// ResolveSessionCookie independently of the file contents) would report IsEmpty() == false,
+// producing the more confusing "server is required" validation error instead of "grafana config
+// is required".
+func TestGrafanaConfig_IsEmpty_IgnoresSessionCookie(t *testing.T) {
+	req := require.New(t)
+
+	req.True(config.GrafanaConfig{SessionCookie: "stale-cookie-value"}.IsEmpty())
+	req.False(config.GrafanaConfig{Server: "value", SessionCookie: "stale-cookie-value"}.IsEmpty())
+}
+
 func TestGrafanaConfig_Validate_AllowsDiscoveredStackID(t *testing.T) {
 	req := require.New(t)
 

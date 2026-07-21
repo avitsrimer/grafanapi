@@ -35,6 +35,9 @@ make tests
 # Run tests for a specific package
 go test -v ./internal/config
 
+# Cross-build for linux/CGO_ENABLED=0 (keeps the darwin-only keychain stub compiling)
+make cross-build
+
 # Install to $GOPATH/bin
 make install
 
@@ -178,7 +181,8 @@ grafanapi follows the Cobra command pattern with three main command groups:
 
 **internal/session/** - Session cookie verification and stale-session errors
 - `VerifyCookie`: validates a cookie via `GET /api/user`
-- `StaleSessionError`, `IsUnauthorized`: shared by `login`/`login update` and central 401 handling
+- `ErrUnauthorized`: sentinel returned by `VerifyCookie` on a 401; recognized centrally by
+  `cmd/grafanapi/fail.convertSessionErrors`
 
 **internal/secrets/** - Secret management
 - Secure handling of sensitive configuration data (currently just TLS key data; the session cookie is never serialized to disk)
@@ -222,6 +226,18 @@ config-load time.
 - Resource filtering/selector tests in `internal/resources/*_test.go`
 - Test data in `testdata/` directories
 - Use `make tests` to run all tests with race detection
+- **Build-tag test convention** (`internal/keychain/`): platform-specific behavior is split into
+  a `//go:build darwin` test file (exercises the real cgo Keychain against throwaway accounts,
+  cleaned up via `t.Cleanup`) and a `//go:build !darwin` test file (asserts the stub's
+  "unsupported platform" error). CI runs the darwin file on a `macos-latest` job and the
+  `!darwin` file as part of the ubuntu-latest cross-build/test jobs — never assume a single job
+  exercises both.
+- **Package-level test-seam pattern** (`cmd/grafanapi/login/`, `cmd/grafanapi/config/`): production
+  code depends on `keychain.Store` (and, for `login`, a `prompter` interface) via a package-level
+  `var` defaulting to the real implementation. Tests swap in a fake via an exported
+  `SetKeychainStore(store)` / `SetPrompter(p)` function, each returning a restore closure to
+  `defer`. This keeps commands free of dependency-injection plumbing while still allowing tests to
+  avoid the real Keychain/TTY.
 
 ## Code Generation
 

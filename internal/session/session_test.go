@@ -69,7 +69,7 @@ func TestVerifyCookie_UnexpectedStatus(t *testing.T) {
 
 	err := session.VerifyCookie(t.Context(), gCtx)
 	require.Error(t, err)
-	assert.False(t, session.IsUnauthorized(err))
+	assert.NotErrorIs(t, err, session.ErrUnauthorized)
 }
 
 func TestVerifyCookie_TLSSkipVerify(t *testing.T) {

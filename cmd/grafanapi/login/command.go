@@ -194,12 +194,40 @@ func runLogin(cmd *cobra.Command, opts *Options) error {
 	makeCurrent := cfg.CurrentContext == ""
 	cfg.SetContext(name, makeCurrent, newContext)
 
-	if err := config.Write(ctx, opts.configSource(), cfg); err != nil {
-		return fmt.Errorf("login: writing configuration: %w", err)
-	}
+	// login can be re-run against an already-authenticated context (the existing org-id/stack-id/
+	// TLS block above is preserved for exactly that flow), in which case a cookie already sits in
+	// the Keychain for this account. Read it before overwriting it: if the subsequent config.Write
+	// fails, we can restore the prior cookie instead of deleting the account outright, so a
+	// previously-working credential is never destroyed just because persisting the new config
+	// failed. keychainStore.Get returning keychain.ErrNotFound means there genuinely is no prior
+	// cookie — nothing to lose or restore either way. Any other Get error is NOT the same as "no
+	// prior cookie": it only means we failed to read whatever is there, so the rollback below
+	// treats it conservatively instead of assuming it's safe to delete.
+	priorCookie, priorErr := keychainStore.Get(keychain.Account(name))
+	hadPriorCookie := priorErr == nil
+	priorLookupFailed := priorErr != nil && !errors.Is(priorErr, keychain.ErrNotFound)
 
+	// Store the cookie before writing the config: if Set fails, nothing has been persisted to
+	// disk yet, so there's no partial state to clean up. If the subsequent config.Write fails
+	// instead, best-effort roll back the Keychain item: restore the prior cookie if this context
+	// already had one, delete the just-created entry if it didn't, or — if we couldn't even tell
+	// whether a prior cookie existed — leave the item untouched rather than risk destroying a
+	// working credential we simply failed to read.
 	if err := keychainStore.Set(keychain.Account(name), cookie); err != nil {
 		return fmt.Errorf("login: storing session cookie in keychain: %w", err)
+	}
+
+	if err := config.Write(ctx, opts.configSource(), cfg); err != nil {
+		switch {
+		case hadPriorCookie:
+			_ = keychainStore.Set(keychain.Account(name), priorCookie)
+		case priorLookupFailed:
+			io.Warning(cmd.ErrOrStderr(), "could not determine whether context %q already had a session cookie; leaving the keychain item as stored rather than risk deleting an existing credential", name)
+		default:
+			_ = keychainStore.Delete(keychain.Account(name))
+		}
+
+		return fmt.Errorf("login: writing configuration: %w", err)
 	}
 
 	io.Success(cmd.OutOrStdout(), "Logged in to %s as context %q", server, name)

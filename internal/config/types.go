@@ -156,6 +156,13 @@ func (grafana GrafanaConfig) Validate(contextName string) error {
 }
 
 func (grafana GrafanaConfig) IsEmpty() bool {
+	// SessionCookie is populated from the Keychain independently of the file contents (see
+	// ResolveSessionCookie / ResolveContextSessionCookie), so it must not affect emptiness: a
+	// stale/orphaned Keychain entry for an otherwise-empty "grafana: {}" block must still report
+	// IsEmpty() == true, so Context.Validate() surfaces "grafana config is required" rather than
+	// the more confusing "server is required".
+	grafana.SessionCookie = ""
+
 	return grafana == GrafanaConfig{}
 }
 

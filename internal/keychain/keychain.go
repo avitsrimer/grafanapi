@@ -38,7 +38,10 @@ func NewStore() Store {
 // account (see Account). The interface is deliberately platform-neutral so callers and tests
 // never need cgo types.
 type Store interface {
-	// Set stores secret under account, creating or replacing the item without prompting.
+	// Set stores secret under account, creating or replacing the item without prompting. Set
+	// must be atomic: if it returns an error, any secret previously stored under account must
+	// be left intact (implementations must not implement this as a delete followed by an add,
+	// since a failure between those two steps would destroy the prior value with no recovery).
 	Set(account, secret string) error
 	// Get returns the secret for account, or ErrNotFound if no item exists.
 	Get(account string) (string, error)

@@ -25,12 +25,3 @@ func NewTransport(gCtx *config.Context) *http.Transport {
 		TLSClientConfig:       tlsConfig,
 	}
 }
-
-func NewHTTPClient(gCtx *config.Context) (*http.Client, error) {
-	return &http.Client{
-		Timeout: 10 * time.Second, // TODO: make this configurable maybe?
-		Transport: &LoggedHTTPRoundTripper{
-			DecoratedTransport: NewTransport(gCtx),
-		},
-	}, nil
-}

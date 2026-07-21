@@ -5,10 +5,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/httputils"
 )
+
+// proxyClientTimeout bounds the dashboard-proxy request to the configured Grafana server.
+const proxyClientTimeout = 10 * time.Second
 
 func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -28,10 +32,13 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 		AuthenticateRequest(cfg.Grafana, req)
 		req.Header.Set("User-Agent", httputils.UserAgent)
 
-		client, err := httputils.NewHTTPClient(cfg)
-		if err != nil {
-			httputils.Error(r, w, http.StatusText(http.StatusInternalServerError), err, http.StatusInternalServerError)
-			return
+		// Built directly from httputils.NewTransport, deliberately not wrapped in any
+		// debug-logging round-tripper: dumping the full request (headers included, unredacted)
+		// would put the session cookie set by AuthenticateRequest above into logs reachable via
+		// -vvv.
+		client := &http.Client{
+			Timeout:   proxyClientTimeout,
+			Transport: httputils.NewTransport(cfg),
 		}
 
 		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {

@@ -14,8 +14,9 @@ import (
 // fakeKeychainStore is an in-memory keychain.Store used to test credential resolution wired into
 // Options.LoadConfig/LoadRESTConfig without touching the real platform Keychain.
 type fakeKeychainStore struct {
-	cookies  map[string]string
-	errOnGet error
+	cookies     map[string]string
+	errOnGet    error
+	errOnDelete error
 }
 
 func (f *fakeKeychainStore) Set(account, secret string) error {
@@ -42,6 +43,10 @@ func (f *fakeKeychainStore) Get(account string) (string, error) {
 }
 
 func (f *fakeKeychainStore) Delete(account string) error {
+	if f.errOnDelete != nil {
+		return f.errOnDelete
+	}
+
 	delete(f.cookies, account)
 
 	return nil
@@ -295,6 +300,88 @@ current-context: dev`),
 		},
 	}
 	viewCmd.Run(t)
+}
+
+func Test_UnsetCommand_removesEntireContextFromKeychain(t *testing.T) {
+	cfg := `contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99
+current-context: dev`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{cookies: map[string]string{
+		keychain.Account("dev"): "cookie-value",
+	}}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"unset", "--config", configFile, "contexts.dev"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	_, err := store.Get(keychain.Account("dev"))
+	require.ErrorIs(t, err, keychain.ErrNotFound, "unsetting an entire context must also purge its Keychain item")
+}
+
+func Test_UnsetCommand_nestedFieldDoesNotTouchKeychain(t *testing.T) {
+	cfg := `contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      org-id: 99
+current-context: dev`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{cookies: map[string]string{
+		keychain.Account("dev"): "cookie-value",
+	}}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"unset", "--config", configFile, "contexts.dev.grafana.org-id"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	cookie, err := store.Get(keychain.Account("dev"))
+	require.NoError(t, err, "unsetting a nested field must not touch the Keychain item for the context")
+	require.Equal(t, "cookie-value", cookie)
+}
+
+func Test_UnsetCommand_keychainDeleteFailureDoesNotFailCommand(t *testing.T) {
+	cfg := `contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+current-context: dev`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	store := &fakeKeychainStore{errOnDelete: errors.New("keychain: unsupported platform")}
+	restore := config.SetKeychainStore(store)
+	defer restore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"unset", "--config", configFile, "contexts.dev"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
 }
 
 func Test_ViewCommand_withEnvironmentVariables(t *testing.T) {

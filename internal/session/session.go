@@ -13,18 +13,25 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/httputils"
 )
 
+// verifyTimeout bounds the GET /api/user request VerifyCookie issues. Without it, an
+// unreachable/firewalled Grafana host would hang the calling command (login, login update, and
+// any centralized re-verification) indefinitely instead of failing with a clear network error;
+// every other HTTP client in this codebase (the bootdata client in internal/config/stack_id.go)
+// sets one too.
+const verifyTimeout = 10 * time.Second
+
 // VerifyCookie checks whether gCtx's session cookie is still accepted by its configured Grafana
 // server via GET /api/user. It returns nil on 200 OK, ErrUnauthorized on 401, and a wrapped error
-// for any other failure (network error, unexpected status, ...).
+// for any other failure (network error, unexpected status, timeout, ...).
 //
-// The verification request is issued over the TLS-aware httputils.NewTransport directly (not
-// httputils.NewHTTPClient, whose LoggedHTTPRoundTripper dumps full requests/responses at debug
-// level) so the session cookie is never written to logs.
+// The verification request is issued over the TLS-aware httputils.NewTransport directly, with no
+// debug-logging round-tripper wrapped around it, so the session cookie is never written to logs.
 func VerifyCookie(ctx context.Context, gCtx *config.Context) error {
 	if gCtx == nil || gCtx.Grafana == nil {
 		return errors.New("session: no grafana context configured")
@@ -41,7 +48,7 @@ func VerifyCookie(ctx context.Context, gCtx *config.Context) error {
 	}
 	req.Header.Set("Cookie", config.CookieHeaderValue(gCtx.Grafana.SessionCookie))
 
-	client := &http.Client{Transport: httputils.NewTransport(gCtx)}
+	client := &http.Client{Timeout: verifyTimeout, Transport: httputils.NewTransport(gCtx)}
 
 	resp, err := client.Do(req)
 	if err != nil {

@@ -26,12 +26,12 @@ install, configure and use the Grafana CLI.
 ## Maturity
 
 > [!WARNING]
-> **This repository is currently *in public preview*, which means that it is still under active development.**
-> Bugs and issues are handled solely by Engineering teams. On-call support or SLAs are not available.
+> **This fork is under active development and maintained independently, on a best-effort basis.**
+> There are no on-call support or SLAs. Bugs and issues are tracked and addressed as time allows.
 
-This project should be considered as "public preview". While it is used by Grafana Labs, it is still under active development.
-
-Additional information can be found in [Release life cycle for Grafana Labs](https://grafana.com/docs/release-life-cycle/).
+This project should be considered a personal fork, not an officially supported Grafana Labs
+project. See the upstream [`grafanactl`](https://github.com/grafana/grafanactl) project for the
+Grafana Labs-maintained tool this fork is based on.
 
 ## Contributing
 

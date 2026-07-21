@@ -39,8 +39,11 @@ discover the Grafana Cloud stack ID automatically using the entered cookie.
 
 Once a session cookie eventually goes stale (for example, after signing out in
 the browser, or once the underlying session expires), commands fail with a
-"session is stale" error. Refresh the stored cookie without touching any other
-context settings:
+"session is stale" error and exit with status code **2** — distinct from the
+generic exit code 1 used for other errors, so CI/CD scripts can branch on it
+specifically (for example, to trigger an alert to re-run `grafanapi login
+update` rather than treating it as an ordinary failure). Refresh the stored
+cookie without touching any other context settings:
 
 ```shell
 grafanapi login update

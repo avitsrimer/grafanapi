@@ -16,9 +16,19 @@ import (
 	k8sapi "k8s.io/apimachinery/pkg/api/errors"
 )
 
-// staleSessionSuggestion is shown whenever the Grafana session cookie is rejected or missing,
-// pointing the user at the command that re-establishes it.
+// staleSessionSuggestion is shown whenever a previously-stored Grafana session cookie is rejected
+// or missing during normal use, pointing the user at the command that refreshes it.
 const staleSessionSuggestion = "Run: grafanapi login update"
+
+// loginRejectedSuggestion is shown when the cookie the user just entered at a login/login-update
+// prompt is itself rejected: unlike staleSessionSuggestion, it must not tell the user to run
+// `login update`, since that is either the very command that just failed (login update) or a
+// command that isn't valid yet for a context that was never successfully authenticated (login).
+const loginRejectedSuggestion = "Verify the session cookie value and try again"
+
+// sessionAuthExitCode is the exit code used for both the "stale session" and "login rejected"
+// cases: any error condition where the user must (re-)authenticate before retrying.
+const sessionAuthExitCode = 2
 
 // legacyAuthFieldNames lists the GrafanaConfig fields that were removed in favor of
 // session-cookie authentication. A config file that still contains one of these keys fails
@@ -41,7 +51,7 @@ func ErrorToDetailedError(err error) *DetailedError {
 		convertFSErrors,        // FS-related
 		convertResourcesErrors, // Resources-related
 		convertNetworkErrors,   // Network-related errors
-		convertSessionErrors,   // Stale/unauthorized Grafana session (openapi 401, StaleSessionError)
+		convertSessionErrors,   // Stale/unauthorized Grafana session (openapi 401, session.ErrUnauthorized)
 		convertAPIErrors,       // API-related errors (k8s dynamic-client StatusError)
 	}
 
@@ -170,35 +180,51 @@ func convertAPIErrors(err error) (*DetailedError, bool) {
 }
 
 // convertSessionErrors handles Grafana session-cookie authentication failures that do not surface
-// as a k8s StatusError: a *session.StaleSessionError produced by login/login-update's own
-// validation path, and a 401 from the grafana-openapi-client-go transport (e.g. `config check` /
-// grafana.GetVersion). Both render as the same stale-session message with exit code 2. A raw k8s
-// 401 is handled by convertAPIErrors instead, since it needs the *k8sapi.StatusError type assertion
-// this function does not perform.
+// as a k8s StatusError: a 401 from the grafana-openapi-client-go transport (e.g. `config check` /
+// grafana.GetVersion) produced during normal use of an already-established context, and a bare
+// session.ErrUnauthorized returned directly by session.VerifyCookie when login/login-update's own
+// cookie-validation prompt is rejected. The former renders as the "stale session" message (exit
+// code sessionAuthExitCode, suggesting `login update`); the latter renders as a distinct
+// "login rejected" message (same exit code) since suggesting `login update` there is either
+// circular (that's the command that just failed) or premature (the context was never successfully
+// authenticated in the first place). A raw k8s 401 is handled by convertAPIErrors instead, since
+// it needs the *k8sapi.StatusError type assertion this function does not perform.
 func convertSessionErrors(err error) (*DetailedError, bool) {
-	staleErr := &session.StaleSessionError{}
-	if errors.As(err, &staleErr) {
-		return staleSessionError(err), true
-	}
-
 	apiErr := &runtime.APIError{}
 	if errors.As(err, &apiErr) && apiErr.Code == http.StatusUnauthorized {
 		return staleSessionError(err), true
 	}
 
+	if errors.Is(err, session.ErrUnauthorized) {
+		return loginRejectedError(err), true
+	}
+
 	return nil, false
 }
 
-// staleSessionError builds the user-facing DetailedError for any Grafana session-cookie
-// authentication failure (stale/expired/missing cookie), regardless of which transport surfaced
-// the underlying 401.
+// staleSessionError builds the user-facing DetailedError for a previously-established Grafana
+// session-cookie that is no longer accepted (stale/expired/missing cookie) during normal use,
+// regardless of which transport surfaced the underlying 401.
 func staleSessionError(err error) *DetailedError {
-	exitCode := 2
+	exitCode := sessionAuthExitCode
 
 	return &DetailedError{
 		Parent:      err,
 		Summary:     "Grafana session is stale or unauthorized",
 		Suggestions: []string{staleSessionSuggestion},
+		ExitCode:    &exitCode,
+	}
+}
+
+// loginRejectedError builds the user-facing DetailedError for a session cookie that was rejected
+// (401) while being validated at a login/login-update prompt, i.e. before it was ever persisted.
+func loginRejectedError(err error) *DetailedError {
+	exitCode := sessionAuthExitCode
+
+	return &DetailedError{
+		Parent:      err,
+		Summary:     "Grafana rejected the provided session cookie",
+		Suggestions: []string{loginRejectedSuggestion},
 		ExitCode:    &exitCode,
 	}
 }
