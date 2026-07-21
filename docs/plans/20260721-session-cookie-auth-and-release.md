@@ -435,18 +435,31 @@ grafanapi login update [--context NAME]
 - Create: `cmd/grafanapi/login/testdata/` (fixtures as needed)
 - Modify: `cmd/grafanapi/root/command.go` (register `login`)
 
-- [ ] Implement `prompter` (`promptLine`, `promptSecret`) with `ttyPrompter` opening `/dev/tty` and
+- [x] Implement `prompter` (`promptLine`, `promptSecret`) with `ttyPrompter` opening `/dev/tty` and
       `term.ReadPassword` for no-echo; injectable for tests.
-- [ ] Implement `login`: resolve context name; prompt server unless `--server`; prompt cookie
+- [x] Implement `login`: resolve context name; prompt server unless `--server`; prompt cookie
       no-echo; optional `--org-id`/`--stack-id` (else attempt `DiscoverStackID` with the cookie);
       validate via `session.VerifyCookie`; on success `config.Write` the context (make current if
       none) then `keychain.Set(Account(name), cookie)`; on validation failure persist nothing.
-- [ ] Register the command in `root.Command`; ensure the cookie is never a flag/env var.
-- [ ] Write tests for success cases: fake prompter + `httptest.Server` 200 → context written
+- [x] Register the command in `root.Command`; ensure the cookie is never a flag/env var.
+- [x] Write tests for success cases: fake prompter + `httptest.Server` 200 → context written
       (no secret in file) and fake keychain received the cookie; `--server` skips the URL prompt.
-- [ ] Write tests for error cases: server returns 401 → error, config file and keychain untouched;
+- [x] Write tests for error cases: server returns 401 → error, config file and keychain untouched;
       empty cookie input → error; missing server with no `--server` and empty prompt → error.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
+- [x] ➕ `prompter`'s methods are exported (`PromptLine`/`PromptSecret`) even though the interface
+      type itself stays unexported: this repo's test convention is external `_test` packages
+      (`login_test`), and a type defined in another package cannot implement an interface's
+      *unexported* methods (Go scopes unexported method names per-package for interface
+      satisfaction) — only the type name needs to stay private to the package's public API.
+- [x] ➕ Discovered while implementing that the plan's "server/org-id/stack-id/TLS untouched if
+      pre-existing" requirement (Login command surface section) needs org-id/stack-id carried
+      over from any existing context, not just TLS — added that pass-through (defaulting to the
+      existing values when `--org-id`/`--stack-id` aren't passed, before attempting discovery).
+- [x] ➕ `go mod tidy` promoted `golang.org/x/term` (now imported directly by `prompt.go`) and
+      `github.com/go-openapi/runtime` (already imported directly by `internal/session/errors.go`
+      since Task 2, but not yet tidied) from indirect to direct in `go.mod`; `go mod vendor`
+      confirmed the vendor tree needed no further changes.
 
 ### Task 7 — `login update` subcommand
 
