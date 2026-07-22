@@ -81,7 +81,7 @@ make clean
 
 ### Command Structure
 
-grafanapi follows the Cobra command pattern with five main command groups:
+grafanapi follows the Cobra command pattern with six main command groups:
 
 1. **login**: Authenticate to a Grafana instance using a session cookie
    - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
@@ -115,6 +115,10 @@ grafanapi follows the Cobra command pattern with five main command groups:
    - `datasources`: GET `/api/datasources`, sort by name, and render as a table (default,
      NAME/UID/TYPE/DEFAULT columns) or `json`/`yaml`
 
+6. **install-skill**: Install the bundled Claude Code skill
+   - `install-skill`: Write the embedded `skill/grafanapi` tree to `<--to>/skills/grafanapi`
+     (default `--to ~/.claude`), replacing any existing installation. No config/auth dependency.
+
 ### Core Packages
 
 **cmd/grafanapi/** - CLI command implementations
@@ -126,8 +130,17 @@ grafanapi follows the Cobra command pattern with five main command groups:
   `internal/explore`; no domain logic lives here
 - `datasources/`: `datasources` — thin Cobra wiring (flags, a `table` `format.Codec` adapter)
   calling the generated Grafana client directly; no domain logic to extract for a single list call
+- `installskill/`: `install-skill` — writes the `skill.Files` embedded FS to `<--to>/skills/grafanapi`
+  (`os.RemoveAll` then `fs.WalkDir`, directories `0o750`/files `0o600`); no config/auth dependency
 - `fail/`: Error handling and detailed error messages
 - `io/`: Output formatting and user messages
+
+**skill/** - Embedded Claude Code skill (repo root, not under `internal/` or `cmd/`)
+- `//go:embed grafanapi` embeds `skill/grafanapi/SKILL.md` into `skill.Files` (an `embed.FS`) at
+  build time, so the installed binary can write it from any directory regardless of source
+  checkout — consumed only by `cmd/grafanapi/installskill`
+- `grafanapi/SKILL.md`: the Claude Code skill content itself (frontmatter `name`/`description`
+  plus usage docs); edit this file directly to change what `install-skill` writes
 
 **internal/config/** - Configuration management
 - Context-based configuration (similar to kubectl contexts)

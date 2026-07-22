@@ -11,6 +11,7 @@ import (
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/cmd/grafanapi/datasources"
 	"github.com/grafana/grafanapi/cmd/grafanapi/explore"
+	"github.com/grafana/grafanapi/cmd/grafanapi/installskill"
 	"github.com/grafana/grafanapi/cmd/grafanapi/login"
 	"github.com/grafana/grafanapi/cmd/grafanapi/resources"
 	"github.com/grafana/grafanapi/internal/logs"
@@ -63,6 +64,7 @@ func Command(version string) *cobra.Command {
 	rootCmd.AddCommand(config.Command())
 	rootCmd.AddCommand(datasources.Command())
 	rootCmd.AddCommand(explore.Command())
+	rootCmd.AddCommand(installskill.Command())
 	rootCmd.AddCommand(login.Command())
 	rootCmd.AddCommand(resources.Command())
 
