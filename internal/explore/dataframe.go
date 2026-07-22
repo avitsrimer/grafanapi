@@ -67,7 +67,7 @@ type FrameData struct {
 // FirstError returns the refID and message of the first non-empty per-refId
 // error in the response, in sorted refID order. It returns two empty strings
 // when there is no error.
-func (r *QueryResponse) FirstError() (refID, msg string) {
+func (r *QueryResponse) FirstError() (string, string) {
 	refIDs := make([]string, 0, len(r.Results))
 	for id := range r.Results {
 		refIDs = append(refIDs, id)

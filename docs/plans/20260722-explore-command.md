@@ -477,19 +477,19 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error
 - Create: `internal/explore/query.go`
 - Create: `internal/explore/query_test.go`
 
-- [ ] Implement `QueryFieldForType(dsType, override)` with the type→field table and SQL
+- [x] Implement `QueryFieldForType(dsType, override)` with the type→field table and SQL
       `format:"table"` extras; unknown type (no override) errors and names the type + suggests
       `--field`; `--field` overrides the key while keeping type extras.
-- [ ] Implement `--param` parsing (`key=value`, value → JSON when `json.Unmarshal` succeeds else raw
+- [x] Implement `--param` parsing (`key=value`, value → JSON when `json.Unmarshal` succeeds else raw
       string) and `BuildQuery(ds, queryStr, QueryOptions)` assembling the precedence chain (base →
       extras → field → interval/instant → params-win), fixed `refId:"A"`, `datasource:{uid,type}`.
-- [ ] Implement `--interval` → `intervalMs` (`time.ParseDuration(...).Milliseconds()`), `--instant`
+- [x] Implement `--interval` → `intervalMs` (`time.ParseDuration(...).Milliseconds()`), `--instant`
       → `instant:true,range:false`, `--max-data-points` → `maxDataPoints`, and the `From`/`To`
       passthrough into the request body.
-- [ ] Write table-driven tests for every mapping, the SQL `format:"table"` default, `--field`
+- [x] Write table-driven tests for every mapping, the SQL `format:"table"` default, `--field`
       override, unknown-type error, param JSON-vs-string parsing and override precedence, interval
       conversion, instant, and verbatim from/to.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
 
 ### Task 4 — Query execution (raw `POST /api/ds/query`)
 
