@@ -14,7 +14,7 @@ body:
         - Include the full command you ran, with all flags
         - Check your configuration: `grafanapi config view`
         - Try the command with `--dry-run` if applicable
-        - Look for similar issues: [Search existing issues](https://github.com/grafana/grafanapi/issues)
+        - Look for similar issues: [Search existing issues](https://github.com/avitsrimer/grafanapi/issues)
 
   - type: input
     id: grafanapi_version

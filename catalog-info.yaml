@@ -5,7 +5,7 @@ metadata:
   title: grafanapi
   description: Command-line tool designed to simplify interaction with Grafana resources.
   annotations:
-    github.com/project-slug: grafana/grafanapi
+    github.com/project-slug: avitsrimer/grafanapi
   tags:
     - gitops
   links:
