@@ -20,7 +20,6 @@ import (
 	"github.com/grafana/grafanapi/internal/httputils"
 	"github.com/grafana/grafanapi/internal/logs"
 	"github.com/grafana/grafanapi/internal/resources"
-	"github.com/grafana/grafanapi/internal/server/grafana"
 	"github.com/grafana/grafanapi/internal/server/handlers"
 	"github.com/grafana/grafanapi/internal/server/livereload"
 )
@@ -63,18 +62,22 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
+	transport, err := httputils.NewTransport(s.context)
+	if err != nil {
+		return fmt.Errorf("could not build the Grafana proxy transport: %w", err)
+	}
+
 	s.subpath = strings.TrimSuffix(u.Path, "/")
 	s.proxy = &httputil.ReverseProxy{
 		// WrapWithSession injects the session cookie and rotates it on a 401 (see
-		// internal/config/session_source.go); AuthenticateRequest below is still called for
-		// every request and re-sets the cookie to whatever is currently live, which is harmless
-		// and wins after a rotation.
-		Transport: s.context.Grafana.WrapWithSession(httputils.NewTransport(s.context)),
+		// internal/config/session_source.go). It wraps Transport, which runs AFTER Rewrite below,
+		// and unconditionally overwrites the Cookie header on every request, so it always wins -
+		// there is deliberately no cookie-setting left in Rewrite (internal/server/grafana/
+		// requests.go's dashboard-proxy client applies the same reasoning).
+		Transport: s.context.Grafana.WrapWithSession(transport),
 		Rewrite: func(r *httputil.ProxyRequest) {
 			u.Path = "" // to ensure possible sub-paths won't be added twice.
 			r.SetURL(u)
-
-			grafana.AuthenticateRequest(s.context.Grafana, r.Out)
 
 			r.Out.Header.Del("Origin")
 			r.Out.Header.Set("User-Agent", httputils.UserAgent)

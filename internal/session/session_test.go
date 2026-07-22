@@ -108,3 +108,20 @@ func TestVerifyCookie_InvalidServerAddress(t *testing.T) {
 	err := session.VerifyCookie(t.Context(), gCtx)
 	require.Error(t, err)
 }
+
+// TestVerifyCookie_MalformedTLSConfigSurfacesError ties finding 4 (TLS.ToStdTLSConfig propagating
+// PEM errors) to the login/login-update verification path: malformed CAData must surface as an
+// error from VerifyCookie rather than silently falling back to a plain system-trust TLS config.
+func TestVerifyCookie_MalformedTLSConfigSurfacesError(t *testing.T) {
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        "https://example.invalid",
+			SessionCookie: "abc123",
+			TLS:           &config.TLS{CAData: []byte("not a certificate")},
+		},
+	}
+
+	err := session.VerifyCookie(t.Context(), gCtx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ca-data")
+}

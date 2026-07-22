@@ -4,64 +4,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/go-openapi/runtime"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/grafana"
-	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// fakeStore is a minimal in-memory keychain.Store used only to observe whether/what
-// ClientFromContext's rotating transport persists after a successful rotation.
-type fakeStore struct {
-	mu     sync.Mutex
-	values map[string]string
-}
-
-func newFakeStore() *fakeStore {
-	return &fakeStore{values: map[string]string{}}
-}
-
-func (f *fakeStore) Set(account, secret string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.values[account] = secret
-
-	return nil
-}
-
-func (f *fakeStore) Get(account string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	v, ok := f.values[account]
-	if !ok {
-		return "", keychain.ErrNotFound
-	}
-
-	return v, nil
-}
-
-func (f *fakeStore) Delete(account string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.values, account)
-
-	return nil
-}
-
-func (f *fakeStore) value(account string) (string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	v, ok := f.values[account]
-
-	return v, ok
-}
 
 func TestGetVersion_AttachesSessionCookie(t *testing.T) {
 	var gotCookie string
@@ -83,6 +35,22 @@ func TestGetVersion_AttachesSessionCookie(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "12.0.0", version.String())
 	assert.Equal(t, "grafana_session=abc123", gotCookie)
+}
+
+// TestClientFromContext_MalformedTLSConfigSurfacesError ties finding 4 (TLS.ToStdTLSConfig
+// propagating PEM errors) to the openapi client path: malformed CAData must surface as an error
+// from ClientFromContext rather than silently building a client that trusts the system root pool.
+func TestClientFromContext_MalformedTLSConfigSurfacesError(t *testing.T) {
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server: "https://example.invalid",
+			TLS:    &config.TLS{CAData: []byte("not a certificate")},
+		},
+	}
+
+	_, err := grafana.ClientFromContext(gCtx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ca-data")
 }
 
 func TestGetVersion_NoCookieMeansNoCookieHeader(t *testing.T) {
@@ -134,7 +102,7 @@ func TestGetVersion_RotatesSessionOn401(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	store := newFakeStore()
+	store := testutils.NewFakeKeychainStore()
 	gCtx := &config.Context{
 		Grafana: &config.GrafanaConfig{
 			Server:  server.URL,
@@ -147,7 +115,7 @@ func TestGetVersion_RotatesSessionOn401(t *testing.T) {
 	assert.Equal(t, "12.0.0", version.String())
 	assert.Equal(t, int32(1), rotateCalls.Load())
 
-	stored, ok := store.value(account)
+	stored, ok := store.Value(account)
 	assert.True(t, ok)
 	assert.Equal(t, newCookie, stored)
 }
@@ -169,7 +137,7 @@ func TestGetVersion_RotateRejectedSurfacesOriginal401(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	store := newFakeStore()
+	store := testutils.NewFakeKeychainStore()
 	gCtx := &config.Context{
 		Grafana: &config.GrafanaConfig{
 			Server:  server.URL,
@@ -184,6 +152,6 @@ func TestGetVersion_RotateRejectedSurfacesOriginal401(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusUnauthorized, apiErr.Code)
 
-	_, ok := store.value(account)
+	_, ok := store.Value(account)
 	assert.False(t, ok)
 }

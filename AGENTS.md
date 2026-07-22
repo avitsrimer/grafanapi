@@ -174,6 +174,10 @@ grafanapi follows the Cobra command pattern with three main command groups:
 - File watching with fsnotify
 - Dashboard and folder preview handlers
 - Script execution for generated resources
+- Cookie injection and rotate-on-401 are transport-level here too: `server.go`'s
+  `httputil.ReverseProxy` and `server/grafana/requests.go`'s dashboard-proxy client both wrap their
+  `Transport` (built from `httputils.NewTransport`) with `(GrafanaConfig).WrapWithSession`, so a
+  `401` from Grafana triggers the same rotate-and-retry as the k8s/openapi paths
 
 **internal/grafana/** - Grafana API client
 - Wraps grafana-openapi-client-go

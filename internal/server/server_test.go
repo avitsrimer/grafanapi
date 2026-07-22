@@ -6,67 +6,15 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/httputils"
-	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// fakeStore is an in-memory keychain.Store for tests local to this package (mirrors the fakeStore
-// helpers used in internal/config and internal/grafana test suites for the same purpose - see
-// docs/plans/20260722-auto-rotate-session-on-401.md, Task 5).
-type fakeStore struct {
-	mu     sync.Mutex
-	values map[string]string
-}
-
-func newFakeStore() *fakeStore {
-	return &fakeStore{values: map[string]string{}}
-}
-
-func (f *fakeStore) Set(account, secret string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.values[account] = secret
-
-	return nil
-}
-
-func (f *fakeStore) Get(account string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	v, ok := f.values[account]
-	if !ok {
-		return "", keychain.ErrNotFound
-	}
-
-	return v, nil
-}
-
-func (f *fakeStore) Delete(account string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	delete(f.values, account)
-
-	return nil
-}
-
-func (f *fakeStore) value(account string) (string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	v, ok := f.values[account]
-
-	return v, ok
-}
 
 // newReverseProxy builds a ReverseProxy the same way Server.Start wires the "s.proxy" field
 // (internal/server/server.go): Transport goes through GrafanaConfig.WrapWithSession so the proxy
@@ -78,8 +26,11 @@ func newReverseProxy(t *testing.T, gCtx *config.Context, backendURL string) *htt
 	target, err := url.Parse(backendURL)
 	require.NoError(t, err)
 
+	transport, err := httputils.NewTransport(gCtx)
+	require.NoError(t, err)
+
 	return &httputil.ReverseProxy{
-		Transport: gCtx.Grafana.WrapWithSession(httputils.NewTransport(gCtx)),
+		Transport: gCtx.Grafana.WrapWithSession(transport),
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 		},
@@ -159,7 +110,7 @@ func TestReverseProxyTransport_RotatesSessionOn401(t *testing.T) {
 	backend := httptest.NewServer(mux)
 	defer backend.Close()
 
-	store := newFakeStore()
+	store := testutils.NewFakeKeychainStore()
 	gCtx := &config.Context{
 		Grafana: &config.GrafanaConfig{
 			Server:  backend.URL,
@@ -177,7 +128,7 @@ func TestReverseProxyTransport_RotatesSessionOn401(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, int32(1), rotateCalls.Load())
 
-	stored, ok := store.value(account)
+	stored, ok := store.Value(account)
 	assert.True(t, ok)
 	assert.Equal(t, newCookie, stored)
 }
@@ -207,7 +158,7 @@ func TestReverseProxyTransport_NonRewindableBodyIsNotRetried(t *testing.T) {
 	backend := httptest.NewServer(mux)
 	defer backend.Close()
 
-	store := newFakeStore()
+	store := testutils.NewFakeKeychainStore()
 	gCtx := &config.Context{
 		Grafana: &config.GrafanaConfig{
 			Server:  backend.URL,
@@ -227,7 +178,7 @@ func TestReverseProxyTransport_NonRewindableBodyIsNotRetried(t *testing.T) {
 	assert.Equal(t, int32(1), proxiedCalls.Load(), "no retry expected for a non-rewindable body")
 	assert.Equal(t, int32(1), rotateCalls.Load(), "rotation still happens so the next request benefits")
 
-	stored, ok := store.value(account)
+	stored, ok := store.Value(account)
 	assert.True(t, ok, "rotation succeeded and should still be persisted even though this request wasn't retried")
 	assert.Equal(t, newCookie, stored)
 }

@@ -3,7 +3,6 @@ package grafana_test
 import (
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -11,87 +10,9 @@ import (
 	"github.com/grafana/grafanapi/internal/httputils"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/server/grafana"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-// fakeStore is an in-memory keychain.Store for tests local to this package (see docs/plans/
-// 20260722-auto-rotate-session-on-401.md, Task 5).
-type fakeStore struct {
-	mu     sync.Mutex
-	values map[string]string
-}
-
-func newFakeStore() *fakeStore {
-	return &fakeStore{values: map[string]string{}}
-}
-
-func (f *fakeStore) Set(account, secret string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.values[account] = secret
-
-	return nil
-}
-
-func (f *fakeStore) Get(account string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	v, ok := f.values[account]
-	if !ok {
-		return "", keychain.ErrNotFound
-	}
-
-	return v, nil
-}
-
-func (f *fakeStore) Delete(account string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	delete(f.values, account)
-
-	return nil
-}
-
-func (f *fakeStore) value(account string) (string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	v, ok := f.values[account]
-
-	return v, ok
-}
-
-func TestAuthenticateRequest_SetsCookieHeader(t *testing.T) {
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.invalid/api/dashboards", nil)
-	require.NoError(t, err)
-
-	grafana.AuthenticateRequest(&config.GrafanaConfig{SessionCookie: "abc123"}, req)
-
-	assert.Equal(t, "grafana_session=abc123", req.Header.Get("Cookie"))
-}
-
-func TestAuthenticateRequest_NoCookieMeansNoCookieHeader(t *testing.T) {
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.invalid/api/dashboards", nil)
-	require.NoError(t, err)
-
-	grafana.AuthenticateRequest(&config.GrafanaConfig{}, req)
-
-	assert.Empty(t, req.Header.Get("Cookie"))
-}
-
-func TestAuthenticateRequest_NilConfigDoesNotPanic(t *testing.T) {
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.invalid/api/dashboards", nil)
-	require.NoError(t, err)
-
-	assert.NotPanics(t, func() {
-		grafana.AuthenticateRequest(nil, req)
-	})
-	assert.Empty(t, req.Header.Get("Cookie"))
-}
 
 func TestAuthenticateAndProxyHandler_NoGrafanaURLConfigured(t *testing.T) {
 	handler := grafana.AuthenticateAndProxyHandler(&config.Context{Grafana: &config.GrafanaConfig{}})
@@ -225,7 +146,7 @@ func TestAuthenticateAndProxyHandler_RotatesSessionOn401(t *testing.T) {
 	backend := httptest.NewServer(mux)
 	t.Cleanup(backend.Close)
 
-	store := newFakeStore()
+	store := testutils.NewFakeKeychainStore()
 	cfg := &config.Context{
 		Grafana: &config.GrafanaConfig{
 			Server:  backend.URL,
@@ -243,7 +164,7 @@ func TestAuthenticateAndProxyHandler_RotatesSessionOn401(t *testing.T) {
 	assert.Equal(t, "hello from grafana", rec.Body.String())
 	assert.Equal(t, int32(1), rotateCalls.Load())
 
-	stored, ok := store.value(account)
+	stored, ok := store.Value(account)
 	assert.True(t, ok)
 	assert.Equal(t, newCookie, stored)
 }
@@ -273,7 +194,7 @@ func TestAuthenticateAndProxyHandler_RotateRejectedSurfacesOriginal401(t *testin
 	backend := httptest.NewServer(mux)
 	t.Cleanup(backend.Close)
 
-	store := newFakeStore()
+	store := testutils.NewFakeKeychainStore()
 	cfg := &config.Context{
 		Grafana: &config.GrafanaConfig{
 			Server:  backend.URL,

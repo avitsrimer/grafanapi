@@ -211,7 +211,11 @@ type TLS struct {
 // set), in addition to Insecure/ServerName/NextProtos. Every direct HTTP client built from a
 // GrafanaConfig's TLS settings (the session-rotation client, the bootdata discovery client) must
 // use this helper so an mTLS/custom-CA context authenticates identically on every transport path.
-func (cfg *TLS) ToStdTLSConfig() *tls.Config {
+//
+// Malformed CAData/CertData/KeyData is reported as an error rather than silently ignored: a
+// context configured for mTLS or a custom CA that ends up with neither must not fall back to
+// plain system-trust TLS without the caller finding out.
+func (cfg *TLS) ToStdTLSConfig() (*tls.Config, error) {
 	tlsConfig := &tls.Config{
 		//nolint:gosec
 		InsecureSkipVerify: cfg.Insecure,
@@ -221,18 +225,23 @@ func (cfg *TLS) ToStdTLSConfig() *tls.Config {
 
 	if len(cfg.CAData) > 0 {
 		pool := x509.NewCertPool()
-		if pool.AppendCertsFromPEM(cfg.CAData) {
-			tlsConfig.RootCAs = pool
+		if !pool.AppendCertsFromPEM(cfg.CAData) {
+			return nil, errors.New("tls: ca-data does not contain any valid PEM-encoded certificates")
 		}
+
+		tlsConfig.RootCAs = pool
 	}
 
 	if len(cfg.CertData) > 0 && len(cfg.KeyData) > 0 {
-		if cert, err := tls.X509KeyPair(cfg.CertData, cfg.KeyData); err == nil {
-			tlsConfig.Certificates = []tls.Certificate{cert}
+		cert, err := tls.X509KeyPair(cfg.CertData, cfg.KeyData)
+		if err != nil {
+			return nil, fmt.Errorf("tls: loading client certificate/key: %w", err)
 		}
+
+		tlsConfig.Certificates = []tls.Certificate{cert}
 	}
 
-	return tlsConfig
+	return tlsConfig, nil
 }
 
 // Minify returns a trimmed down version of the given configuration containing

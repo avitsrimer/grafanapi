@@ -48,7 +48,12 @@ func VerifyCookie(ctx context.Context, gCtx *config.Context) error {
 	}
 	req.Header.Set("Cookie", config.CookieHeaderValue(gCtx.Grafana.SessionCookie))
 
-	client := &http.Client{Timeout: verifyTimeout, Transport: httputils.NewTransport(gCtx)}
+	transport, err := httputils.NewTransport(gCtx)
+	if err != nil {
+		return fmt.Errorf("session: %w", err)
+	}
+
+	client := &http.Client{Timeout: verifyTimeout, Transport: transport}
 
 	resp, err := client.Do(req)
 	if err != nil {

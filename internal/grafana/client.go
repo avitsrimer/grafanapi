@@ -33,7 +33,12 @@ func ClientFromContext(ctx *config.Context) (*goapi.GrafanaHTTPAPI, error) {
 	}
 
 	if ctx.Grafana.TLS != nil {
-		cfg.TLSConfig = ctx.Grafana.TLS.ToStdTLSConfig()
+		tlsConfig, err := ctx.Grafana.TLS.ToStdTLSConfig()
+		if err != nil {
+			return nil, err
+		}
+
+		cfg.TLSConfig = tlsConfig
 	}
 
 	if ctx.Grafana.OrgID != 0 {

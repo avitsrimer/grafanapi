@@ -131,3 +131,19 @@ func TestDiscoverStackID_TLSSkipVerify(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(678), stackID)
 }
+
+// TestDiscoverStackID_MalformedTLSConfigSurfacesError ties finding 4 (TLS.ToStdTLSConfig
+// propagating PEM errors) to the bootdata discovery client: malformed CAData must surface as an
+// error from DiscoverStackID rather than silently falling back to system-trust TLS.
+func TestDiscoverStackID_MalformedTLSConfigSurfacesError(t *testing.T) {
+	cfg := config.GrafanaConfig{
+		Server: "https://example.invalid",
+		TLS: &config.TLS{
+			CAData: []byte("not a certificate"),
+		},
+	}
+
+	_, err := config.DiscoverStackID(t.Context(), cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ca-data")
+}

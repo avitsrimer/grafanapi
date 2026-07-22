@@ -129,7 +129,22 @@ func TestNewNamespacedRESTConfig_NoCookieMeansNoWrapTransport(t *testing.T) {
 	}
 
 	restCfg := config.NewNamespacedRESTConfig(t.Context(), ctx)
-	assert.Nil(t, restCfg.WrapTransport)
+	require.NotNil(t, restCfg.WrapTransport)
+
+	// WrapTransport is always installed now (NewNamespacedRESTConfig delegates the Session/
+	// SessionCookie decision entirely to WrapWithSession's default case), but with neither set it
+	// must pass every request through unchanged - no Cookie header added.
+	recorder := &recordingRoundTripper{}
+	wrapped := restCfg.WrapTransport(recorder)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, bootdataServer.URL+"/apis", nil)
+	require.NoError(t, err)
+
+	resp, err := wrapped.RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.NotNil(t, recorder.req)
+	assert.Empty(t, recorder.req.Header.Get("Cookie"))
 }
 
 // TestNewNamespacedRESTConfig_RotatesSessionOn401 verifies Task 3's wiring: when the context has

@@ -43,11 +43,13 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 		}
 	}
 
-	if cfg.Grafana.Session != nil || cfg.Grafana.SessionCookie != "" {
-		grafana := cfg.Grafana
-		rcfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
-			return grafana.WrapWithSession(rt)
-		}
+	// Always delegate to WrapWithSession rather than duplicating its Session/SessionCookie
+	// selection here: when neither is set, WrapWithSession's default case returns rt unchanged, so
+	// installing the closure unconditionally is behaviorally identical to skipping it, without
+	// rest.go needing to know which GrafanaConfig fields WrapWithSession switches on.
+	grafana := cfg.Grafana
+	rcfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		return grafana.WrapWithSession(rt)
 	}
 
 	// Namespace

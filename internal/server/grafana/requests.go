@@ -29,17 +29,24 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 			return
 		}
 
-		AuthenticateRequest(cfg.Grafana, req)
 		req.Header.Set("User-Agent", httputils.UserAgent)
+
+		transport, err := httputils.NewTransport(cfg)
+		if err != nil {
+			httputils.Error(r, w, http.StatusText(http.StatusInternalServerError), err, http.StatusInternalServerError)
+			return
+		}
 
 		// Built directly from httputils.NewTransport, wrapped only with WrapWithSession (cookie
 		// injection and rotate-on-401, see internal/config/session_source.go) and deliberately
 		// not wrapped in any debug-logging round-tripper: dumping the full request (headers
-		// included, unredacted) would put the session cookie set by AuthenticateRequest above
-		// into logs reachable via -vvv.
+		// included, unredacted) would put the session cookie WrapWithSession sets into logs
+		// reachable via -vvv. There is no separate AuthenticateRequest call setting the cookie
+		// here: WrapWithSession's wrapped transport runs on every request and unconditionally
+		// overwrites the Cookie header, so it always wins.
 		client := &http.Client{
 			Timeout:   proxyClientTimeout,
-			Transport: cfg.Grafana.WrapWithSession(httputils.NewTransport(cfg)),
+			Transport: cfg.Grafana.WrapWithSession(transport),
 		}
 
 		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
@@ -75,13 +82,4 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 		w.WriteHeader(resp.StatusCode)
 		httputils.Write(r, w, body)
 	}
-}
-
-// AuthenticateRequest attaches the Grafana session cookie to request, when configured.
-func AuthenticateRequest(cfg *config.GrafanaConfig, req *http.Request) {
-	if cfg == nil || cfg.SessionCookie == "" {
-		return
-	}
-
-	req.Header.Set("Cookie", config.CookieHeaderValue(cfg.SessionCookie))
 }
