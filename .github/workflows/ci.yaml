@@ -13,7 +13,10 @@ permissions:
 jobs:
   linters:
     name: Linters
-    runs-on: ubuntu-latest
+    # grafanapi is macOS-only: the Keychain credential store (internal/keychain) is cgo against
+    # Security.framework and everything that depends on it (internal/config, cmd/grafanapi/login,
+    # cmd/grafanapi/config, ...) only builds on darwin, so linting needs a darwin runner.
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -44,7 +47,9 @@ jobs:
 
   tests:
     name: Tests
-    runs-on: ubuntu-latest
+    # See the comment on the linters job above: the whole module is darwin-only now, so tests
+    # need a darwin runner too.
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -70,70 +75,18 @@ jobs:
       - name: Tests
         run: make tests
 
-  keychain-darwin:
-    name: Keychain tests (darwin)
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Restore go vendors
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 #v5.0.3
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-deps-${{ runner.os }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-deps-${{ runner.os }}
-
-      - name: Install devbox
-        uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 #v0.14.0
-        with:
-          enable-cache: 'true'
-          devbox-version: ${{ env.DEVBOX_VERSION }}
-
-      # The cgo Keychain implementation (internal/keychain/keychain_darwin.go) only builds and
-      # runs on darwin. Both the "tests" and "cross-build" jobs above run on ubuntu-latest, so
-      # without this job that code path never actually executes in CI.
-      - name: Run keychain tests
+      # internal/keychain wraps cgo Security.framework calls in a timeout goroutine
+      # (keychain_darwin.go's withTimeout); run that package under the race detector to catch
+      # concurrency bugs the plain "make tests" run above wouldn't.
+      - name: Keychain tests (race)
         run: devbox run go test -v -race ./internal/keychain/...
-
-  cross-build:
-    name: Cross-build (linux stub sanity)
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Restore go vendors
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 #v5.0.3
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-deps-${{ runner.os }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-deps-${{ runner.os }}
-
-      - name: Install devbox
-        uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 #v0.14.0
-        with:
-          enable-cache: 'true'
-          devbox-version: ${{ env.DEVBOX_VERSION }}
-
-      # The release binary is darwin/arm64-only (cgo Keychain), but the !darwin keychain stub
-      # (internal/keychain/keychain_other.go) must keep the module buildable/vettable on linux.
-      - name: Cross-build for linux (CGO_ENABLED=0)
-        run: make cross-build
 
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    # docs/reference generation runs the CLI's Cobra command tree (scripts/cmd-reference), which
+    # transitively imports the darwin-only internal/keychain package, so this needs a darwin
+    # runner too.
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

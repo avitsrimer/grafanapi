@@ -1,7 +1,9 @@
-// Package keychain provides platform secret storage for the Grafana session cookie. The
-// darwin implementation (keychain_darwin.go) stores items in the macOS Keychain via hand-rolled
-// cgo bindings to Security.framework; the non-darwin stub (keychain_other.go) fails every
-// operation so cross-compilation to other platforms stays green without dragging cgo along.
+//go:build darwin
+
+// Package keychain provides macOS secret storage for the Grafana session cookie. The
+// implementation (keychain_darwin.go) stores items in the macOS Keychain via hand-rolled cgo
+// bindings to Security.framework. The package is darwin-only: grafanapi is distributed for
+// macOS only, so there is no non-darwin build to support.
 //
 // Items are stored as plain generic-password entries with no access-control / accessibility
 // attributes set (ACL-only design): the login keychain trusts the ad-hoc code identity of the

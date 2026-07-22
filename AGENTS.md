@@ -35,9 +35,6 @@ make tests
 # Run tests for a specific package
 go test -v ./internal/config
 
-# Cross-build for linux/CGO_ENABLED=0 (keeps the darwin-only keychain stub compiling)
-make cross-build
-
 # Install to $GOPATH/bin
 make install
 
@@ -197,8 +194,8 @@ grafanapi follows the Cobra command pattern with three main command groups:
 
 **internal/keychain/** - macOS Keychain credential store
 - `Store` interface (`Set`/`Get`/`Delete`) keyed by `"grafanapi:<context-name>"`
-- Darwin cgo implementation against `Security.framework` (build tag `darwin`)
-- `!darwin` stub returning an "unsupported platform" error (keeps cross-builds green)
+- Darwin-only cgo implementation against `Security.framework` (package build tag `darwin`);
+  grafanapi does not build on any other platform
 
 **internal/session/** - Session cookie verification and stale-session errors
 - `VerifyCookie`: validates a cookie via `GET /api/user`
@@ -250,12 +247,10 @@ config-load time.
 - Resource filtering/selector tests in `internal/resources/*_test.go`
 - Test data in `testdata/` directories
 - Use `make tests` to run all tests with race detection
-- **Build-tag test convention** (`internal/keychain/`): platform-specific behavior is split into
-  a `//go:build darwin` test file (exercises the real cgo Keychain against throwaway accounts,
-  cleaned up via `t.Cleanup`) and a `//go:build !darwin` test file (asserts the stub's
-  "unsupported platform" error). CI runs the darwin file on a `macos-latest` job and the
-  `!darwin` file as part of the ubuntu-latest cross-build/test jobs — never assume a single job
-  exercises both.
+- **Build-tag convention** (`internal/keychain/`): the whole package carries `//go:build darwin`
+  (it is cgo against `Security.framework`), so its tests do too — they exercise the real cgo
+  Keychain against throwaway accounts, cleaned up via `t.Cleanup`. CI runs the whole module,
+  including this package, on a `macos-latest` runner.
 - **Package-level test-seam pattern** (`cmd/grafanapi/login/`, `cmd/grafanapi/config/`): production
   code depends on `keychain.Store` (and, for `login`, a `prompter` interface) via a package-level
   `var` defaulting to the real implementation. Tests swap in a fake via an exported
@@ -286,10 +281,12 @@ Flags set in Makefile via `-ldflags` on `main.version`, `main.commit`, `main.dat
 - Uses vendored dependencies (committed to repo)
 - Documentation built with mkdocs (Python-based)
 - Feature toggle `kubernetesDashboards` must be enabled in Grafana for `resources serve`
-- Distributed for **macOS/arm64 only**: the Keychain credential store is cgo against
-  `Security.framework` and cannot be cross-compiled. Released via GoReleaser as a
-  Homebrew cask (`avitsrimer/homebrew-apps`); a `GOOS=linux CGO_ENABLED=0` build of the
-  rest of the codebase (using the `!darwin` keychain stub) still must stay green in CI.
+- **macOS/arm64 only, explicitly**: the Keychain credential store is cgo against
+  `Security.framework`, `internal/keychain` carries `//go:build darwin`, and
+  `cmd/grafanapi/unsupported.go` deliberately fails the build with a clear compile error on any
+  other `GOOS`. There is no linux/cross-compile support and none is planned — CI (lint, tests,
+  docs) all run on `macos-latest`. Released via GoReleaser as a Homebrew cask
+  (`avitsrimer/homebrew-apps`).
 
 ## Codebase Architecture Insights
 
