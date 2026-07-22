@@ -555,19 +555,25 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error
 - Create: `cmd/grafanapi/explore/command_test.go`
 - Modify: `cmd/grafanapi/root/command.go` (register `explore.Command()`)
 
-- [ ] Implement `Options` + `BindFlags` (register/`DefaultFormat` the `table` codec, bind `-o`,
+- [x] Implement `Options` + `BindFlags` (register/`DefaultFormat` the `table` codec, bind `-o`,
       `--field`, `--param`, `--from`, `--to`, `--max-data-points`, `--interval`, `--instant`) +
       `Validate` (IO + `key=value` params + parseable `--interval`).
-- [ ] Implement `Command()` (`ExactArgs(2)`, `Example`, `cmdconfig.Options` for `--config`/`--context`)
+- [x] Implement `Command()` (`ExactArgs(2)`, `Example`, `cmdconfig.Options` for `--config`/`--context`)
       and the RunE orchestration (LoadConfig → GetCurrentContext → ClientFromContext →
       ResolveDataSource → QueryFieldForType/BuildQuery → Run → Encode).
-- [ ] Implement `tableCodec` (`format.Codec`) delegating `Encode` to `explore.RenderTable` and
+- [x] Implement `tableCodec` (`format.Codec`) delegating `Encode` to `explore.RenderTable` and
       returning an unsupported-operation error from `Decode`; register `explore.Command()` in
       `root/command.go` alongside `config`/`login`/`resources`.
-- [ ] Write command tests against an `httptest.Server` + fake `keychain.Store`
+- [x] Write command tests against an `httptest.Server` + fake `keychain.Store`
       (`cmdconfig.SetKeychainStore`) + temp config file: `explore <uid> "<query>"` prints a table;
       `-o json` prints JSON that decodes back to the response; a per-`refId` error exits non-zero.
-- [ ] Run tests — must pass before next task.
+      ⚠️ **Note (verified while implementing):** `cmdconfig` is the correct package alias for
+      `cmd/grafanapi/config` (matches `cmd/grafanapi/resources`'s usage); `config.SetKeychainStore`
+      (not a `cmdconfig`-prefixed name) is the actual exported test seam, and
+      `testutils.NewFakeKeychainStore()` (already used by other packages) was reused instead of a
+      new local fake. Test HTTP handlers use `assert` rather than `require` (`testifylint`'s
+      go-require rule: `require` inside a handler goroutine only aborts the handler, not the test).
+- [x] Run tests — must pass before next task.
 
 ### Task 7 — Verify acceptance criteria
 

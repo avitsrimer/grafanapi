@@ -9,6 +9,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/grafana/grafana-app-sdk/logging"
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
+	"github.com/grafana/grafanapi/cmd/grafanapi/explore"
 	"github.com/grafana/grafanapi/cmd/grafanapi/login"
 	"github.com/grafana/grafanapi/cmd/grafanapi/resources"
 	"github.com/grafana/grafanapi/internal/logs"
@@ -59,6 +60,7 @@ func Command(version string) *cobra.Command {
 	rootCmd.SetIn(os.Stdin)
 
 	rootCmd.AddCommand(config.Command())
+	rootCmd.AddCommand(explore.Command())
 	rootCmd.AddCommand(login.Command())
 	rootCmd.AddCommand(resources.Command())
 
