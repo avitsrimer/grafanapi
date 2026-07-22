@@ -51,7 +51,13 @@ anything is persisted. On success:
   or environment variable.
 
 If neither `--org-id` nor `--stack-id` is given, `grafanapi login` attempts to
-discover the Grafana Cloud stack ID automatically using the entered cookie.
+discover the Grafana Cloud stack ID automatically using the entered cookie. If
+that discovery finds nothing — the on-prem case, since on-prem Grafana has no
+`/bootdata` namespace to discover a stack ID from — `login` falls back to
+detecting the organization ID instead, once the cookie has been validated:
+it calls `GET /api/org` and persists the returned ID, printing "Detected
+organization id N". If that call also fails, `login` defaults to org-id `1`
+and prints a warning; pass `--org-id` explicitly to override either behavior.
 
 ### Automatic session rotation
 

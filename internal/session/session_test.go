@@ -125,3 +125,102 @@ func TestVerifyCookie_MalformedTLSConfigSurfacesError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ca-data")
 }
+
+func TestCurrentOrgID_Success(t *testing.T) {
+	var (
+		pathCheck   string
+		cookieCheck string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pathCheck = r.URL.Path
+		cookieCheck = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":5}`))
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "abc123",
+		},
+	}
+
+	orgID, err := session.CurrentOrgID(t.Context(), gCtx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), orgID)
+	assert.Equal(t, "/api/org", pathCheck)
+	assert.Equal(t, config.CookieHeaderValue("abc123"), cookieCheck)
+}
+
+func TestCurrentOrgID_Unauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "stale-cookie",
+		},
+	}
+
+	_, err := session.CurrentOrgID(t.Context(), gCtx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "401")
+}
+
+func TestCurrentOrgID_MalformedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "abc123",
+		},
+	}
+
+	_, err := session.CurrentOrgID(t.Context(), gCtx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decoding organization id response")
+}
+
+func TestCurrentOrgID_ZeroIDIsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":0}`))
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "abc123",
+		},
+	}
+
+	_, err := session.CurrentOrgID(t.Context(), gCtx)
+	require.Error(t, err)
+}
+
+func TestCurrentOrgID_NoGrafanaContext(t *testing.T) {
+	_, err := session.CurrentOrgID(t.Context(), &config.Context{})
+	require.Error(t, err)
+}
+
+func TestCurrentOrgID_InvalidServerAddress(t *testing.T) {
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        "://not-a-valid-url",
+			SessionCookie: "abc123",
+		},
+	}
+
+	_, err := session.CurrentOrgID(t.Context(), gCtx)
+	require.Error(t, err)
+}

@@ -299,6 +299,186 @@ func Test_LoginCommand_usesExistingContextName(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// newTestOrgDiscoveryServer serves /api/user (always 200, so the cookie is always accepted) and
+// /api/org with orgStatus/orgBody, so tests can drive login's on-prem org-id auto-detection
+// fallback (GET /api/org, triggered when neither --org-id nor --stack-id was given and Grafana
+// Cloud stack-id discovery -- /bootdata -- found nothing, which is also always the case here since
+// /bootdata isn't handled and falls through to the default 404). orgHits counts how many times
+// /api/org was hit, so tests can assert detection was (or wasn't) attempted at all.
+func newTestOrgDiscoveryServer(t *testing.T, orgStatus int, orgBody string) (*httptest.Server, *int) {
+	t.Helper()
+
+	orgHits := new(int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user":
+			w.WriteHeader(http.StatusOK)
+		case "/api/org":
+			*orgHits++
+			w.WriteHeader(orgStatus)
+			if orgBody != "" {
+				_, _ = w.Write([]byte(orgBody))
+			}
+		default:
+			// Grafana Cloud stack-id discovery hits /bootdata; let it 404 so it fails silently,
+			// leaving org-id/stack-id at zero -- the on-prem case org detection is meant to cover.
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	return server, orgHits
+}
+
+func Test_LoginCommand_detectsOrgID(t *testing.T) {
+	server, orgHits := newTestOrgDiscoveryServer(t, http.StatusOK, `{"id":1}`)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Detected organization id 1"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 1, *orgHits)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Contains(t, string(written), "org-id: 1")
+}
+
+func Test_LoginCommand_detectsNonDefaultOrgID(t *testing.T) {
+	server, orgHits := newTestOrgDiscoveryServer(t, http.StatusOK, `{"id":5}`)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Detected organization id 5"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 1, *orgHits)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Contains(t, string(written), "org-id: 5")
+}
+
+func Test_LoginCommand_orgDetectionFailureFallsBackToOrgID1(t *testing.T) {
+	server, orgHits := newTestOrgDiscoveryServer(t, http.StatusInternalServerError, "")
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("could not detect organization id, defaulting to 1; override with --org-id"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 1, *orgHits)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Contains(t, string(written), "org-id: 1")
+}
+
+func Test_LoginCommand_explicitOrgIDSkipsDetection(t *testing.T) {
+	server, orgHits := newTestOrgDiscoveryServer(t, http.StatusOK, `{"id":1}`)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL, "--org-id", "7"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, *orgHits, "an explicit --org-id must skip /api/org detection entirely")
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Contains(t, string(written), "org-id: 7")
+}
+
+func Test_LoginCommand_explicitStackIDSkipsOrgDetection(t *testing.T) {
+	server, orgHits := newTestOrgDiscoveryServer(t, http.StatusOK, `{"id":1}`)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL, "--stack-id", "123"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, *orgHits, "an explicit --stack-id must skip /api/org detection entirely")
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Contains(t, string(written), "stack-id: 123")
+	require.NotContains(t, string(written), "org-id:")
+}
+
 func Test_LoginUpdateCommand_success(t *testing.T) {
 	server := newTestUserServer(t, http.StatusOK)
 
