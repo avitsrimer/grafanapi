@@ -18,6 +18,12 @@ brew install avitsrimer/apps/grafanapi
 grafanapi login --server https://grafana.example.com
 ```
 
+Then, optionally, install the bundled Claude Code skill so agents know how to use `grafanapi`:
+
+```shell
+grafanapi install-skill
+```
+
 ## Example: query a datasource
 
 Run a single ad-hoc query against any configured Grafana datasource, mirroring Grafana's Explore UI:

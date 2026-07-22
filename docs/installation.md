@@ -21,6 +21,20 @@ This installs the darwin/arm64 binary from the
 release pipeline, and automatically clears the Gatekeeper quarantine
 attribute so the (unsigned, ad-hoc) binary runs without extra steps.
 
+## Claude Code skill
+
+`grafanapi` bundles a [Claude Code](https://claude.com/claude-code) skill that
+teaches agents how to use it (auth, datasources, `explore`, `resources`).
+After installing the binary, run:
+
+```shell
+grafanapi install-skill
+```
+
+This writes the skill to `~/.claude/skills/grafanapi` (or `--to <path>` for a
+project-local `.claude` folder), replacing anything already installed there.
+No Grafana configuration or session is required for this command.
+
 ## Prebuilt tarball
 
 Prebuilt tarballs are attached to each
