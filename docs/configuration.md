@@ -25,6 +25,22 @@ the value of the `grafana_session` cookie from your browser's developer tools
 (Application/Storage → Cookies) after signing in to that Grafana instance, and
 paste it in.
 
+For non-interactive shells (CI, scripts) or to avoid retyping the cookie,
+pass `--cookie-stdin` to read it from stdin instead — `login` still needs
+`--server` in that case, since stdin is no longer available for the server
+prompt:
+
+```shell
+pbpaste | grafanapi login --server https://grafana.example.com --cookie-stdin
+```
+
+`grafanapi login update` accepts the same flag, and never needs `--server`
+since it always reuses the context's existing one:
+
+```shell
+pbpaste | grafanapi login update --cookie-stdin
+```
+
 The cookie is validated against the target server (`GET /api/user`) before
 anything is persisted. On success:
 

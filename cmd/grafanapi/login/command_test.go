@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
@@ -732,4 +733,156 @@ func Test_LoginCommand_explicitContextFlag(t *testing.T) {
 
 	_, err = store.Get(keychain.Account("dev"))
 	require.NoError(t, err)
+}
+
+func Test_LoginCommand_cookieStdinSuccess(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	// The prompter must never be consulted when --cookie-stdin is set: if it were, this fake
+	// would hand back "unused-cookie" instead of the value piped through stdin.
+	prompter := &fakePrompter{secret: "unused-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL, "--cookie-stdin"},
+		Stdin:   strings.NewReader("the-cookie\r\n"),
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Logged in"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.lineN, "--server was given, so the server prompt must not be shown")
+	require.Equal(t, 0, prompter.secretN, "--cookie-stdin must read the cookie from stdin, not the prompter")
+
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "the-cookie", cookie, "trailing whitespace/newline from stdin must be trimmed")
+}
+
+func Test_LoginCommand_cookieStdinEmptyStdinFails(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL, "--cookie-stdin"},
+		Stdin:   strings.NewReader("   \n"),
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("stdin was empty"),
+		},
+	}
+	testCase.Run(t)
+
+	_, err := store.Get(keychain.Account("default"))
+	require.ErrorIs(t, err, keychain.ErrNotFound)
+}
+
+func Test_LoginCommand_cookieStdinWithoutServerFails(t *testing.T) {
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--cookie-stdin"},
+		// No stdin is wired up at all: --cookie-stdin without --server must fail before ever
+		// trying to read it.
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("--cookie-stdin requires --server"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.lineN, "the server prompt must not be shown either")
+	require.Equal(t, 0, prompter.secretN, "the cookie must never be prompted for without a server")
+}
+
+func Test_LoginUpdateCommand_cookieStdinSuccess(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "unused-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile, "--cookie-stdin"},
+		Stdin:   strings.NewReader("fresh-cookie\n"),
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Refreshed session"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.secretN, "--cookie-stdin must read the cookie from stdin, not the prompter")
+
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "fresh-cookie", cookie)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Equal(t, initialContents, string(written), "login update must not modify the configuration file")
+}
+
+func Test_LoginUpdateCommand_cookieStdinEmptyStdinFails(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile, "--cookie-stdin"},
+		Stdin:   strings.NewReader(""),
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("stdin was empty"),
+		},
+	}
+	testCase.Run(t)
+
+	_, err := store.Get(keychain.Account("default"))
+	require.ErrorIs(t, err, keychain.ErrNotFound)
 }
