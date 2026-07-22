@@ -210,6 +210,25 @@ func runLogin(cmd *cobra.Command, opts *Options) error {
 		return fmt.Errorf("login: could not validate session cookie against %s: %w", server, err)
 	}
 
+	// Stack-id discovery above only covers Grafana Cloud (it relies on /bootdata, which on-prem
+	// Grafana doesn't serve). If neither an org-id nor a stack-id was ever set (not via --org-id/
+	// --stack-id, not from an existing context, and not by the discovery attempt above), fall back
+	// to asking the now-verified cookie's own org via GET /api/org: this is the on-prem case, where
+	// org-id is the piece of namespacing information that actually applies. Only run this once the
+	// cookie is confirmed valid, so a bad cookie never appears to "successfully" detect an org.
+	if grafanaCfg.OrgID == 0 && grafanaCfg.StackID == 0 {
+		detectedOrgID, orgErr := session.CurrentOrgID(ctx, &newContext)
+		if orgErr != nil {
+			detectedOrgID = 1
+			io.Warning(cmd.OutOrStdout(), "could not detect organization id, defaulting to 1; override with --org-id")
+		} else {
+			io.Info(cmd.OutOrStdout(), "Detected organization id %d", detectedOrgID)
+		}
+
+		// newContext.Grafana points at grafanaCfg, so this also updates newContext in place.
+		grafanaCfg.OrgID = detectedOrgID
+	}
+
 	makeCurrent := cfg.CurrentContext == ""
 	cfg.SetContext(name, makeCurrent, newContext)
 
