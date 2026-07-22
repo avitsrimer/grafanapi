@@ -580,22 +580,39 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error
 **Files:**
 - Modify: none (verification only; fix regressions in-place if found)
 
-- [ ] `make tests` (race) passes across all packages (fall back to `go test -race ./...` if `devbox`
-      is unavailable, as prior plans did).
-- [ ] `make build` produces `./bin/grafanapi` on darwin/arm64 (`CGO_ENABLED=1`); `grafanapi explore
-      --help` renders and shows all flags.
-- [ ] `make lint` passes with **no new findings** versus the pre-existing 14-finding baseline (5
+- [x] `make tests` (race) passes across all packages (fall back to `go test -race ./...` if `devbox`
+      is unavailable, as prior plans did). `devbox` is not installed in this environment; ran `go test
+      -race ./...` directly — all packages pass.
+- [x] `make build` produces `./bin/grafanapi` on darwin/arm64 (`CGO_ENABLED=1`); `grafanapi explore
+      --help` renders and shows all flags. Built directly via `go build -buildvcs=false -ldflags=...`
+      (same flags as the Makefile) — produced a valid Mach-O arm64 binary; `--help` lists `explore`
+      alongside `config`/`login`/`resources`; `explore --help` shows the full synopsis, examples, and
+      all flags (`--config`, `--context`, `--field`, `--from`, `--to`, `--interval`, `--instant`,
+      `--max-data-points`, `-o/--output`, `--param`).
+- [x] `make lint` passes with **no new findings** versus the pre-existing 14-finding baseline (5
       gosec, 3 govet, 1 nolintlint, 5 staticcheck) recorded in the completed plans — diff
       `golangci-lint run -c .golangci.yaml ./...` output against that baseline; annotate any
-      unavoidable new finding with a justified `//nolint` + comment and record it here.
-- [ ] `goreleaser check` passes.
-- [ ] **Reference docs (MANDATORY):** run `make cli-reference` (regenerates `docs/reference/cli`,
+      unavoidable new finding with a justified `//nolint` + comment and record it here. Ran
+      `golangci-lint run -c .golangci.yaml ./...` directly (v2.12.2) — exactly 14 findings, same
+      breakdown (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck), all in pre-existing files
+      (`internal/server/grafana`, `internal/server/handlers`, `scripts/*-reference`,
+      `internal/httputils`, `cmd/grafanapi/fail`). Zero new findings in `internal/explore` or
+      `cmd/grafanapi/explore`.
+- [x] `goreleaser check` passes. Ran `goreleaser check` directly — "1 configuration file(s)
+      validated".
+- [x] **Reference docs (MANDATORY):** run `make cli-reference` (regenerates `docs/reference/cli`,
       adding `grafanapi_explore.md` and updating the index) plus `make env-var-reference` /
       `make config-reference`; then `make reference-drift` must pass with the regenerated files
       staged. If `devbox` is unavailable, run the underlying `go run scripts/cmd-reference/*.go
-      ./docs/reference/cli` (and the env/config equivalents) directly.
-- [ ] Run the full suite once more (`go clean -testcache && go test -race ./...`) — must pass before
-      the documentation task.
+      ./docs/reference/cli` (and the env/config equivalents) directly. Ran all three generators
+      directly (`go run scripts/cmd-reference/*.go`, `scripts/env-vars-reference/*.go`,
+      `scripts/config-reference/*.go`). Resulting drift: new `docs/reference/cli/grafanapi_explore.md`
+      page + a one-line addition to `docs/reference/cli/grafanapi.md`'s command index (the `explore`
+      entry). No drift in `docs/reference/environment-variables` or `docs/reference/configuration`
+      (the command adds no new env vars or config fields). These generated files are included in this
+      task's commit, matching what `make reference-drift` expects staged.
+- [x] Run the full suite once more (`go clean -testcache && go test -race ./...`) — must pass before
+      the documentation task. Ran with a cleared test cache — all packages pass.
 
 ### Task 8 — Update documentation and complete the plan
 

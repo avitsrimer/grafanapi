@@ -13,6 +13,7 @@
 ### SEE ALSO
 
 * [grafanapi config](grafanapi_config.md)	 - View or manipulate configuration settings
+* [grafanapi explore](grafanapi_explore.md)	 - Run an ad-hoc query against a Grafana datasource
 * [grafanapi login](grafanapi_login.md)	 - Authenticate to a Grafana instance using a session cookie
 * [grafanapi resources](grafanapi_resources.md)	 - Manipulate Grafana resources
 
