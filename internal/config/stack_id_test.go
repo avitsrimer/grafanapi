@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/grafana/grafanactl/internal/config"
+	"github.com/grafana/grafanapi/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,6 +71,45 @@ func TestDiscoverStackID_InvalidJSON(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestDiscoverStackID_AttachesSessionCookie(t *testing.T) {
+	var gotCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"settings": map[string]any{
+				"namespace": "stacks-12345",
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}
+
+	stackID, err := config.DiscoverStackID(t.Context(), cfg)
+	require.NoError(t, err)
+	assert.Equal(t, int64(12345), stackID)
+	assert.Equal(t, "grafana_session=abc123", gotCookie)
+}
+
+func TestDiscoverStackID_NoCookieMeansNoCookieHeader(t *testing.T) {
+	var gotCookie string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"settings": map[string]any{
+				"namespace": "stacks-12345",
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := config.GrafanaConfig{Server: server.URL}
+
+	_, err := config.DiscoverStackID(t.Context(), cfg)
+	require.NoError(t, err)
+	assert.Empty(t, gotCookie)
+}
+
 func TestDiscoverStackID_TLSSkipVerify(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -91,4 +130,20 @@ func TestDiscoverStackID_TLSSkipVerify(t *testing.T) {
 	stackID, err := config.DiscoverStackID(t.Context(), cfg)
 	require.NoError(t, err)
 	assert.Equal(t, int64(678), stackID)
+}
+
+// TestDiscoverStackID_MalformedTLSConfigSurfacesError ties finding 4 (TLS.ToStdTLSConfig
+// propagating PEM errors) to the bootdata discovery client: malformed CAData must surface as an
+// error from DiscoverStackID rather than silently falling back to system-trust TLS.
+func TestDiscoverStackID_MalformedTLSConfigSurfacesError(t *testing.T) {
+	cfg := config.GrafanaConfig{
+		Server: "https://example.invalid",
+		TLS: &config.TLS{
+			CAData: []byte("not a certificate"),
+		},
+	}
+
+	_, err := config.DiscoverStackID(t.Context(), cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ca-data")
 }

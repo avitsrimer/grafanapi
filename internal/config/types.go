@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 )
@@ -76,19 +77,6 @@ type GrafanaConfig struct {
 	// Required.
 	Server string `env:"GRAFANA_SERVER" json:"server,omitempty" yaml:"server,omitempty"`
 
-	// User to authenticate as with basic authentication.
-	// Optional.
-	User string `env:"GRAFANA_USER" json:"user,omitempty" yaml:"user,omitempty"`
-	// Password to use when using with basic authentication.
-	// Optional.
-	Password string `datapolicy:"secret" env:"GRAFANA_PASSWORD" json:"password,omitempty" yaml:"password,omitempty"`
-
-	// APIToken is a service account token.
-	// See https://grafana.com/docs/grafana/latest/administration/service-accounts/#add-a-token-to-a-service-account-in-grafana
-	// Note: if defined, the API Token takes precedence over basic auth credentials.
-	// Optional.
-	APIToken string `datapolicy:"secret" env:"GRAFANA_TOKEN" json:"token,omitempty" yaml:"token,omitempty"`
-
 	// OrgID specifies the organization targeted by this config.
 	// Note: required when targeting an on-prem Grafana instance.
 	// See StackID for Grafana Cloud instances.
@@ -101,6 +89,19 @@ type GrafanaConfig struct {
 
 	// TLS contains TLS-related configuration settings.
 	TLS *TLS `json:"tls,omitempty" yaml:"tls,omitempty"`
+
+	// SessionCookie holds the resolved Grafana session cookie (see
+	// internal/config.CookieHeaderValue) for the current context. It is populated at config-load
+	// time from the platform Keychain (internal/keychain) and is never serialized to disk: no env
+	// tag (the cookie must never be a flag or env var) and json/yaml "-" tags.
+	SessionCookie string `json:"-" yaml:"-"`
+
+	// Session holds the shared, mutable SessionSource that rotates SessionCookie on a 401 and
+	// re-persists the fresh value to the Keychain. It is populated alongside SessionCookie during
+	// credential resolution (only when a cookie was actually loaded from the Keychain) and is
+	// never serialized to disk: no env tag, json/yaml "-" tags. Like SessionCookie, it must be
+	// zeroed in IsEmpty() so a resolved source never affects emptiness.
+	Session *SessionSource `json:"-" yaml:"-"`
 }
 
 func (grafana GrafanaConfig) validateNamespace(contextName string) error {
@@ -163,6 +164,14 @@ func (grafana GrafanaConfig) Validate(contextName string) error {
 }
 
 func (grafana GrafanaConfig) IsEmpty() bool {
+	// SessionCookie is populated from the Keychain independently of the file contents (see
+	// ResolveSessionCookie / ResolveContextSessionCookie), so it must not affect emptiness: a
+	// stale/orphaned Keychain entry for an otherwise-empty "grafana: {}" block must still report
+	// IsEmpty() == true, so Context.Validate() surfaces "grafana config is required" rather than
+	// the more confusing "server is required".
+	grafana.SessionCookie = ""
+	grafana.Session = nil
+
 	return grafana == GrafanaConfig{}
 }
 
@@ -197,14 +206,43 @@ type TLS struct {
 	NextProtos []string `json:"next-protos,omitempty" yaml:"next-protos,omitempty"`
 }
 
-func (cfg *TLS) ToStdTLSConfig() *tls.Config {
-	// TODO: CertData, KeyData, CAData
-	return &tls.Config{
+// ToStdTLSConfig builds a "crypto/tls".Config from cfg, including the full TLS material: a root
+// CA pool from CAData (when set) and a client certificate from CertData/KeyData (when both are
+// set), in addition to Insecure/ServerName/NextProtos. Every direct HTTP client built from a
+// GrafanaConfig's TLS settings (the session-rotation client, the bootdata discovery client) must
+// use this helper so an mTLS/custom-CA context authenticates identically on every transport path.
+//
+// Malformed CAData/CertData/KeyData is reported as an error rather than silently ignored: a
+// context configured for mTLS or a custom CA that ends up with neither must not fall back to
+// plain system-trust TLS without the caller finding out.
+func (cfg *TLS) ToStdTLSConfig() (*tls.Config, error) {
+	tlsConfig := &tls.Config{
 		//nolint:gosec
 		InsecureSkipVerify: cfg.Insecure,
 		ServerName:         cfg.ServerName,
 		NextProtos:         cfg.NextProtos,
+		MinVersion:         tls.VersionTLS12,
 	}
+
+	if len(cfg.CAData) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(cfg.CAData) {
+			return nil, errors.New("tls: ca-data does not contain any valid PEM-encoded certificates")
+		}
+
+		tlsConfig.RootCAs = pool
+	}
+
+	if len(cfg.CertData) > 0 && len(cfg.KeyData) > 0 {
+		cert, err := tls.X509KeyPair(cfg.CertData, cfg.KeyData)
+		if err != nil {
+			return nil, fmt.Errorf("tls: loading client certificate/key: %w", err)
+		}
+
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsConfig, nil
 }
 
 // Minify returns a trimmed down version of the given configuration containing

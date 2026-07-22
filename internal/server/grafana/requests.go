@@ -5,10 +5,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/grafana/grafanactl/internal/config"
-	"github.com/grafana/grafanactl/internal/httputils"
+	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/httputils"
 )
+
+// proxyClientTimeout bounds the dashboard-proxy request to the configured Grafana server.
+const proxyClientTimeout = 10 * time.Second
 
 func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -25,13 +29,24 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 			return
 		}
 
-		AuthenticateRequest(cfg.Grafana, req)
 		req.Header.Set("User-Agent", httputils.UserAgent)
 
-		client, err := httputils.NewHTTPClient(cfg)
+		transport, err := httputils.NewTransport(cfg)
 		if err != nil {
 			httputils.Error(r, w, http.StatusText(http.StatusInternalServerError), err, http.StatusInternalServerError)
 			return
+		}
+
+		// Built directly from httputils.NewTransport, wrapped only with WrapWithSession (cookie
+		// injection and rotate-on-401, see internal/config/session_source.go) and deliberately
+		// not wrapped in any debug-logging round-tripper: dumping the full request (headers
+		// included, unredacted) would put the session cookie WrapWithSession sets into logs
+		// reachable via -vvv. There is no separate AuthenticateRequest call setting the cookie
+		// here: WrapWithSession's wrapped transport runs on every request and unconditionally
+		// overwrites the Cookie header, so it always wins.
+		client := &http.Client{
+			Timeout:   proxyClientTimeout,
+			Transport: cfg.Grafana.WrapWithSession(transport),
 		}
 
 		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
@@ -66,13 +81,5 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 		body, _ := io.ReadAll(resp.Body)
 		w.WriteHeader(resp.StatusCode)
 		httputils.Write(r, w, body)
-	}
-}
-
-func AuthenticateRequest(config *config.GrafanaConfig, request *http.Request) {
-	if config.User != "" {
-		request.SetBasicAuth(config.User, config.Password)
-	} else if config.APIToken != "" {
-		request.Header.Set("Authorization", "Bearer "+config.APIToken)
 	}
 }

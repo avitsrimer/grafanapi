@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**grafanactl** is a command-line tool for managing Grafana resources through the REST API. It supports Grafana 12 and above, enabling users to authenticate, manage multiple environments, and perform administrative tasks from the terminal. The tool is particularly useful for dashboards-as-code workflows and CI/CD automation.
+**grafanapi** is a command-line tool for managing Grafana resources through the REST API. It supports Grafana 12 and above, enabling users to authenticate, manage multiple environments, and perform administrative tasks from the terminal. The tool is particularly useful for dashboards-as-code workflows and CI/CD automation.
 
 ## Development Environment
 
@@ -26,7 +26,7 @@ devbox add go@1.24
 ### Build and Test
 
 ```bash
-# Build the binary to bin/grafanactl
+# Build the binary to bin/grafanapi
 make build
 
 # Run all tests
@@ -34,6 +34,9 @@ make tests
 
 # Run tests for a specific package
 go test -v ./internal/config
+
+# Cross-build for linux/CGO_ENABLED=0 (keeps the darwin-only keychain stub compiling)
+make cross-build
 
 # Install to $GOPATH/bin
 make install
@@ -81,9 +84,13 @@ make clean
 
 ### Command Structure
 
-grafanactl follows the Cobra command pattern with two main command groups:
+grafanapi follows the Cobra command pattern with three main command groups:
 
-1. **config**: Manage configuration contexts for connecting to Grafana instances
+1. **login**: Authenticate to a Grafana instance using a session cookie
+   - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
+   - `login update`: Refresh a stale cookie for an existing context (server not re-prompted)
+
+2. **config**: Manage configuration contexts for connecting to Grafana instances
    - `config set`: Set configuration values
    - `config unset`: Unset configuration values
    - `config use-context`: Switch between configured contexts
@@ -92,7 +99,7 @@ grafanactl follows the Cobra command pattern with two main command groups:
    - `config view`: View the current configuration
    - `config check`: Validate the configuration
 
-2. **resources**: Manipulate Grafana resources (dashboards, folders, etc.)
+3. **resources**: Manipulate Grafana resources (dashboards, folders, etc.)
    - `resources get`: Get resources from Grafana
    - `resources list`: List resources
    - `resources pull`: Pull resources from Grafana to local files
@@ -104,8 +111,9 @@ grafanactl follows the Cobra command pattern with two main command groups:
 
 ### Core Packages
 
-**cmd/grafanactl/** - CLI command implementations
+**cmd/grafanapi/** - CLI command implementations
 - `root/`: Root command setup with logging and flags
+- `login/`: `login` / `login update` — interactive session-cookie authentication
 - `config/`: Configuration management commands
 - `resources/`: Resource manipulation commands
 - `fail/`: Error handling and detailed error messages
@@ -114,10 +122,23 @@ grafanactl follows the Cobra command pattern with two main command groups:
 **internal/config/** - Configuration management
 - Context-based configuration (similar to kubectl contexts)
 - Support for multiple Grafana instances (contexts)
-- Authentication: basic auth, API tokens
-- Environment variable overrides (GRAFANA_SERVER, GRAFANA_TOKEN, etc.)
+- Authentication: Grafana session cookie (`grafana_session`), resolved from the macOS Keychain at load time — never a config-file field or env var
+- Environment variable overrides for non-secret fields (GRAFANA_SERVER, GRAFANA_ORG_ID, GRAFANA_STACK_ID)
 - Automatic Stack ID discovery for Grafana Cloud
 - TLS configuration support
+- `session_source.go`: `SessionSource` — a shared, mutable session cookie holder (mutex +
+  generation counter) built once per context at credential-resolution time when a cookie is
+  loaded from the Keychain. `Rotate()` POSTs `/api/user/auth-tokens/rotate` with the current
+  cookie, extracts the new `grafana_session` from `Set-Cookie`, and re-persists it to the
+  Keychain; the generation counter deduplicates concurrent *and* sequential rotate attempts so
+  only one network rotation happens per staleness event. `(GrafanaConfig).WrapWithSession` is the
+  single helper every transport (k8s, openapi, serve) calls to get a `rotatingRoundTripper` (when
+  a `Session` is present), the older static `sessionCookieRoundTripper` (cookie without a source,
+  e.g. tests), or the underlying transport unchanged (no cookie). On a truly-dead session (rotate
+  itself gets `401`/`403`), the original `401` is returned unchanged so the existing
+  `cmd/grafanapi/fail` stale-session rendering fires — rotation is purely a transparent retry
+  layer in front of that path. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
+  **not** wired into rotation (pre-auth, single non-retryable probe, fails soft already).
 
 **internal/resources/** - Resource abstraction layer
 - `Resource`: Wraps Kubernetes-style unstructured objects for Grafana resources
@@ -153,10 +174,18 @@ grafanactl follows the Cobra command pattern with two main command groups:
 - File watching with fsnotify
 - Dashboard and folder preview handlers
 - Script execution for generated resources
+- Cookie injection and rotate-on-401 are transport-level here too: `server.go`'s
+  `httputil.ReverseProxy` and `server/grafana/requests.go`'s dashboard-proxy client both wrap their
+  `Transport` (built from `httputils.NewTransport`) with `(GrafanaConfig).WrapWithSession`, so a
+  `401` from Grafana triggers the same rotate-and-retry as the k8s/openapi paths
 
 **internal/grafana/** - Grafana API client
 - Wraps grafana-openapi-client-go
 - Client construction from context configuration
+- Cookie injection is transport-level, not a static header map: `ClientFromContext` wraps the
+  vendored client's `*httptransport.Runtime.Transport` with `(GrafanaConfig).WrapWithSession`, so
+  the openapi path sees `401`s and rotates identically to the k8s path (no more static
+  `HTTPHeaders` cookie map)
 
 **internal/format/** - Format detection and conversion
 - JSON, YAML format support
@@ -166,8 +195,21 @@ grafanactl follows the Cobra command pattern with two main command groups:
 - REST client helpers
 - Request/response handling
 
+**internal/keychain/** - macOS Keychain credential store
+- `Store` interface (`Set`/`Get`/`Delete`) keyed by `"grafanapi:<context-name>"`
+- Darwin cgo implementation against `Security.framework` (build tag `darwin`)
+- `!darwin` stub returning an "unsupported platform" error (keeps cross-builds green)
+
+**internal/session/** - Session cookie verification and stale-session errors
+- `VerifyCookie`: validates a cookie via `GET /api/user`
+- `ErrUnauthorized`: sentinel returned by `VerifyCookie` on a 401; recognized centrally by
+  `cmd/grafanapi/fail.convertSessionErrors`
+- Only used by `login`/`login update` (which always paste a fresh cookie and validate it
+  directly) — unrelated to `internal/config`'s `SessionSource` rotation, which only ever kicks in
+  for *already-authenticated* commands hitting a stale cookie mid-session
+
 **internal/secrets/** - Secret management
-- Secure handling of sensitive configuration data
+- Secure handling of sensitive configuration data (currently just TLS key data; the session cookie is never serialized to disk)
 
 **internal/logs/** - Structured logging
 - slog-based logging with verbosity levels
@@ -175,29 +217,31 @@ grafanactl follows the Cobra command pattern with two main command groups:
 
 ### Key Design Patterns
 
-1. **Context-Based Configuration**: Like kubectl, grafanactl uses named contexts to manage multiple Grafana instances. Each context contains server URL, authentication, and namespace (org-id or stack-id).
+1. **Context-Based Configuration**: Like kubectl, grafanapi uses named contexts to manage multiple Grafana instances. Each context contains server URL, authentication, and namespace (org-id or stack-id).
 
 2. **Kubernetes-Style Resources**: Resources are represented as unstructured objects following Kubernetes conventions (apiVersion, kind, metadata, spec). This enables compatibility with k8s tooling and patterns.
 
-3. **Resource Manager Metadata**: Tracks which tool manages each resource (grafanactl, UI, etc.) to prevent accidental overwrites. Only resources managed by grafanactl can be modified via grafanactl.
+3. **Resource Manager Metadata**: Tracks which tool manages each resource (grafanapi, UI, etc.) to prevent accidental overwrites. Only resources managed by grafanapi can be modified via grafanapi.
 
-4. **Three-Way Merge**: When pushing resources, grafanactl performs server-side apply semantics similar to kubectl, allowing multiple managers to coexist.
+4. **Three-Way Merge**: When pushing resources, grafanapi performs server-side apply semantics similar to kubectl, allowing multiple managers to coexist.
 
 5. **Dashboards as Code**: The `serve` command supports script-based dashboard generation with live preview, enabling code-first workflows with SDKs like grafana-foundation-sdk.
 
 ## Configuration
 
-Configuration is stored in `$XDG_CONFIG_HOME/grafanactl/config.yaml` (typically `~/.config/grafanactl/config.yaml`).
+Configuration is stored in `$XDG_CONFIG_HOME/grafanapi/config.yaml` (typically `~/.config/grafanapi/config.yaml`).
 
 ### Environment Variables
 
-Environment variables can override configuration values:
+Environment variables can override non-secret configuration values:
 - `GRAFANA_SERVER`: Grafana server URL
-- `GRAFANA_TOKEN`: API token for authentication
-- `GRAFANA_USER`: Username for basic auth
-- `GRAFANA_PASSWORD`: Password for basic auth
 - `GRAFANA_ORG_ID`: Organization ID (on-prem)
 - `GRAFANA_STACK_ID`: Stack ID (Grafana Cloud)
+
+There is no environment variable for the session cookie — it is never
+accepted via flag or env var, only through the interactive `grafanapi login`
+/ `grafanapi login update` prompts, and is resolved from the macOS Keychain at
+config-load time.
 
 ## Testing Patterns
 
@@ -206,6 +250,18 @@ Environment variables can override configuration values:
 - Resource filtering/selector tests in `internal/resources/*_test.go`
 - Test data in `testdata/` directories
 - Use `make tests` to run all tests with race detection
+- **Build-tag test convention** (`internal/keychain/`): platform-specific behavior is split into
+  a `//go:build darwin` test file (exercises the real cgo Keychain against throwaway accounts,
+  cleaned up via `t.Cleanup`) and a `//go:build !darwin` test file (asserts the stub's
+  "unsupported platform" error). CI runs the darwin file on a `macos-latest` job and the
+  `!darwin` file as part of the ubuntu-latest cross-build/test jobs — never assume a single job
+  exercises both.
+- **Package-level test-seam pattern** (`cmd/grafanapi/login/`, `cmd/grafanapi/config/`): production
+  code depends on `keychain.Store` (and, for `login`, a `prompter` interface) via a package-level
+  `var` defaulting to the real implementation. Tests swap in a fake via an exported
+  `SetKeychainStore(store)` / `SetPrompter(p)` function, each returning a restore closure to
+  `defer`. This keeps commands free of dependency-injection plumbing while still allowing tests to
+  avoid the real Keychain/TTY.
 
 ## Code Generation
 
@@ -230,12 +286,16 @@ Flags set in Makefile via `-ldflags` on `main.version`, `main.commit`, `main.dat
 - Uses vendored dependencies (committed to repo)
 - Documentation built with mkdocs (Python-based)
 - Feature toggle `kubernetesDashboards` must be enabled in Grafana for `resources serve`
+- Distributed for **macOS/arm64 only**: the Keychain credential store is cgo against
+  `Security.framework` and cannot be cross-compiled. Released via GoReleaser as a
+  Homebrew cask (`avitsrimer/homebrew-apps`); a `GOOS=linux CGO_ENABLED=0` build of the
+  rest of the codebase (using the `!darwin` keychain stub) still must stay green in CI.
 
 ## Codebase Architecture Insights
 
 ### System Overview
 
-**grafanactl** is a ~12,500 line Go codebase that provides a kubectl-like interface for managing Grafana resources. It bridges Grafana's REST API with Kubernetes-style resource management patterns, enabling Infrastructure-as-Code workflows for Grafana dashboards, folders, and other resources.
+**grafanapi** is a ~12,500 line Go codebase that provides a kubectl-like interface for managing Grafana resources. It bridges Grafana's REST API with Kubernetes-style resource management patterns, enabling Infrastructure-as-Code workflows for Grafana dashboards, folders, and other resources.
 
 The tool's architecture is heavily influenced by Kubernetes client patterns, using k8s.io/client-go and k8s.io/apimachinery libraries to provide a consistent, familiar interface for developers already comfortable with kubectl.
 
@@ -244,7 +304,7 @@ The tool's architecture is heavily influenced by Kubernetes client patterns, usi
 The codebase follows a clean layered architecture:
 
 ```
-CLI Layer (cmd/grafanactl/)
+CLI Layer (cmd/grafanapi/)
     ↓
 Business Logic Layer (internal/resources/, internal/config/)
     ↓
@@ -263,7 +323,7 @@ The `Resource` type is the fundamental building block, wrapping `k8s.io/apimachi
 
 - **GrafanaMetaAccessor**: Provides typed access to Grafana-specific metadata (manager, source info)
 - **Source Tracking**: Each resource tracks its origin (file path, format) for round-tripping
-- **Manager Metadata**: Resources carry information about which tool manages them (grafanactl vs UI)
+- **Manager Metadata**: Resources carry information about which tool manages them (grafanapi vs UI)
 - **Collection Operations**: The `Resources` type provides filtering, grouping, and concurrent operations
 
 #### 2. Discovery System (`internal/resources/discovery/`)
@@ -313,7 +373,7 @@ Wraps k8s.io/client-go's dynamic client for Grafana:
    - Deduplicate by GVK+name
 
 3. Process resources
-   - ManagerFieldsAppender: Add grafanactl manager metadata
+   - ManagerFieldsAppender: Add grafanapi manager metadata
    - ServerFieldsStripper: Remove read-only fields (for dry-run)
 
 4. Push to Grafana (Pusher)
@@ -515,10 +575,17 @@ The codebase is designed for extension:
 ### Security Considerations
 
 **Credential Management**:
-- API tokens stored in config file with 0600 permissions
-- Password fields tagged with `datapolicy:"secret"` for redaction
-- TLS certificate data base64-encoded in config
-- Environment variables supported for CI/CD (avoid config files)
+- Grafana session cookie stored in the macOS Keychain (generic-password item,
+  ACL-only, one per context) — never written to the plaintext config file
+- Config file (0600 permissions) holds only non-secret context data (server,
+  org-id/stack-id, TLS); the in-memory `SessionCookie` field is `json:"-" yaml:"-"`
+- TLS key data remains the only `datapolicy:"secret"`-tagged, redacted field
+- Legacy `token`/`user`/`password` config keys are rejected by strict YAML
+  decoding, with a migration message pointing to `grafanapi login`
+- Automatic session rotation (`internal/config.SessionSource`) re-persists a fresh cookie to the
+  Keychain on every `401`, using its own dedicated, bounded-timeout HTTP client that is never
+  wrapped in a logging/debug transport — the cookie value is never written to logs at any point
+  in the rotation path
 
 **Network Security**:
 - TLS verification enabled by default
@@ -529,7 +596,7 @@ The codebase is designed for extension:
 **Resource Management**:
 - Manager metadata prevents accidental overwrites
 - Dry-run mode for safe testing
-- Include-managed flag required to modify non-grafanactl resources
+- Include-managed flag required to modify non-grafanapi resources
 
 ### Common Gotchas
 
@@ -622,7 +689,7 @@ Based on TODO comments in code:
    - *Current*: Uses "kubectl" as placeholder manager kind
    - *Impact*: Low - Functional but inaccurate in metadata
    - *Effort*: Low - String replacement and testing
-   - *Fix*: Replace with "grafanactl" as proper manager identifier
+   - *Fix*: Replace with "grafanapi" as proper manager identifier
 
 5. **Test Coverage Improvement**
    - *Current*: Estimated 40-50% coverage
@@ -694,9 +761,9 @@ Based on TODO comments in code:
 ### Security Recommendations
 
 **Current Security Posture**:
-- ✅ API tokens via bearer authentication
-- ✅ Password fields tagged with `datapolicy:"secret"` for redaction
-- ✅ Environment variable support (avoid storing credentials in files)
+- ✅ Session cookie authenticated (`Cookie: grafana_session=...`), stored in the macOS Keychain
+- ✅ Config file never contains the secret; only TLS key data is `datapolicy:"secret"`-tagged
+- ✅ Cookie never accepted via flag or environment variable (interactive prompt only)
 - ✅ TLS verification enabled by default
 - ✅ Custom CA certificates and client certificate authentication supported
 
@@ -704,13 +771,14 @@ Based on TODO comments in code:
 
 1. **Config File Permission Validation** (High Priority)
    - *Issue*: No explicit file permission check in code
-   - *Risk*: Credentials exposed if file permissions too permissive
+   - *Risk*: Non-secret context data (server, org-id/stack-id) exposed if file permissions too permissive
    - *Fix*: Add validation on config load, warn if not 0600
 
-2. **Secret Encryption at Rest** (Medium Priority)
-   - *Issue*: Credentials stored in plaintext in config file
-   - *Risk*: Credentials compromised if file accessed
-   - *Fix*: Consider OS keychain integration (e.g., keyring libraries)
+2. **Secret Encryption at Rest** — ✅ Addressed
+   - The session cookie is stored in the macOS Keychain (ACL-only, bound to
+     the binary's ad-hoc cdhash) rather than in the plaintext config file.
+   - Remaining scope: this is macOS-only; there is no equivalent secret store
+     for other platforms (distribution is macOS/arm64-only by design).
 
 3. **Insecure TLS Warning** (Medium Priority)
    - *Issue*: TLS verification can be disabled with `Insecure: true`
@@ -765,7 +833,7 @@ Based on TODO comments in code:
 2. 🔄 Add streaming support for large resource sets
 3. 🔄 Implement watch operations for real-time updates
 4. 🔄 Add diff command (show changes before push, like kubectl diff)
-5. 🔄 Replace manager kind placeholder with "grafanactl"
+5. 🔄 Replace manager kind placeholder with "grafanapi"
 6. 🔄 Make rate limits configurable
 
 **Long-term (12+ months)**:
@@ -779,21 +847,21 @@ Based on TODO comments in code:
 ### Comparative Analysis
 
 **vs kubectl**:
-- ✅ grafanactl successfully adopts kubectl UX patterns
+- ✅ grafanapi successfully adopts kubectl UX patterns
 - ✅ Context-based configuration matches kubectl
 - ✅ Resource abstraction similar to K8s objects
 - ❌ kubectl has more mature three-way merge
 - ❌ kubectl has extensive plugin ecosystem
 
 **vs terraform**:
-- ✅ grafanactl is lighter-weight and dashboard-focused
+- ✅ grafanapi is lighter-weight and dashboard-focused
 - ✅ Better live development experience (serve command)
 - ❌ terraform has state management and planning
 - ❌ terraform has broader resource support
 
 **vs grizzly**:
-- ✅ grafanactl uses standard K8s patterns vs custom
-- ✅ grafanactl has discovery system
+- ✅ grafanapi uses standard K8s patterns vs custom
+- ✅ grafanapi has discovery system
 - ❌ grizzly has longer history and maturity
 - ❌ grizzly has template support
 

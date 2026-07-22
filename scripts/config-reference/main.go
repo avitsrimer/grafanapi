@@ -12,7 +12,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/grafana/grafanactl/internal/config"
+	"github.com/grafana/grafanapi/internal/config"
 )
 
 func main() {

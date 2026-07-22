@@ -13,7 +13,7 @@ import (
 func CreateTempFile(t *testing.T, content string) string {
 	t.Helper()
 
-	file, err := os.CreateTemp(t.TempDir(), "grafanactl_tests_")
+	file, err := os.CreateTemp(t.TempDir(), "grafanapi_tests_")
 	require.NoError(t, err)
 
 	_, err = file.WriteString(content)

@@ -12,15 +12,15 @@ import (
 	"github.com/adrg/xdg"
 	"github.com/goccy/go-yaml"
 	"github.com/grafana/grafana-app-sdk/logging"
-	"github.com/grafana/grafanactl/internal/format"
-	"github.com/grafana/grafanactl/internal/secrets"
+	"github.com/grafana/grafanapi/internal/format"
+	"github.com/grafana/grafanapi/internal/secrets"
 )
 
 const (
 	configFilePermissions  = 0o600
-	StandardConfigFolder   = "grafanactl"
+	StandardConfigFolder   = "grafanapi"
 	StandardConfigFileName = "config.yaml"
-	ConfigFileEnvVar       = "GRAFANACTL_CONFIG"
+	ConfigFileEnvVar       = "GRAFANAPI_CONFIG"
 
 	defaultEmptyConfigFile = `
 contexts:
@@ -41,7 +41,7 @@ func ExplicitConfigFile(path string) Source {
 
 func StandardLocation() Source {
 	return func() (string, error) {
-		// Check if GRAFANACTL_CONFIG environment variable is set
+		// Check if GRAFANAPI_CONFIG environment variable is set
 		if envPath := os.Getenv(ConfigFileEnvVar); envPath != "" {
 			return envPath, nil
 		}

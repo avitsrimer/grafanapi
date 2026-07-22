@@ -1,6 +1,5 @@
 contexts:
   test:
     grafana:
-      token: glc_v_secret
       org-id: 1
 current-context: test

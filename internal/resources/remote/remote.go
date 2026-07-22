@@ -1,6 +1,6 @@
 package remote
 
-import "github.com/grafana/grafanactl/internal/resources"
+import "github.com/grafana/grafanapi/internal/resources"
 
 // Processor can be used to modify a resource in-place,
 // before it is written or after it is read from local sources.

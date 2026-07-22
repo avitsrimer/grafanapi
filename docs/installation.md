@@ -5,24 +5,54 @@ weight: -1
 
 # Installation
 
-## Prebuilt binaries
+!!! note
+    This fork is distributed for **macOS (Apple Silicon / arm64) only**. The
+    session cookie is stored in the macOS Keychain via cgo bindings to
+    `Security.framework`, which cannot be cross-compiled for other platforms.
 
-Prebuilt binaries are available for a variety of operating systems and architectures.
-Visit the [latest release](https://github.com/grafana/grafanactl/releases/latest) page, and scroll down to the Assets section.
+## Homebrew (recommended)
 
-* Download the archive for the desired operating system and architecture
+```shell
+brew install avitsrimer/apps/grafanapi
+```
+
+This installs the darwin/arm64 binary from the
+[Homebrew cask](https://github.com/avitsrimer/homebrew-apps) published by the
+release pipeline, and automatically clears the Gatekeeper quarantine
+attribute so the (unsigned, ad-hoc) binary runs without extra steps.
+
+## Prebuilt tarball
+
+Prebuilt tarballs are attached to each
+[release](https://github.com/avitsrimer/grafanapi/releases/latest).
+
+* Download the `grafanapi_Darwin_arm64.tar.gz` archive from the Assets section
 * Extract the archive
-* Move the executable to the desired directory
-* Ensure this directory is included in the `PATH` environment variable
-* Verify that you have execute permission on the file
+* Move the `grafanapi` executable to a directory on your `PATH`
+* Ensure you have execute permission on the file
+
+Because the binary is not notarized/code-signed, macOS Gatekeeper quarantines
+files downloaded outside Homebrew. Clear the quarantine attribute once after
+extracting:
+
+```shell
+xattr -d com.apple.quarantine ./grafanapi
+```
+
+!!! tip
+    The first time `grafanapi` reads a session cookie from the Keychain after
+    a (re)build, macOS shows an "Allow / Always Allow" dialog for that binary.
+    Choose "Always Allow" so subsequent commands don't prompt again.
 
 ## Build from source
 
-To build `grafanactl` from source you must:
+To build `grafanapi` from source you must:
 
 * have [`git`](https://git-scm.com/) installed
 * have [`go`](https://go.dev/) v1.24 (or greater) installed
+* be building on macOS/arm64, and have Xcode Command Line Tools installed (for
+  cgo/`Security.framework`)
 
 ```shell
-go install github.com/grafana/grafanactl/cmd/grafanactl@latest
+go install github.com/grafana/grafanapi/cmd/grafanapi@latest
 ```

@@ -1,0 +1,9 @@
+contexts:
+  local:
+    grafana:
+      server: http://localhost:3000/
+  prod:
+    grafana:
+      server: https://grafana.example.com/
+      org-id: 42
+current-context: prod

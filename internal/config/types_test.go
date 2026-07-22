@@ -1,12 +1,14 @@
 package config_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/grafana/grafanactl/internal/config"
+	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/format"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,12 +28,81 @@ func TestConfig_HasContext(t *testing.T) {
 	req.False(cfg.HasContext("prod"))
 }
 
+// TestGrafanaConfig_ParsesWithoutLegacyAuthFields ensures a config containing
+// only the still-supported fields (server, org-id, stack-id, tls) parses
+// cleanly now that User/Password/APIToken have been removed.
+func TestGrafanaConfig_ParsesWithoutLegacyAuthFields(t *testing.T) {
+	req := require.New(t)
+
+	yamlDoc := `
+server: https://grafana.example.com
+org-id: 1
+stack-id: 2
+tls:
+  insecure-skip-verify: true
+`
+
+	var grafana config.GrafanaConfig
+	req.NoError(format.NewYAMLCodec().Decode(bytes.NewBufferString(yamlDoc), &grafana))
+
+	req.Equal("https://grafana.example.com", grafana.Server)
+	req.Equal(int64(1), grafana.OrgID)
+	req.Equal(int64(2), grafana.StackID)
+	req.NotNil(grafana.TLS)
+	req.True(grafana.TLS.Insecure)
+	req.Empty(grafana.SessionCookie)
+}
+
+// TestGrafanaConfig_SessionCookieNeverSerialized asserts that SessionCookie
+// (the in-memory-only field resolved from the Keychain) never appears in
+// encoded output, matching its `json:"-" yaml:"-"` tags.
+func TestGrafanaConfig_SessionCookieNeverSerialized(t *testing.T) {
+	req := require.New(t)
+
+	grafana := config.GrafanaConfig{
+		Server:        "https://grafana.example.com",
+		SessionCookie: "super-secret-cookie-value",
+	}
+
+	var buf bytes.Buffer
+	req.NoError(format.NewYAMLCodec().Encode(&buf, grafana))
+
+	req.NotContains(buf.String(), "super-secret-cookie-value")
+	req.NotContains(buf.String(), "SessionCookie")
+	req.NotContains(buf.String(), "session-cookie")
+}
+
 func TestGrafanaConfig_IsEmpty(t *testing.T) {
 	req := require.New(t)
 
 	req.True(config.GrafanaConfig{}.IsEmpty())
 	req.False(config.GrafanaConfig{TLS: &config.TLS{Insecure: true}}.IsEmpty())
 	req.False(config.GrafanaConfig{Server: "value"}.IsEmpty())
+}
+
+// TestGrafanaConfig_IsEmpty_IgnoresSessionCookie guards against a regression where an
+// otherwise-empty "grafana: {}" block with a stale/orphaned Keychain entry (populated by
+// ResolveSessionCookie independently of the file contents) would report IsEmpty() == false,
+// producing the more confusing "server is required" validation error instead of "grafana config
+// is required".
+func TestGrafanaConfig_IsEmpty_IgnoresSessionCookie(t *testing.T) {
+	req := require.New(t)
+
+	req.True(config.GrafanaConfig{SessionCookie: "stale-cookie-value"}.IsEmpty())
+	req.False(config.GrafanaConfig{Server: "value", SessionCookie: "stale-cookie-value"}.IsEmpty())
+}
+
+// TestGrafanaConfig_IsEmpty_IgnoresSession guards against the same class of regression as
+// TestGrafanaConfig_IsEmpty_IgnoresSessionCookie, but for the Session *SessionSource field: a
+// resolved SessionSource attached to an otherwise-empty "grafana: {}" block must not affect
+// emptiness either.
+func TestGrafanaConfig_IsEmpty_IgnoresSession(t *testing.T) {
+	req := require.New(t)
+
+	src := config.NewSessionSource("cookie-value", "https://grafana.example.com", nil, nil, "acct")
+
+	req.True(config.GrafanaConfig{Session: src}.IsEmpty())
+	req.False(config.GrafanaConfig{Server: "value", Session: src}.IsEmpty())
 }
 
 func TestGrafanaConfig_Validate_AllowsDiscoveredStackID(t *testing.T) {

@@ -16,13 +16,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
 	"github.com/grafana/grafana-app-sdk/logging"
-	"github.com/grafana/grafanactl/internal/config"
-	"github.com/grafana/grafanactl/internal/httputils"
-	"github.com/grafana/grafanactl/internal/logs"
-	"github.com/grafana/grafanactl/internal/resources"
-	"github.com/grafana/grafanactl/internal/server/grafana"
-	"github.com/grafana/grafanactl/internal/server/handlers"
-	"github.com/grafana/grafanactl/internal/server/livereload"
+	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/httputils"
+	"github.com/grafana/grafanapi/internal/logs"
+	"github.com/grafana/grafanapi/internal/resources"
+	"github.com/grafana/grafanapi/internal/server/handlers"
+	"github.com/grafana/grafanapi/internal/server/livereload"
 )
 
 type Config struct {
@@ -63,14 +62,22 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
+	transport, err := httputils.NewTransport(s.context)
+	if err != nil {
+		return fmt.Errorf("could not build the Grafana proxy transport: %w", err)
+	}
+
 	s.subpath = strings.TrimSuffix(u.Path, "/")
 	s.proxy = &httputil.ReverseProxy{
-		Transport: httputils.NewTransport(s.context),
+		// WrapWithSession injects the session cookie and rotates it on a 401 (see
+		// internal/config/session_source.go). It wraps Transport, which runs AFTER Rewrite below,
+		// and unconditionally overwrites the Cookie header on every request, so it always wins -
+		// there is deliberately no cookie-setting left in Rewrite (internal/server/grafana/
+		// requests.go's dashboard-proxy client applies the same reasoning).
+		Transport: s.context.Grafana.WrapWithSession(transport),
 		Rewrite: func(r *httputil.ProxyRequest) {
 			u.Path = "" // to ensure possible sub-paths won't be added twice.
 			r.SetURL(u)
-
-			grafana.AuthenticateRequest(s.context.Grafana, r.Out)
 
 			r.Out.Header.Del("Origin")
 			r.Out.Header.Set("User-Agent", httputils.UserAgent)
@@ -132,8 +139,8 @@ func (s *Server) Start(ctx context.Context) error {
 	})
 
 	r.Get("/", s.rootHandler)
-	r.Get("/grafanactl/{group}/{version}/{kind}/{name}", s.iframeHandler)
-	r.Handle("/grafanactl/assets/*", http.StripPrefix("/grafanactl/assets/", http.FileServer(http.FS(assetsFS))))
+	r.Get("/grafanapi/{group}/{version}/{kind}/{name}", s.iframeHandler)
+	r.Handle("/grafanapi/assets/*", http.StripPrefix("/grafanapi/assets/", http.FileServer(http.FS(assetsFS))))
 
 	//nolint:gosec
 	return http.ListenAndServe(fmt.Sprintf("%s:%d", s.config.ListenAddr, s.config.Port), r)

@@ -1,9 +1,19 @@
-# Integration test configuration for grafanactl
-# This config is used for testing grafanactl against a local Grafana instance
+# Integration test configuration for grafanapi
+# This config is used for testing grafanapi against a local Grafana instance
 # running via docker-compose.yml
 #
 # Usage:
-#   grafanactl --config testdata/integration-test-config.yaml config view
+#   grafanapi --config testdata/integration-test-config.yaml config view
+#
+# grafanapi authenticates using a Grafana session cookie rather than a config-file field: the
+# cookie is never stored in this file, and is instead resolved from the macOS Keychain at load
+# time. Before using this config, run:
+#
+#   grafanapi --config testdata/integration-test-config.yaml login --context local \
+#     --server http://localhost:3000 --org-id 1
+#
+# and paste the "grafana_session" cookie value from the admin:admin session (sign in to
+# http://localhost:3000 in a browser first) at the no-echo prompt.
 
 current-context: "local"
 
@@ -12,11 +22,6 @@ contexts:
     grafana:
       # Local Grafana instance running in Docker
       server: "http://localhost:3000"
-
-      # Basic authentication with default admin credentials
-      # Username: admin, Password: admin
-      user: "admin"
-      password: "admin"
 
       # For testing with insecure connections (self-signed certs, etc.)
       # insecure-skip-tls-verify: true

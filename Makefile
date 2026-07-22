@@ -43,12 +43,16 @@ BUILD_DATE    ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 VERSION_FLAGS := -X main.version=${GIT_VERSION} -X main.commit=${GIT_REVISION} -X main.date=${BUILD_DATE}
 
 .PHONY: build
-build: check-binaries ## Builds the binary into the `./bin/grafanactl`.
+build: check-binaries ## Builds the binary into the `./bin/grafanapi`.
 	$(RUN_DEVBOX) go build \
 		-buildvcs=false \
 		-ldflags="${VERSION_FLAGS}" \
-		-o bin/grafanactl \
-		./cmd/grafanactl
+		-o bin/grafanapi \
+		./cmd/grafanapi
+
+.PHONY: cross-build
+cross-build: check-binaries ## Cross-builds for linux/CGO_ENABLED=0 to keep the darwin-only keychain stub compiling.
+	$(RUN_DEVBOX) sh -c 'GOOS=linux CGO_ENABLED=0 go build ./... && GOOS=linux CGO_ENABLED=0 go vet ./...'
 
 .PHONY: install
 install: build ## Installs the binary into `$GOPATH/bin`.
@@ -56,7 +60,7 @@ ifndef GOPATH
 	@echo "GOPATH is not defined"
 	exit 1
 endif
-	@cp "bin/grafanactl" "${GOPATH}/bin/grafanactl"
+	@cp "bin/grafanapi" "${GOPATH}/bin/grafanapi"
 
 .PHONY: deps
 deps: check-binaries ## Installs the dependencies.

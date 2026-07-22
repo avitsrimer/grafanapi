@@ -1,7 +1,7 @@
 package process
 
 import (
-	"github.com/grafana/grafanactl/internal/resources"
+	"github.com/grafana/grafanapi/internal/resources"
 )
 
 // NamespaceOverrider is a processor that overrides the namespace of a resource

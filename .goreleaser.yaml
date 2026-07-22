@@ -6,27 +6,30 @@
 version: 2
 
 builds:
-  - id: grafanactl
-    binary: grafanactl
-    main: ./cmd/grafanactl
+  - id: grafanapi
+    binary: grafanapi
+    main: ./cmd/grafanapi
+
+    # darwin/arm64 only: the Keychain credential store (internal/keychain/keychain_darwin.go)
+    # is cgo against Security.framework, so this cannot be cross-compiled.
+    goos:
+      - darwin
+    goarch:
+      - arm64
+
+    env:
+      - CGO_ENABLED=1
 
     ldflags:
+      - -s -w
       - -X main.version={{ .Version }}
       - -X main.commit={{ .Commit }}
       - -X main.date={{ .Date }}
 
-    env:
-      - CGO_ENABLED=0
-
-    goos:
-      - linux
-      - windows
-      - darwin
-
 archives:
-  - id: grafanactl
-    builds: [grafanactl]
-    format: tar.gz
+  - id: grafanapi
+    ids: [grafanapi]
+    formats: [tar.gz]
     # this name template makes the OS and Arch compatible with the results of `uname`.
     name_template: >-
       {{ .ProjectName }}_
@@ -35,10 +38,6 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-    # use zip for windows archives
-    format_overrides:
-      - goos: windows
-        format: zip
 
 checksum:
   name_template: "{{ .ProjectName }}_checksums.txt"
@@ -56,3 +55,21 @@ changelog:
       - '^tests:'
       - '^chore:'
       - '^Merge pull request'
+
+homebrew_casks:
+  - repository:
+      owner: avitsrimer
+      name: homebrew-apps
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/avitsrimer/grafanapi"
+    description: "grafanapi: a session-cookie-authenticated CLI for managing Grafana resources"
+    # the binary is unsigned/ad-hoc, so a downloaded cask is Gatekeeper-quarantined;
+    # strip the quarantine attribute on install so `grafanapi` runs without a manual xattr call.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/grafanapi"]
+          end

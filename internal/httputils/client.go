@@ -5,14 +5,23 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/grafana/grafanactl/internal/config"
+	"github.com/grafana/grafanapi/internal/config"
 )
 
-func NewTransport(gCtx *config.Context) *http.Transport {
+// NewTransport builds a *http.Transport for gCtx, TLS-configured from gCtx.Grafana.TLS when set.
+// It returns an error rather than silently falling back to a plain system-trust TLS config when
+// gCtx.Grafana.TLS contains malformed CAData/CertData/KeyData (see TLS.ToStdTLSConfig).
+func NewTransport(gCtx *config.Context) (*http.Transport, error) {
 	//nolint:gosec
 	tlsConfig := &tls.Config{InsecureSkipVerify: false}
+
 	if gCtx.Grafana != nil && gCtx.Grafana.TLS != nil {
-		tlsConfig = gCtx.Grafana.TLS.ToStdTLSConfig()
+		cfg, err := gCtx.Grafana.TLS.ToStdTLSConfig()
+		if err != nil {
+			return nil, err
+		}
+
+		tlsConfig = cfg
 	}
 
 	return &http.Transport{
@@ -23,14 +32,5 @@ func NewTransport(gCtx *config.Context) *http.Transport {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       tlsConfig,
-	}
-}
-
-func NewHTTPClient(gCtx *config.Context) (*http.Client, error) {
-	return &http.Client{
-		Timeout: 10 * time.Second, // TODO: make this configurable maybe?
-		Transport: &LoggedHTTPRoundTripper{
-			DecoratedTransport: NewTransport(gCtx),
-		},
 	}, nil
 }

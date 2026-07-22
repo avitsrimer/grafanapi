@@ -3,8 +3,8 @@ package remote_test
 import (
 	"testing"
 
-	"github.com/grafana/grafanactl/internal/resources"
-	"github.com/grafana/grafanactl/internal/resources/remote"
+	"github.com/grafana/grafanapi/internal/resources"
+	"github.com/grafana/grafanapi/internal/resources/remote"
 	"github.com/stretchr/testify/require"
 )
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"net/http"
 
 	authlib "github.com/grafana/authlib/types"
 	"k8s.io/client-go/rest"
@@ -42,13 +43,13 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 		}
 	}
 
-	// Authentication
-	switch {
-	case cfg.Grafana.APIToken != "":
-		rcfg.BearerToken = cfg.Grafana.APIToken
-	case cfg.Grafana.User != "":
-		rcfg.Username = cfg.Grafana.User
-		rcfg.Password = cfg.Grafana.Password
+	// Always delegate to WrapWithSession rather than duplicating its Session/SessionCookie
+	// selection here: when neither is set, WrapWithSession's default case returns rt unchanged, so
+	// installing the closure unconditionally is behaviorally identical to skipping it, without
+	// rest.go needing to know which GrafanaConfig fields WrapWithSession switches on.
+	grafana := cfg.Grafana
+	rcfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		return grafana.WrapWithSession(rt)
 	}
 
 	// Namespace
@@ -71,4 +72,18 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 		Config:    rcfg,
 		Namespace: namespace,
 	}
+}
+
+// sessionCookieRoundTripper injects the Grafana session cookie into every outbound request
+// before delegating to the wrapped RoundTripper.
+type sessionCookieRoundTripper struct {
+	cookie string
+	next   http.RoundTripper
+}
+
+func (rt *sessionCookieRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Cookie", CookieHeaderValue(rt.cookie))
+
+	return rt.next.RoundTrip(req)
 }

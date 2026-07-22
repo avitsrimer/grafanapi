@@ -12,11 +12,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/grafana/grafana-app-sdk/logging"
 	"github.com/grafana/grafana/pkg/apimachinery/utils"
-	"github.com/grafana/grafanactl/internal/config"
-	"github.com/grafana/grafanactl/internal/format"
-	"github.com/grafana/grafanactl/internal/httputils"
-	"github.com/grafana/grafanactl/internal/resources"
-	"github.com/grafana/grafanactl/internal/server/grafana"
+	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/format"
+	"github.com/grafana/grafanapi/internal/httputils"
+	"github.com/grafana/grafanapi/internal/resources"
+	"github.com/grafana/grafanapi/internal/server/grafana"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -180,7 +180,7 @@ func (c *DashboardProxy) dashboardJSONPostHandler() http.HandlerFunc {
 		}
 
 		if resource.SourcePath() == "" {
-			err := errors.New("resources generated from a script can not be persisted through grafanactl serve")
+			err := errors.New("resources generated from a script can not be persisted through grafanapi serve")
 			httputils.Error(r, w, err.Error(), err, http.StatusBadRequest)
 			return
 		}

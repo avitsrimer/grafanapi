@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/grafana/grafanactl/cmd/grafanactl/root"
+	"github.com/grafana/grafanapi/cmd/grafanapi/root"
 	"github.com/spf13/cobra/doc"
 )
 

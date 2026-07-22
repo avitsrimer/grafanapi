@@ -1,10 +1,10 @@
 # Contributing Guidelines
 
-This document is a guide to help you through the process of contributing to `grafanactl`.
+This document is a guide to help you through the process of contributing to `grafanapi`.
 
 ## Development environment
 
-`grafanactl` relies on [`devbox`](https://www.jetify.com/devbox/docs/) to manage all
+`grafanapi` relies on [`devbox`](https://www.jetify.com/devbox/docs/) to manage all
 the tools required to work on it.
 
 A shell including all these tools is accessible via:
@@ -31,7 +31,7 @@ Available packages can be found on the [NixOS package repository](https://search
 
 ## Testing against a real Grafana API
 
-While unit tests are valuable for testing individual components, integration testing against a real Grafana instance is important to ensure `grafanactl` works correctly with the actual Grafana API.
+While unit tests are valuable for testing individual components, integration testing against a real Grafana instance is important to ensure `grafanapi` works correctly with the actual Grafana API.
 
 ### Quick Start
 
@@ -40,7 +40,7 @@ The repository includes a `docker-compose.yml` file that sets up a complete test
 - **Grafana 12.2** (latest stable release)
 - **MySQL 8.0** (as the backend database)
 - Pre-configured with `admin:admin` credentials
-- The `kubernetesDashboards` feature toggle enabled (required for `grafanactl`)
+- The `kubernetesDashboards` feature toggle enabled (required for `grafanapi`)
 
 ### Starting the test environment
 
@@ -70,7 +70,7 @@ Or manually:
 $ docker-compose ps
 ```
 
-You should see both `grafanactl-grafana` and `grafanactl-mysql` in a `healthy` state.
+You should see both `grafanapi-grafana` and `grafanapi-mysql` in a `healthy` state.
 
 Verify Grafana is accessible:
 
@@ -80,20 +80,36 @@ $ curl -u admin:admin http://localhost:3000/api/health
 
 You should receive a JSON response indicating Grafana is running.
 
-### Testing with grafanactl
+### Testing with grafanapi
 
-The repository includes a pre-configured test config file at `testdata/integration-test-config.yaml` that you can use to test `grafanactl` against the local Grafana instance.
+The repository includes a pre-configured test config file at `testdata/integration-test-config.yaml` that you can use to test `grafanapi` against the local Grafana instance.
+
+`grafanapi` authenticates using a Grafana session cookie rather than a config-file field or
+username/password (see [`docs/configuration.md`](docs/configuration.md#authenticating)), so the
+fixture doesn't (and can't) carry credentials. Log in once before running any other command
+against it:
+
+```console
+$ devbox run go run ./cmd/grafanapi --config testdata/integration-test-config.yaml login \
+    --context local --server http://localhost:3000 --org-id 1
+```
+
+Sign in to `http://localhost:3000` (`admin`/`admin`) in a browser first, then paste the value of
+the `grafana_session` cookie (Application/Storage → Cookies in your browser's developer tools) at
+the no-echo prompt. This validates the cookie and stores it in the macOS Keychain; the
+config file itself never contains it. If the cookie later goes stale, refresh it with
+`grafanapi --config testdata/integration-test-config.yaml login update`.
 
 #### View the test configuration
 
 ```console
-$ devbox run go run ./cmd/grafanactl --config testdata/integration-test-config.yaml config view
+$ devbox run go run ./cmd/grafanapi --config testdata/integration-test-config.yaml config view
 ```
 
 #### List available resources
 
 ```console
-$ devbox run go run ./cmd/grafanactl --config testdata/integration-test-config.yaml resources list
+$ devbox run go run ./cmd/grafanapi --config testdata/integration-test-config.yaml resources list
 ```
 
 #### Create a test dashboard
@@ -115,13 +131,13 @@ spec:
 2. Push it to Grafana:
 
 ```console
-$ devbox run go run ./cmd/grafanactl --config testdata/integration-test-config.yaml resources push test-dashboard.yaml
+$ devbox run go run ./cmd/grafanapi --config testdata/integration-test-config.yaml resources push test-dashboard.yaml
 ```
 
 3. Pull it back to verify:
 
 ```console
-$ devbox run go run ./cmd/grafanactl --config testdata/integration-test-config.yaml resources get dashboards/test-dashboard
+$ devbox run go run ./cmd/grafanapi --config testdata/integration-test-config.yaml resources get dashboards/test-dashboard
 ```
 
 #### Testing the serve command
@@ -129,7 +145,7 @@ $ devbox run go run ./cmd/grafanactl --config testdata/integration-test-config.y
 The `serve` command allows you to develop dashboards locally with live reload:
 
 ```console
-$ devbox run go run ./cmd/grafanactl --config testdata/integration-test-config.yaml resources serve test-dashboard.yaml
+$ devbox run go run ./cmd/grafanapi --config testdata/integration-test-config.yaml resources serve test-dashboard.yaml
 ```
 
 Then open your browser to the URL shown in the output (typically `http://localhost:8080`).
@@ -220,7 +236,7 @@ Common issues:
 - MySQL not fully initialized yet - wait a few more seconds and check again
 - Port 3000 already in use - stop any other Grafana instances or change the port in `docker-compose.yml`
 
-#### Cannot connect to Grafana from grafanactl
+#### Cannot connect to Grafana from grafanapi
 
 Verify Grafana is accessible:
 

@@ -1,0 +1,6 @@
+contexts:
+  test:
+    grafana:
+      server: https://grafana.example.com
+      org-id; 1
+current-context: test
