@@ -525,20 +525,27 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error
 - Create: `internal/explore/render.go`
 - Create: `internal/explore/render_test.go`
 
-- [ ] Implement `RenderTable(w, resp, RenderOptions)`: sorted-refId iteration, per-frame `# <refId>
+- [x] Implement `RenderTable(w, resp, RenderOptions)`: sorted-refId iteration, per-frame `# <refId>
       [name]` header, `tabwriter` columns, field-`Name` headers with sorted labels appended to
       labelled columns.
-- [ ] Implement per-type cell formatting (`time` epoch-ms → RFC3339 UTC; `null` → empty; strings
+- [x] Implement per-type cell formatting (`time` epoch-ms → RFC3339 UTC; `null` → empty; strings
       unquoted; other scalars plain) and `MaxCellWidth` truncation (default 60) with an ellipsis.
-- [ ] Write golden-style tests over the Task 1 fixtures: a Prometheus frame (time column RFC3339,
+- [x] Write golden-style tests over the Task 1 fixtures: a Prometheus frame (time column RFC3339,
       labels in the value header), a SQL table frame (mixed columns, a truncated wide cell), and a
       multi-frame response rendered sequentially.
-- [ ] Write an **empty-response** test: a `*QueryResponse` with no results, a `FrameResult` with no
+- [x] Write an **empty-response** test: a `*QueryResponse` with no results, a `FrameResult` with no
       frames, and a frame whose columns are zero-length each render a graceful "no data" line (no
       panic, no ragged output) rather than nothing or an error.
-- [ ] Add a test asserting `json`/`yaml` codecs (from `internal/format`) emit the full decoded
+- [x] Add a test asserting `json`/`yaml` codecs (from `internal/format`) emit the full decoded
       `*QueryResponse` untruncated (round-trip decode of the emitted JSON equals the input).
-- [ ] Run tests — must pass before next task.
+      ⚠️ **Note (verified while implementing):** exact deep-equality on the decoded Go struct is too
+      strict for the `yaml` codec — `goccy/go-yaml`'s JSON-compatible decode turns an explicit JSON
+      `null` cell into a `nil` `json.RawMessage` rather than a literal `RawMessage("null")`. Both
+      marshal back to the same JSON `null` (`json.RawMessage.MarshalJSON` returns `"null"` for a nil
+      receiver too), so the test asserts equality via re-marshaled JSON (`assert.JSONEq`) rather than
+      `assert.Equal` on the structs — a representational difference in the codec, not a bug in
+      `Decode`/`RenderTable`.
+- [x] Run tests — must pass before next task.
 
 ### Task 6 — Command wiring, table codec, and root registration
 
