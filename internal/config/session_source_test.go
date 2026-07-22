@@ -872,6 +872,7 @@ func TestSessionSource_Rotate_MutualTLS(t *testing.T) {
 	server.TLS = &tls.Config{
 		ClientAuth: tls.RequireAndVerifyClientCert,
 		ClientCAs:  clientCAs,
+		MinVersion: tls.VersionTLS12,
 	}
 	server.StartTLS()
 	t.Cleanup(server.Close)

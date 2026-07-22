@@ -221,6 +221,7 @@ func (cfg *TLS) ToStdTLSConfig() (*tls.Config, error) {
 		InsecureSkipVerify: cfg.Insecure,
 		ServerName:         cfg.ServerName,
 		NextProtos:         cfg.NextProtos,
+		MinVersion:         tls.VersionTLS12,
 	}
 
 	if len(cfg.CAData) > 0 {
