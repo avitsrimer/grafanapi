@@ -23,6 +23,9 @@ grafanapi login --server https://grafana.example.com
 Run a single ad-hoc query against any configured Grafana datasource, mirroring Grafana's Explore UI:
 
 ```shell
+# List the datasources configured on the current context
+grafanapi datasources
+
 # Prometheus/Loki
 grafanapi explore example-prometheus "up"
 

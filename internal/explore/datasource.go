@@ -63,7 +63,7 @@ func notFoundError(client *goapi.GrafanaHTTPAPI, ref string) error {
 	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
 
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "datasource %q not found; available datasources:", ref)
+	fmt.Fprintf(&msg, "datasource %q not found; run `grafanapi datasources` to list available datasources:", ref)
 	for _, ds := range items {
 		fmt.Fprintf(&msg, "\n  %s (%s, %s)", ds.Name, ds.UID, ds.Type)
 	}
