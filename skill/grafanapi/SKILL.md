@@ -41,6 +41,12 @@ cookie is only read from a no-echo prompt or stdin. Sessions auto-rotate on ever
 expiry, or shared-cookie conflict. First run of a freshly built binary triggers a macOS Keychain
 "Allow / Always Allow" dialog — expected; choose "Always Allow".
 
+Rotation only fires when commands actually run, so an idle context still expires after Grafana's
+inactive-lifetime window (7 days by default). `grafanapi session keepalive` proactively rotates
+every logged-in context's session (exit 2 + per-context report if one is already stale);
+`grafanapi session keepalive --install-agent --at 09:00` installs a launchd agent that does this
+daily, making re-login necessary only at the server's max session lifetime (30 days by default).
+
 ## 2. Discover datasources
 
 Before querying, list what exists on the current context:

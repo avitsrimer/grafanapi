@@ -18,4 +18,5 @@
 * [grafanapi install-skill](grafanapi_install-skill.md)	 - Install the bundled Claude Code skill
 * [grafanapi login](grafanapi_login.md)	 - Authenticate to a Grafana instance using a session cookie
 * [grafanapi resources](grafanapi_resources.md)	 - Manipulate Grafana resources
+* [grafanapi session](grafanapi_session.md)	 - Manage Grafana login sessions across contexts
 

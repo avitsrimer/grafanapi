@@ -119,6 +119,15 @@ grafanapi follows the Cobra command pattern with six main command groups:
    - `install-skill`: Write the embedded `skill/grafanapi` tree to `<--to>/skills/grafanapi`
      (default `--to ~/.claude`), replacing any existing installation. No config/auth dependency.
 
+7. **session**: Session-lifecycle operations spanning every configured context
+   - `session keepalive`: Rotate the session cookie of every logged-in context (or one, via
+     `--context`) through the same SessionSource machinery the rotating transport uses, persisting
+     each rotated cookie to the Keychain. Not-logged-in contexts are reported and skipped; a dead
+     session surfaces as the standard stale-session error (exit code 2). With `--install-agent`
+     (`--at HH:MM`, default 09:00; `--to` overrides `~/Library/LaunchAgents`), instead writes a
+     launchd agent plist that runs `session keepalive` daily, keeping idle sessions inside
+     Grafana's inactive-lifetime window hands-off.
+
 ### Core Packages
 
 **cmd/grafanapi/** - CLI command implementations
