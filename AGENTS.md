@@ -81,7 +81,7 @@ make clean
 
 ### Command Structure
 
-grafanapi follows the Cobra command pattern with three main command groups:
+grafanapi follows the Cobra command pattern with four main command groups:
 
 1. **login**: Authenticate to a Grafana instance using a session cookie
    - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
@@ -106,6 +106,11 @@ grafanapi follows the Cobra command pattern with three main command groups:
    - `resources validate`: Validate resource manifests
    - `resources serve`: Serve resources locally with live reload
 
+4. **explore**: Run a single ad-hoc query against a Grafana datasource (mirrors Grafana's Explore UI)
+   - `explore DATASOURCE QUERY`: resolve a datasource (UID, then name), map the query string onto
+     the type-appropriate request field (`expr`/`rawSql`/`target`/`query`, override with `--field`),
+     POST it to `/api/ds/query`, and render the result as a table (default) or `json`/`yaml`
+
 ### Core Packages
 
 **cmd/grafanapi/** - CLI command implementations
@@ -113,6 +118,8 @@ grafanapi follows the Cobra command pattern with three main command groups:
 - `login/`: `login` / `login update` — interactive session-cookie authentication
 - `config/`: Configuration management commands
 - `resources/`: Resource manipulation commands
+- `explore/`: `explore` — thin Cobra wiring (flags, a `table` `format.Codec` adapter) over
+  `internal/explore`; no domain logic lives here
 - `fail/`: Error handling and detailed error messages
 - `io/`: Output formatting and user messages
 
@@ -136,6 +143,27 @@ grafanapi follows the Cobra command pattern with three main command groups:
   `cmd/grafanapi/fail` stale-session rendering fires — rotation is purely a transparent retry
   layer in front of that path. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
   **not** wired into rotation (pre-auth, single non-retryable probe, fails soft already).
+
+**internal/explore/** - Ad-hoc datasource query domain logic (no Cobra)
+- `dataframe.go`: wire structs (`QueryResponse`/`FrameResult`/`Frame`/`FrameSchema`/`FieldSchema`/
+  `FrameData`) matching Grafana's real `/api/ds/query` JSON-dataframe shape, plus `Decode`,
+  `Frame.RowCount`/`Cell`, and `(*QueryResponse).FirstError`
+- `datasource.go`: `ResolveDataSource` — UID lookup, then name lookup, then a "not found" error
+  listing every configured datasource — via the generated openapi client
+  (`grafana.ClientFromContext`)
+- `query.go`: `QueryFieldForType`/`BuildQuery` — datasource-type → request-field mapping
+  (`expr`/`rawSql`/`target`/`query`), `--param`/`--interval`/`--instant` handling
+- `run.go`: `Run` — raw `POST /api/ds/query` over `httputils.NewTransport` wrapped with
+  `GrafanaConfig.WrapWithSession` (so a `401` rotates-and-retries like every other authenticated
+  path), decode, and per-`refId` error surfacing
+- `render.go`: `RenderTable` — `text/tabwriter` rendering for the default `table` output format
+- **Deliberate raw-HTTP decision**: the query path decodes the raw `/api/ds/query` response body
+  into these local structs instead of calling the generated client's
+  `Datasources.QueryMetricsWithExpressions`, because the vendored `models.Frame`/`models.Field`
+  have no `schema`/`data` split and no values field at all — the go-openapi consumer discards every
+  column value (`data.values`) while decoding, so its payload cannot be re-marshalled into the real
+  wire shape. Datasource **lookup** still goes through the generated client, since its response
+  models (`models.DataSource`) round-trip correctly; only the query response is lossy.
 
 **internal/resources/** - Resource abstraction layer
 - `Resource`: Wraps Kubernetes-style unstructured objects for Grafana resources
@@ -223,6 +251,14 @@ grafanapi follows the Cobra command pattern with three main command groups:
 4. **Three-Way Merge**: When pushing resources, grafanapi performs server-side apply semantics similar to kubectl, allowing multiple managers to coexist.
 
 5. **Dashboards as Code**: The `serve` command supports script-based dashboard generation with live preview, enabling code-first workflows with SDKs like grafana-foundation-sdk.
+
+6. **Raw-HTTP Wire Structs Where Generated Models Are Lossy**: `internal/explore` decodes
+   `/api/ds/query` responses into its own local structs (`dataframe.go`) instead of the generated
+   client's response model, because `models.Frame`/`models.Field` cannot round-trip the real
+   JSON-dataframe wire shape (no `schema`/`data` split, no values field at all). This is a
+   deliberate escape hatch from the "always use the generated client" pattern, applied only where
+   the generated model is verifiably lossy — datasource lookup in the same package still uses the
+   generated client, since `models.DataSource` round-trips correctly.
 
 ## Configuration
 
@@ -425,6 +461,28 @@ Wraps k8s.io/client-go's dynamic client for Grafana:
    - Automatic page refresh on file change
 ```
 
+#### Explore Flow (Ad-hoc datasource query)
+
+```
+1. Resolve the datasource (internal/explore.ResolveDataSource)
+   - Generated client: GetDataSourceByUID, then GetDataSourceByName on 404
+   - Both-miss: list all datasources, return a "not found" error naming them
+
+2. Build the query (internal/explore.QueryFieldForType / BuildQuery)
+   - Map datasource type -> request field (expr/rawSql/target/query)
+   - Apply type extras (e.g. SQL's format:"table"), --interval/--instant,
+     --param overrides (highest precedence)
+
+3. Execute the query (internal/explore.Run)
+   - Raw POST /api/ds/query over httputils.NewTransport wrapped with
+     GrafanaConfig.WrapWithSession (so a 401 rotates-and-retries)
+   - Decode the raw response body into local wire structs (not the generated
+     client's response model - see Key Design Patterns)
+
+4. Render the result (internal/explore.RenderTable)
+   - Table (default) via text/tabwriter, or json/yaml for piping
+```
+
 ### Key Technology Choices
 
 #### Kubernetes Client Libraries
@@ -549,6 +607,9 @@ The codebase is designed for extension:
 3. **New Processors**: Implement Processor interface
 4. **Custom Handlers**: Add to `internal/server/handlers/`
 5. **Authentication Methods**: Extend `internal/config/rest.go`
+6. **New Explore Datasource Types**: Add one entry to `fieldByType` in `internal/explore/query.go`
+   (query field key + any type extras, e.g. SQL's `format:"table"`); no other change needed unless
+   the type needs bespoke request shaping beyond the field-key mapping.
 
 ### Dependencies of Note
 
@@ -602,6 +663,13 @@ The codebase is designed for extension:
 3. **Folder Ordering**: Folders must be pushed before dashboards (dependency)
 4. **Manager Metadata**: Resources created by UI can't be pushed unless --include-managed
 5. **Format Preservation**: Pull/push roundtrip preserves original format (JSON/YAML)
+6. **Explore's Dead-Session 401 Must Stay a `*runtime.APIError`**: `internal/explore.Run` must
+   surface a dead-session `401` (rotation exhausted) as `runtime.NewAPIError(..., 401)`, never as
+   `session.ErrUnauthorized`. `cmd/grafanapi/fail.convertSessionErrors` maps the two differently:
+   the bare sentinel renders as the login-rejected message ("Grafana rejected the provided session
+   cookie" — meant for `login`/`login update`), while `*runtime.APIError{Code:401}` renders as the
+   stale-session message ("Grafana session is stale or unauthorized" / `login update` suggestion).
+   Returning the wrong one shows the wrong message to the user.
 
 ### Future Architecture Directions
 
