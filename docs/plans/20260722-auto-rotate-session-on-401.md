@@ -604,21 +604,34 @@ usage correct — not because a live openapi 401 is common today.
 **Files:**
 - Modify: none (verification only; fix regressions in-place if found)
 
-- [ ] `make tests` (race) passes across all packages (fall back to `go test -race ./...` if `devbox`
-      is unavailable on the machine, as the prior plan did).
-- [ ] `make build` produces `./bin/grafanapi` on darwin/arm64 with `CGO_ENABLED=1`; `--version` runs.
-- [ ] `make lint` passes: no **new** findings versus the pre-existing 14-finding baseline (5 gosec, 3
+- [x] `make tests` (race) passes across all packages (fall back to `go test -race ./...` if `devbox`
+      is unavailable on the machine, as the prior plan did). `devbox` is not installed on this
+      machine; ran `go test -race ./...` directly (both cached and with `go clean -testcache` for a
+      fresh run) — all packages pass.
+- [x] `make build` produces `./bin/grafanapi` on darwin/arm64 with `CGO_ENABLED=1`; `--version` runs.
+      `devbox` unavailable, so ran the underlying `go build -buildvcs=false -ldflags=...` command from
+      the Makefile directly, producing `./bin/grafanapi`; `./bin/grafanapi --version` printed
+      `grafanapi version SNAPSHOT built from <commit> on <date>`.
+- [x] `make lint` passes: no **new** findings versus the pre-existing 14-finding baseline (5 gosec, 3
       govet, 1 nolintlint, 5 staticcheck) recorded in the completed plan's Task 11 — verify by diffing
       `golangci-lint run` output against that baseline (or a `main`/base-branch worktree run); a lock
       held across a network call in `Rotate` may draw attention, so annotate with a justified
       `//nolint` + comment only if a linter flags it, and record it as an intentional addition to the
-      baseline.
-- [ ] `GOOS=linux CGO_ENABLED=0 go build ./... && go vet ./...` passes (the `!darwin` keychain stub
-      keeps cross-build green; nothing in this feature is platform-specific).
-- [ ] `goreleaser check` passes; `make reference-drift` passes (no command-help changes are expected —
+      baseline. Ran `golangci-lint run -c .golangci.yaml` directly (devbox unavailable): exactly 14
+      findings (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck), all pre-existing (in
+      `internal/server/grafana/requests.go`, `scripts/*/main.go`, `internal/secrets/*.go`,
+      `internal/httputils/client.go`, `cmd/grafanapi/fail/detailed.go`) — no new findings, so no
+      `//nolint` annotation was needed for the `Rotate` lock.
+- [x] `GOOS=linux CGO_ENABLED=0 go build ./... && go vet ./...` passes (the `!darwin` keychain stub
+      keeps cross-build green; nothing in this feature is platform-specific). Both commands succeeded.
+- [x] `goreleaser check` passes; `make reference-drift` passes (no command-help changes are expected —
       no new commands/flags — so the CLI/env/config reference docs should be drift-free; regenerate and
-      confirm).
-- [ ] Run the full suite once more — must pass before the documentation task.
+      confirm). `goreleaser check` validated `.goreleaser.yaml` successfully. Regenerated
+      `docs/reference/cli`, `docs/reference/environment-variables`, and `docs/reference/configuration`
+      directly via the `scripts/*-reference` Go programs (devbox unavailable) — `git status` showed no
+      diff after regeneration, confirming zero drift.
+- [x] Run the full suite once more — must pass before the documentation task. Ran `go clean
+      -testcache && go test -race ./...` once more; all packages pass.
 
 ### Task 7 — Update documentation and complete the plan
 
