@@ -101,6 +101,42 @@ See the [`grafanapi login`](./reference/cli/grafanapi_login.md) and
 [`grafanapi login update`](./reference/cli/grafanapi_login_update.md)
 reference pages for the full flag list.
 
+### Keeping sessions alive
+
+Automatic rotation only happens when a command actually runs, so a context
+that goes unused for longer than the server's *inactive lifetime* window
+(`login_maximum_inactive_lifetime_duration`, 7 days by default) still expires
+— a quiet week is enough to force a fresh `grafanapi login`.
+
+`session keepalive` closes that gap: it proactively rotates the session cookie
+of **every** logged-in context (or a single one via `--context`) and persists
+the rotated cookies to the Keychain:
+
+```shell
+grafanapi session keepalive
+```
+
+Run periodically, this keeps every session inside the inactive-lifetime window
+indefinitely; only the server's *maximum* session lifetime
+(`login_maximum_lifetime_duration`, 30 days by default), an explicit logout,
+or a revocation still ends it. Contexts that never completed `grafanapi login`
+are reported and skipped, and a context whose session is already dead is
+reported with the same "session is stale" error and exit code **2** described
+above.
+
+To run it hands-off, install the bundled launchd agent, which runs
+`session keepalive` daily at the given time:
+
+```shell
+grafanapi session keepalive --install-agent --at 09:00
+```
+
+This writes `com.grafanapi.keepalive.plist` to `~/Library/LaunchAgents`
+(pointing at the current `grafanapi` binary) and prints the `launchctl`
+command that loads it. See the
+[`grafanapi session keepalive`](./reference/cli/grafanapi_session_keepalive.md)
+reference page for the full flag list.
+
 !!! note
 
     On the first Keychain read after a rebuild of `grafanapi`, macOS prompts

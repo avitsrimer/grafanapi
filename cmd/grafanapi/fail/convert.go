@@ -195,6 +195,13 @@ func convertSessionErrors(err error) (*DetailedError, bool) {
 		return staleSessionError(err), true
 	}
 
+	// The rotate endpoint itself rejected the stored cookie (session keepalive, or a rotating
+	// transport whose rotation failure surfaced directly): the session is dead, same remedy as
+	// any other stale-session case.
+	if errors.Is(err, config.ErrRotateUnauthorized) {
+		return staleSessionError(err), true
+	}
+
 	if errors.Is(err, session.ErrUnauthorized) {
 		return loginRejectedError(err), true
 	}

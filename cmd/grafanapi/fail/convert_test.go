@@ -34,6 +34,11 @@ func TestErrorToDetailedError_StaleSession(t *testing.T) {
 		"openapi 401 APIError": {
 			err: &runtime.APIError{OperationName: "getUser", Code: 401},
 		},
+		"rotate endpoint unauthorized": {
+			// `session keepalive` surfaces this when the rotate endpoint itself rejects the
+			// stored cookie for a context: same dead session, same remedy, same exit code.
+			err: fmt.Errorf("context %q: %w", "prod", config.ErrRotateUnauthorized),
+		},
 	}
 
 	for name, tc := range tests {
