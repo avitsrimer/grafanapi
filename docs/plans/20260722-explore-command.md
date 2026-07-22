@@ -449,18 +449,27 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error
 - Create: `internal/explore/datasource.go`
 - Create: `internal/explore/datasource_test.go`
 
-- [ ] Implement `ResolveDataSource(client *goapi.GrafanaHTTPAPI, ref string) (*models.DataSource,
+- [x] Implement `ResolveDataSource(client *goapi.GrafanaHTTPAPI, ref string) (*models.DataSource,
       error)`: UID → (404) name → (404) listing-error; detect `404` via `errors.As` on
       `*datasources.GetDataSourceByUIDNotFound` / `*datasources.GetDataSourceByNameNotFound`;
       propagate any non-404 error unchanged.
-- [ ] Build the not-found error message by listing `GetDataSources()` results as `name (uid, type)`
+      ⚠️ **Deviation (verified while implementing):** there is no
+      `*datasources.GetDataSourceByNameNotFound` type in the vendored client — reading
+      `get_data_source_by_name_responses.go` shows its `ReadResponse` switch only special-cases
+      `200/401/403/500`; a `404` falls through to the `default:` branch, which returns a bare
+      `runtime.NewAPIError(...)`. So the name-lookup miss is detected instead via
+      `errors.As(err, &apiErr)` on `*runtime.APIError` and checking `apiErr.Code ==
+      http.StatusNotFound` (same field-access pattern already used in
+      `cmd/grafanapi/fail/convert.go`). The UID lookup still uses the typed
+      `*datasources.GetDataSourceByUIDNotFound` exactly as planned.
+- [x] Build the not-found error message by listing `GetDataSources()` results as `name (uid, type)`
       sorted by name; wrap-and-return a failure of the listing call itself.
-- [ ] Add a test helper that constructs a `*goapi.GrafanaHTTPAPI` via `grafana.ClientFromContext`
+- [x] Add a test helper that constructs a `*goapi.GrafanaHTTPAPI` via `grafana.ClientFromContext`
       pointed at an `httptest.Server` (build a `*config.Context` whose `Grafana.Server` is the test
       server URL).
-- [ ] Write tests: UID-hit; UID-miss→name-hit; both-miss→listing-error (message contains each
+- [x] Write tests: UID-hit; UID-miss→name-hit; both-miss→listing-error (message contains each
       datasource's name+uid+type); a non-404 (`401`) propagating unchanged.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
 
 ### Task 3 — Query building (type mapping, params, flags)
 
