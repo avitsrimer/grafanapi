@@ -568,20 +568,36 @@ usage correct — not because a live openapi 401 is common today.
 - Modify: `internal/server/grafana/requests.go` (wrap the dashboard-proxy client `Transport`)
 - Modify: `internal/server/grafana/requests_test.go`
 
-- [ ] In `server.go`, set the `ReverseProxy.Transport` to
+- [x] In `server.go`, set the `ReverseProxy.Transport` to
       `s.context.Grafana.WrapWithSession(httputils.NewTransport(s.context))`; keep the existing
       `AuthenticateRequest` call in `Rewrite` (harmless — the transport re-sets the cookie to the live
       value, which wins after a rotation).
-- [ ] In `requests.go` (`AuthenticateAndProxyHandler`), set the dashboard-proxy client's `Transport`
+- [x] In `requests.go` (`AuthenticateAndProxyHandler`), set the dashboard-proxy client's `Transport`
       to `cfg.Grafana.WrapWithSession(httputils.NewTransport(cfg))`; keep `AuthenticateRequest`.
       Keep both handlers free of any cookie logging (existing comments already note this).
-- [ ] Confirm no import cycle (both files already import `internal/config` and `internal/httputils`).
-- [ ] Write tests for success cases: the proxy transport carries the cookie; when a `SessionSource` is
+- [x] Confirm no import cycle (both files already import `internal/config` and `internal/httputils`).
+      Verified via `go build ./...`.
+- [x] Write tests for success cases: the proxy transport carries the cookie; when a `SessionSource` is
       present, a scripted `401 → rotate → 200` on an `httptest.Server` is served transparently for a
-      rewindable (GET) proxied request.
-- [ ] Write tests for error cases: no cookie/source → no `Cookie` header and no rotation attempt; a
-      non-rewindable proxied body → no retry, original `401` passed back to the caller.
-- [ ] Run tests — must pass before next task.
+      rewindable (GET) proxied request. Added `internal/server/server_test.go`
+      (`TestReverseProxyTransport_CarriesStaticCookie`, `TestReverseProxyTransport_RotatesSessionOn401`)
+      exercising the exact `ReverseProxy.Transport` expression from `server.go`, and
+      `internal/server/grafana/requests_test.go`
+      (`TestAuthenticateAndProxyHandler_RotatesSessionOn401`) exercising the real
+      `AuthenticateAndProxyHandler`.
+- [x] Write tests for error cases: no cookie/source → no `Cookie` header and no rotation attempt; a
+      non-rewindable proxied body → no retry, original `401` passed back to the caller. Added
+      `TestReverseProxyTransport_NoCookieOrSessionMeansNoCookieHeaderAndNoRotation` and
+      `TestReverseProxyTransport_NonRewindableBodyIsNotRetried` (server_test.go — the latter uses
+      `httptest.NewRequestWithContext` with a real body, which never populates `GetBody`, mirroring a
+      real proxied POST) and `TestAuthenticateAndProxyHandler_RotateRejectedSurfacesOriginal401`
+      (requests_test.go — the dashboard-proxy client always builds a nil-body request, so it is
+      trivially rewindable; its error case instead covers rotation itself being rejected).
+- [x] Run tests — must pass before next task. `go test -race ./...` passes across all packages;
+      `golangci-lint run -c .golangci.yaml ./...` reports exactly the pre-existing 14 findings (5
+      gosec, 3 govet, 1 nolintlint, 5 staticcheck), no new ones (fixed 3 transient `noctx` findings by
+      using `httptest.NewRequestWithContext` instead of `httptest.NewRequest`); `GOOS=linux
+      CGO_ENABLED=0 go build ./... && go vet ./...` passes.
 
 ### Task 6 — Verify acceptance criteria
 

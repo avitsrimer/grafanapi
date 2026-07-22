@@ -65,7 +65,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.subpath = strings.TrimSuffix(u.Path, "/")
 	s.proxy = &httputil.ReverseProxy{
-		Transport: httputils.NewTransport(s.context),
+		// WrapWithSession injects the session cookie and rotates it on a 401 (see
+		// internal/config/session_source.go); AuthenticateRequest below is still called for
+		// every request and re-sets the cookie to whatever is currently live, which is harmless
+		// and wins after a rotation.
+		Transport: s.context.Grafana.WrapWithSession(httputils.NewTransport(s.context)),
 		Rewrite: func(r *httputil.ProxyRequest) {
 			u.Path = "" // to ensure possible sub-paths won't be added twice.
 			r.SetURL(u)

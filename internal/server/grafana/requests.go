@@ -32,13 +32,14 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 		AuthenticateRequest(cfg.Grafana, req)
 		req.Header.Set("User-Agent", httputils.UserAgent)
 
-		// Built directly from httputils.NewTransport, deliberately not wrapped in any
-		// debug-logging round-tripper: dumping the full request (headers included, unredacted)
-		// would put the session cookie set by AuthenticateRequest above into logs reachable via
-		// -vvv.
+		// Built directly from httputils.NewTransport, wrapped only with WrapWithSession (cookie
+		// injection and rotate-on-401, see internal/config/session_source.go) and deliberately
+		// not wrapped in any debug-logging round-tripper: dumping the full request (headers
+		// included, unredacted) would put the session cookie set by AuthenticateRequest above
+		// into logs reachable via -vvv.
 		client := &http.Client{
 			Timeout:   proxyClientTimeout,
-			Transport: httputils.NewTransport(cfg),
+			Transport: cfg.Grafana.WrapWithSession(httputils.NewTransport(cfg)),
 		}
 
 		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
