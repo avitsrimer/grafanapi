@@ -61,11 +61,12 @@ func Command() *cobra.Command {
 		Long: `Authenticate to a Grafana instance using a browser session cookie (grafana_session).
 
 The cookie is validated against the target server (GET /api/user) before anything is persisted.
-It is never accepted as a command-line flag or environment variable — only via an interactive,
-no-echo prompt. On success, the context (server, org-id/stack-id, TLS) is written to the
-configuration file and the cookie itself is stored in the macOS Keychain, never in the plaintext
-configuration file.`,
-		Example: "\n\tgrafanapi login --server https://grafana.example.com",
+It is never accepted as a command-line flag value or environment variable: it is read either from
+an interactive, no-echo prompt, or — with --cookie-stdin — from stdin, for scripting and CI. On
+success, the context (server, org-id/stack-id, TLS) is written to the configuration file and the
+cookie itself is stored in the macOS Keychain, never in the plaintext configuration file.`,
+		Example: "\n\tgrafanapi login --server https://grafana.example.com\n" +
+			"\tpbpaste | grafanapi login --server https://grafana.example.com --cookie-stdin",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLogin(cmd, opts)
 		},
@@ -80,11 +81,12 @@ configuration file.`,
 
 // Options holds the flags accepted by `login`.
 type Options struct {
-	ConfigFile string
-	Context    string
-	Server     string
-	OrgID      int64
-	StackID    int64
+	ConfigFile  string
+	Context     string
+	Server      string
+	OrgID       int64
+	StackID     int64
+	CookieStdin bool
 }
 
 func (opts *Options) BindFlags(flags *pflag.FlagSet) {
@@ -93,6 +95,7 @@ func (opts *Options) BindFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&opts.Server, "server", "", "Grafana server URL; skips the interactive server prompt")
 	flags.Int64Var(&opts.OrgID, "org-id", 0, "Organization ID, for on-prem Grafana; skips Grafana Cloud stack-id discovery")
 	flags.Int64Var(&opts.StackID, "stack-id", 0, "Grafana Cloud stack ID; skips stack-id discovery")
+	flags.BoolVar(&opts.CookieStdin, "cookie-stdin", false, "Read the session cookie from stdin instead of the interactive prompt (requires --server)")
 
 	_ = cobra.MarkFlagFilename(flags, "config", "yaml", "yml")
 }
@@ -135,6 +138,14 @@ func runLogin(cmd *cobra.Command, opts *Options) error {
 	}
 
 	server := strings.TrimSpace(opts.Server)
+
+	// --cookie-stdin consumes stdin for the cookie, so it can't fall back to the interactive
+	// server prompt (which also needs an input source, conventionally a TTY): --server must be
+	// given up front. `login update` has no such constraint since it never prompts for a server.
+	if opts.CookieStdin && server == "" {
+		return errors.New("login: --cookie-stdin requires --server since stdin is consumed by the cookie")
+	}
+
 	if server == "" {
 		server, err = activePrompter.PromptLine("Grafana server URL: ")
 		if err != nil {
@@ -147,14 +158,22 @@ func runLogin(cmd *cobra.Command, opts *Options) error {
 		return errors.New("login: a Grafana server URL is required (pass --server or enter one at the prompt)")
 	}
 
-	cookie, err := activePrompter.PromptSecret("Grafana session cookie: ")
-	if err != nil {
-		return fmt.Errorf("login: %w", err)
-	}
-	cookie = strings.TrimSpace(cookie)
+	var cookie string
+	if opts.CookieStdin {
+		cookie, err = readCookieFromStdin(cmd)
+		if err != nil {
+			return fmt.Errorf("login: %w", err)
+		}
+	} else {
+		cookie, err = activePrompter.PromptSecret("Grafana session cookie: ")
+		if err != nil {
+			return fmt.Errorf("login: %w", err)
+		}
+		cookie = strings.TrimSpace(cookie)
 
-	if cookie == "" {
-		return errors.New("login: a session cookie is required")
+		if cookie == "" {
+			return errors.New("login: a session cookie is required")
+		}
 	}
 
 	orgID := opts.OrgID

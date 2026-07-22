@@ -24,10 +24,12 @@ func updateCommand() *cobra.Command {
 		Long: `Refresh the Grafana session cookie stored for an existing context.
 
 Unlike "grafanapi login", "login update" never re-asks for the server: it loads the current (or
---context-selected) context's server from the configuration file, prompts only for a new session
-cookie, validates it against that stored server (GET /api/user), and — only on success — overwrites
-the cookie in the macOS Keychain. The configuration file itself is never modified.`,
-		Example: "\n\tgrafanapi login update\n\tgrafanapi login update --context staging",
+--context-selected) context's server from the configuration file, then reads a new session cookie
+— from an interactive, no-echo prompt, or from stdin with --cookie-stdin — validates it against
+that stored server (GET /api/user), and — only on success — overwrites the cookie in the macOS
+Keychain. The configuration file itself is never modified.`,
+		Example: "\n\tgrafanapi login update\n\tgrafanapi login update --context staging\n" +
+			"\tpbpaste | grafanapi login update --cookie-stdin",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLoginUpdate(cmd, opts)
 		},
@@ -40,13 +42,15 @@ the cookie in the macOS Keychain. The configuration file itself is never modifie
 
 // UpdateOptions holds the flags accepted by `login update`.
 type UpdateOptions struct {
-	ConfigFile string
-	Context    string
+	ConfigFile  string
+	Context     string
+	CookieStdin bool
 }
 
 func (opts *UpdateOptions) BindFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&opts.ConfigFile, "config", "", "Path to the configuration file to use")
 	flags.StringVar(&opts.Context, "context", "", "Name of the context to update (defaults to the current context)")
+	flags.BoolVar(&opts.CookieStdin, "cookie-stdin", false, "Read the session cookie from stdin instead of the interactive prompt")
 
 	_ = cobra.MarkFlagFilename(flags, "config", "yaml", "yml")
 }
@@ -81,14 +85,22 @@ func runLoginUpdate(cmd *cobra.Command, opts *UpdateOptions) error {
 		return fmt.Errorf("login update: context %q is not configured (run: grafanapi login --context %s)", name, name)
 	}
 
-	cookie, err := activePrompter.PromptSecret("Grafana session cookie: ")
-	if err != nil {
-		return fmt.Errorf("login update: %w", err)
-	}
-	cookie = strings.TrimSpace(cookie)
+	var cookie string
+	if opts.CookieStdin {
+		cookie, err = readCookieFromStdin(cmd)
+		if err != nil {
+			return fmt.Errorf("login update: %w", err)
+		}
+	} else {
+		cookie, err = activePrompter.PromptSecret("Grafana session cookie: ")
+		if err != nil {
+			return fmt.Errorf("login update: %w", err)
+		}
+		cookie = strings.TrimSpace(cookie)
 
-	if cookie == "" {
-		return errors.New("login update: a session cookie is required")
+		if cookie == "" {
+			return errors.New("login update: a session cookie is required")
+		}
 	}
 
 	verifyGrafana := *existing.Grafana

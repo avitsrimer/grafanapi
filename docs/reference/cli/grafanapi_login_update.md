@@ -7,9 +7,10 @@ Refresh a stale Grafana session cookie
 Refresh the Grafana session cookie stored for an existing context.
 
 Unlike "grafanapi login", "login update" never re-asks for the server: it loads the current (or
---context-selected) context's server from the configuration file, prompts only for a new session
-cookie, validates it against that stored server (GET /api/user), and — only on success — overwrites
-the cookie in the macOS Keychain. The configuration file itself is never modified.
+--context-selected) context's server from the configuration file, then reads a new session cookie
+— from an interactive, no-echo prompt, or from stdin with --cookie-stdin — validates it against
+that stored server (GET /api/user), and — only on success — overwrites the cookie in the macOS
+Keychain. The configuration file itself is never modified.
 
 ```
 grafanapi login update [flags]
@@ -21,6 +22,7 @@ grafanapi login update [flags]
 
 	grafanapi login update
 	grafanapi login update --context staging
+	pbpaste | grafanapi login update --cookie-stdin
 ```
 
 ### Options
@@ -28,6 +30,7 @@ grafanapi login update [flags]
 ```
       --config string    Path to the configuration file to use
       --context string   Name of the context to update (defaults to the current context)
+      --cookie-stdin     Read the session cookie from stdin instead of the interactive prompt
   -h, --help             help for update
 ```
 

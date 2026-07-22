@@ -35,31 +35,34 @@ type ttyPrompter struct{}
 func (ttyPrompter) PromptLine(label string) (string, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return "", fmt.Errorf("login: opening terminal: %w", err)
+		return "", fmt.Errorf("opening terminal: %w", err)
 	}
 	defer tty.Close()
 
 	if _, err := fmt.Fprint(tty, label); err != nil {
-		return "", fmt.Errorf("login: writing prompt: %w", err)
+		return "", fmt.Errorf("writing prompt: %w", err)
 	}
 
 	line, err := bufio.NewReader(tty).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("login: reading input: %w", err)
+		return "", fmt.Errorf("reading input: %w", err)
 	}
 
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
+// PromptSecret is only ever used to prompt for the session cookie, so a missing terminal here
+// (e.g. non-interactive shells, CI) points the caller at --cookie-stdin as the non-interactive
+// alternative rather than just reporting the low-level open failure.
 func (ttyPrompter) PromptSecret(label string) (string, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return "", fmt.Errorf("login: opening terminal: %w", err)
+		return "", fmt.Errorf("no terminal available for the cookie prompt; use --cookie-stdin to pipe the value: %w", err)
 	}
 	defer tty.Close()
 
 	if _, err := fmt.Fprint(tty, label); err != nil {
-		return "", fmt.Errorf("login: writing prompt: %w", err)
+		return "", fmt.Errorf("writing prompt: %w", err)
 	}
 
 	secret, err := term.ReadPassword(int(tty.Fd()))
@@ -68,7 +71,7 @@ func (ttyPrompter) PromptSecret(label string) (string, error) {
 	fmt.Fprintln(tty)
 
 	if err != nil {
-		return "", fmt.Errorf("login: reading secret input: %w", err)
+		return "", fmt.Errorf("reading secret input: %w", err)
 	}
 
 	return string(secret), nil
