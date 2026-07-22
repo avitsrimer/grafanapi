@@ -496,18 +496,31 @@ LoadRESTConfig → resolve cookie + SessionSource from Keychain → NewNamespace
 - Modify: `internal/config/rest_test.go`
 - Modify: `cmd/grafanapi/fail/convert_test.go` (lock in stale-session rendering when rotation gives up)
 
-- [ ] Replace the inline `WrapTransport` closure in `NewNamespacedRESTConfig` with
+- [x] Replace the inline `WrapTransport` closure in `NewNamespacedRESTConfig` with
       `rcfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper { return
       cfg.Grafana.WrapWithSession(rt) }` (covers both the rotating and static-fallback cases; leave the
-      no-cookie case producing no wrapper).
-- [ ] Ensure TLS config is still applied independently of the wrapper (unchanged block above it).
-- [ ] Write tests for success cases: with a `SessionSource`, the wrapped RoundTripper sends the cookie
+      no-cookie case producing no wrapper). Implemented as `if cfg.Grafana.Session != nil ||
+      cfg.Grafana.SessionCookie != "" { ... }` guarding the closure, matching the "no-cookie means no
+      wrapper" requirement (verified by the pre-existing
+      `TestNewNamespacedRESTConfig_NoCookieMeansNoWrapTransport`).
+- [x] Ensure TLS config is still applied independently of the wrapper (unchanged block above it).
+- [x] Write tests for success cases: with a `SessionSource`, the wrapped RoundTripper sends the cookie
       and performs rotate-and-retry against an `httptest.Server`; with only `SessionCookie`, the static
-      header is sent; with neither, no `Cookie` header is added.
-- [ ] Write tests for error cases: rotate rejected at the k8s transport → original `401` returned →
+      header is sent; with neither, no `Cookie` header is added. Added
+      `TestNewNamespacedRESTConfig_RotatesSessionOn401` (rotate-and-retry, keychain persisted); the
+      static-cookie and no-cookie cases were already covered by
+      `TestNewNamespacedRESTConfig_InjectsSessionCookie` /
+      `TestNewNamespacedRESTConfig_NoCookieMeansNoWrapTransport`.
+- [x] Write tests for error cases: rotate rejected at the k8s transport → original `401` returned →
       `convert_test.go` asserts a k8s `401` `StatusError` still renders as stale-session (exit code 2,
-      `login update` suggestion).
-- [ ] Run tests — must pass before next task.
+      `login update` suggestion). Added `TestNewNamespacedRESTConfig_RotateRejectedSurfacesOriginal401`
+      (no retry, keychain not written) and cross-referenced it from a doc comment on the pre-existing
+      `TestErrorToDetailedError_StaleSession` in `cmd/grafanapi/fail/convert_test.go`, which already
+      locks in the k8s-401-renders-as-stale-session assertion this fallback path depends on.
+- [x] Run tests — must pass before next task. `go test -race ./...` passes; `golangci-lint run -c
+      .golangci.yaml ./...` reports exactly the pre-existing 14 findings (5 gosec, 3 govet, 1
+      nolintlint, 5 staticcheck), no new ones; `GOOS=linux CGO_ENABLED=0 go build ./... && go vet
+      ./...` passes.
 
 ### Task 4 — openapi path reworked to transport-level rotation
 

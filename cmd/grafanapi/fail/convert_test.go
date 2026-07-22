@@ -18,6 +18,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// TestErrorToDetailedError_StaleSession also serves as the fallback-rendering half of
+// docs/plans/20260722-auto-rotate-session-on-401.md's Task 3: when the k8s transport's
+// rotatingRoundTripper gives up on a rejected rotation (see
+// TestNewNamespacedRESTConfig_RotateRejectedSurfacesOriginal401 in internal/config/rest_test.go),
+// client-go turns the surfaced 401 into exactly the k8sapi.StatusError asserted below, which must
+// still render as the stale-session error with exit code 2.
 func TestErrorToDetailedError_StaleSession(t *testing.T) {
 	tests := map[string]struct {
 		err error

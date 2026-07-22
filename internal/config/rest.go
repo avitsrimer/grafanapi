@@ -43,10 +43,10 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 		}
 	}
 
-	if cfg.Grafana.SessionCookie != "" {
-		cookie := cfg.Grafana.SessionCookie
+	if cfg.Grafana.Session != nil || cfg.Grafana.SessionCookie != "" {
+		grafana := cfg.Grafana
 		rcfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
-			return &sessionCookieRoundTripper{cookie: cookie, next: rt}
+			return grafana.WrapWithSession(rt)
 		}
 	}
 
