@@ -497,27 +497,27 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error
 - Create: `internal/explore/run.go`
 - Create: `internal/explore/run_test.go`
 
-- [ ] Implement `Run(ctx, gCtx, body)`: build the `/api/ds/query` URL from `gCtx.Grafana.Server`;
+- [x] Implement `Run(ctx, gCtx, body)`: build the `/api/ds/query` URL from `gCtx.Grafana.Server`;
       POST JSON via `bytes.NewReader(jsonBody)` (so `req.GetBody` is auto-populated and the body can
       be replayed on retry); set `Content-Type` and `X-Grafana-Org-Id` (only when `OrgID != 0`);
       **do not** set `Cookie` manually (the round-tripper owns it); transport via
       `httputils.NewTransport` **wrapped with `gCtx.Grafana.WrapWithSession`**; bounded `queryTimeout`;
       no logging round-tripper.
-- [ ] Handle statuses: `200`/`207` → `Decode` then fail on `FirstError`; `401` → return
+- [x] Handle statuses: `200`/`207` → `Decode` then fail on `FirstError`; `401` → return
       `runtime.NewAPIError("explore query", <bounded snippet or nil>, http.StatusUnauthorized)`;
       other → `unexpected status` error with a bounded body snippet.
-- [ ] Write tests against an `httptest.Server`: assert the outbound body (from/to/`queries[0]`
+- [x] Write tests against an `httptest.Server`: assert the outbound body (from/to/`queries[0]`
       field+refId+datasource), the injected `Cookie` header (set by the wrapper, not by `Run`), and
       `X-Grafana-Org-Id` present iff `OrgID != 0`; decode a `200` success.
-- [ ] Write a **body-replay** test: a scripted `401` (first hit) → rotate → `200` (second hit) with a
+- [x] Write a **body-replay** test: a scripted `401` (first hit) → rotate → `200` (second hit) with a
       `SessionSource` present; assert the **retried** request still carries the full, byte-identical
       JSON body (proves `GetBody` replay works), the rotated cookie is used, and the decode succeeds.
-- [ ] Write tests for a `207`/per-`refId` error surfacing as a Go error, and a dead-session `401`
+- [x] Write tests for a `207`/per-`refId` error surfacing as a Go error, and a dead-session `401`
       (after rotation has given up) that, when passed through `fail.ErrorToDetailedError`, yields the
       **stale-session** `DetailedError` (summary "Grafana session is stale or unauthorized",
       suggestion `Run: grafanapi login update`, exit code 2) — asserting the `*runtime.APIError{401}`
       choice renders correctly and is *not* the "rejected"/"verify the session cookie value" message.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task.
 
 ### Task 5 — Table rendering
 
