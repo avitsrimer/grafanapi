@@ -11,7 +11,7 @@ body:
         ## Before You Submit
 
         - Make sure you're using Grafana 12 or above (grafanapi doesn't support older versions)
-        - Check the [configuration documentation](https://grafana.github.io/grafanapi/)
+        - Check the [configuration documentation](https://avitsrimer.github.io/grafanapi/)
         - Remove any tokens, passwords, or sensitive data before pasting configuration
 
   - type: input

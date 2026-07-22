@@ -44,7 +44,7 @@ grafanapi explore example-prometheus "up" -o json | jq '.results.A.frames[0].sch
 
 ## Documentation
 
-See [the documentation](https://grafana.github.io/grafanapi/) to learn how to
+See [the documentation](https://avitsrimer.github.io/grafanapi/) to learn how to
 install, configure and use the Grafana CLI.
 
 ## Maturity
