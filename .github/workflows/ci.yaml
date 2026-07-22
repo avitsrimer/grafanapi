@@ -16,6 +16,12 @@ jobs:
     # grafanapi is macOS-only: the Keychain credential store (internal/keychain) is cgo against
     # Security.framework and everything that depends on it (internal/config, cmd/grafanapi/login,
     # cmd/grafanapi/config, ...) only builds on darwin, so linting needs a darwin runner.
+    #
+    # This job still uses devbox (unlike tests/docs below): golangci-lint here only type-checks
+    # (govet/staticcheck analysis, no test binaries get linked), so it never hits devbox's
+    # nix-pinned macOS SDK cgo-linker failure (missing Security.framework symbols) that breaks a
+    # real `go build`/`go test` link step. If that ever changes, switch this job to
+    # actions/setup-go too.
     runs-on: macos-latest
 
     steps:
@@ -49,6 +55,14 @@ jobs:
     name: Tests
     # See the comment on the linters job above: the whole module is darwin-only now, so tests
     # need a darwin runner too.
+    #
+    # Unlike linters, this job actually links cgo test binaries for every package that imports
+    # internal/keychain, so it cannot go through devbox: devbox's nix-pinned macOS SDK lacks the
+    # SecTrustCopyCertificateChain symbol (macOS 12+ Security.framework), which breaks the cgo
+    # link of crypto/x509 (and, transitively, anything built with CGO_ENABLED=1 on darwin,
+    # including our own Security.framework-backed keychain code) with "clang: linker command
+    # failed". Use actions/setup-go (system Go toolchain) and plain `go` invocations instead,
+    # exactly like release.yaml already does for the release build.
     runs-on: macos-latest
 
     steps:
@@ -56,36 +70,27 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Restore go vendors
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 #5.0.3
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-deps-${{ runner.os }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-deps-${{ runner.os }}
-
-      - name: Install devbox
-        uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 #v0.14.0
-        with:
-          enable-cache: 'true'
-          devbox-version: ${{ env.DEVBOX_VERSION }}
+          go-version-file: go.mod
 
       - name: Tests
-        run: make tests
+        run: go test -v ./...
 
       # internal/keychain wraps cgo Security.framework calls in a timeout goroutine
       # (keychain_darwin.go's withTimeout); run that package under the race detector to catch
-      # concurrency bugs the plain "make tests" run above wouldn't.
+      # concurrency bugs the plain test run above wouldn't.
       - name: Keychain tests (race)
-        run: devbox run go test -v -race ./internal/keychain/...
+        run: go test -v -race ./internal/keychain/...
 
   docs:
     name: Documentation
     # docs/reference generation runs the CLI's Cobra command tree (scripts/cmd-reference), which
     # transitively imports the darwin-only internal/keychain package, so this needs a darwin
-    # runner too.
+    # runner too, and (same reasoning as the tests job above) actions/setup-go rather than devbox
+    # so the cgo link succeeds. mkdocs itself has nothing to do with Go/cgo, so it's installed
+    # directly via pip instead of pulling in devbox just for that one step.
     runs-on: macos-latest
 
     steps:
@@ -93,15 +98,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install devbox
-        uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 #v0.14.0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          enable-cache: 'true'
-          devbox-version: ${{ env.DEVBOX_VERSION }}
+          go-version-file: go.mod
 
-      - name: Check for drift in the generated documentation references
-        run: make cli-reference
-        shell: bash
+      - name: Check for drift in the generated CLI reference
+        run: |
+          rm -rf ./docs/reference/cli
+          go run scripts/cmd-reference/*.go "./docs/reference/cli"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install mkdocs
+        run: pip install -qq -r requirements.txt
 
       - name: Build documentation
-        run: make docs
+        run: |
+          rm -rf ./docs/reference/cli ./docs/reference/environment-variables ./docs/reference/configuration
+          go run scripts/cmd-reference/*.go "./docs/reference/cli"
+          go run scripts/env-vars-reference/*.go "./docs/reference/environment-variables"
+          go run scripts/config-reference/*.go "./docs/reference/configuration"
+          mkdocs build -f mkdocs.yml -d ./build/documentation
