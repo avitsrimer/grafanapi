@@ -505,8 +505,8 @@ PROPERTY_NAME is a dot-delimited reference to the value to unset. It can either 
 
 			// Unsetting an entire context removes it from the config file, but its stored
 			// session cookie would otherwise remain in the Keychain forever with nothing left
-			// to reference it. Best-effort clean it up too; a failure here (e.g. the !darwin
-			// stub, or the item simply never having existed) must not fail the command.
+			// to reference it. Best-effort clean it up too; a failure here (e.g. the item
+			// simply never having existed) must not fail the command.
 			if contextName, ok := removedContextName(args[0]); ok {
 				if err := keychainStore.Delete(keychain.Account(contextName)); err != nil {
 					io.Warning(cmd.OutOrStdout(), "Could not remove the session cookie for context %q from the Keychain: %s\n", contextName, err)
