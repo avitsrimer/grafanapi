@@ -78,6 +78,56 @@ func TestRenderTable_TruncatesWideCells(t *testing.T) {
 	assert.NotContains(t, out, long)
 }
 
+// TestRenderTable_EntirelyEmptyColumn covers the tabwriter.DiscardEmptyColumns flag: a column
+// whose cells are empty (e.g. every value null) in every row must still render its header and
+// keep the surrounding columns aligned, rather than panicking or corrupting the table.
+func TestRenderTable_EntirelyEmptyColumn(t *testing.T) {
+	resp := &explore.QueryResponse{
+		Results: map[string]explore.FrameResult{
+			"A": {
+				Frames: []explore.Frame{
+					{
+						Schema: explore.FrameSchema{
+							RefID: "A",
+							Fields: []explore.FieldSchema{
+								{Name: "id", Type: "number"},
+								{Name: "note", Type: "string"},
+								{Name: "name", Type: "string"},
+							},
+						},
+						Data: explore.FrameData{
+							Values: [][]json.RawMessage{
+								{json.RawMessage("1"), json.RawMessage("2")},
+								{json.RawMessage("null"), json.RawMessage("null")},
+								{json.RawMessage(`"alpha"`), json.RawMessage(`"beta"`)},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, explore.RenderTable(&buf, resp, explore.RenderOptions{}))
+
+	out := buf.String()
+
+	assert.Contains(t, out, "id")
+	assert.Contains(t, out, "note")
+	assert.Contains(t, out, "name")
+	assert.Contains(t, out, "alpha")
+	assert.Contains(t, out, "beta")
+	assert.NotContains(t, out, "null")
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	require.Len(t, lines, 4, "frame header + column header + 2 data rows")
+
+	for _, line := range lines {
+		assert.NotContains(t, line, "\t", "tabwriter output must not leak raw tab characters")
+	}
+}
+
 func TestRenderTable_MultiFrameSequential(t *testing.T) {
 	prom := decodeRenderFixture(t, "testdata/prometheus_range.json")
 	sql := decodeRenderFixture(t, "testdata/sql_table.json")
@@ -99,6 +149,51 @@ func TestRenderTable_MultiFrameSequential(t *testing.T) {
 
 	// a blank line separates the two frame blocks.
 	assert.Contains(t, out, "\n\n")
+}
+
+func TestRenderTable_MultiRefIDSortedOrder(t *testing.T) {
+	frameFor := func(refID string, hasError bool) explore.FrameResult {
+		if hasError {
+			return explore.FrameResult{Error: refID + " failed"}
+		}
+
+		return explore.FrameResult{
+			Frames: []explore.Frame{
+				{
+					Schema: explore.FrameSchema{
+						RefID:  refID,
+						Fields: []explore.FieldSchema{{Name: "value", Type: "number"}},
+					},
+					Data: explore.FrameData{Values: [][]json.RawMessage{{json.RawMessage("1")}}},
+				},
+			},
+		}
+	}
+
+	// Insertion order deliberately scrambled; rendering (and FirstError, exercised separately in
+	// dataframe_test.go) must both resolve refIDs in sorted order regardless of map iteration.
+	resp := &explore.QueryResponse{
+		Results: map[string]explore.FrameResult{
+			"C": frameFor("C", false),
+			"A": frameFor("A", true),
+			"B": frameFor("B", false),
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, explore.RenderTable(&buf, resp, explore.RenderOptions{}))
+
+	out := buf.String()
+
+	idxA := strings.Index(out, "A: no data")
+	idxB := strings.Index(out, "# B")
+	idxC := strings.Index(out, "# C")
+
+	require.NotEqual(t, -1, idxA)
+	require.NotEqual(t, -1, idxB)
+	require.NotEqual(t, -1, idxC)
+	assert.Less(t, idxA, idxB, "refIDs must render in sorted order (A before B)")
+	assert.Less(t, idxB, idxC, "refIDs must render in sorted order (B before C)")
 }
 
 func TestRenderTable_EmptyResponse(t *testing.T) {

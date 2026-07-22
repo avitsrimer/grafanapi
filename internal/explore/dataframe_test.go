@@ -69,6 +69,25 @@ func TestDecode(t *testing.T) {
 	}
 }
 
+func TestDecode_MalformedJSONErrors(t *testing.T) {
+	_, err := explore.Decode(strings.NewReader(`{"results": not-json`))
+	require.Error(t, err)
+}
+
+func TestQueryResponse_FirstError_MultiRefIDSortedOrder(t *testing.T) {
+	resp := &explore.QueryResponse{
+		Results: map[string]explore.FrameResult{
+			"C": {Error: "should not be picked"},
+			"A": {},
+			"B": {Error: "B failed first in sorted order"},
+		},
+	}
+
+	refID, msg := resp.FirstError()
+	assert.Equal(t, "B", refID)
+	assert.Equal(t, "B failed first in sorted order", msg)
+}
+
 func TestDecode_MissingResultsIsEmptyNotError(t *testing.T) {
 	resp, err := explore.Decode(strings.NewReader("{}"))
 	require.NoError(t, err)

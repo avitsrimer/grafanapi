@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -229,9 +231,79 @@ func TestRun_DeadSessionRendersStaleSession(t *testing.T) {
 }
 
 func TestRun_UnexpectedStatusIncludesBodySnippet(t *testing.T) {
+	// error_envelope.json fixture: a real non-2xx /api/ds/query failure returns a top-level
+	// {"message","traceID"} envelope, not a "results" shape - this is the unexpected-status path,
+	// not the Decode/FirstError path (see dataframe_test.go / the Task 1 fixture note).
+	envelope, err := os.ReadFile("testdata/error_envelope.json")
+	require.NoError(t, err)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		_, err := w.Write([]byte(`{"message":"boom","traceID":"abc123"}`))
+		_, werr := w.Write(envelope)
+		assert.NoError(t, werr)
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL}}
+
+	_, err = explore.Run(t.Context(), gCtx, testQueryBody())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+	assert.Contains(t, err.Error(), "data source not found")
+}
+
+// TestRun_UnexpectedStatusEmptyBodyOmitsTrailingColon covers the default branch of
+// handleQueryResponse when the non-2xx response has no body at all: the error message must not
+// render a trailing ": " with nothing after it, mirroring the guard the 401 branch already has.
+func TestRun_UnexpectedStatusEmptyBodyOmitsTrailingColon(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL}}
+
+	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
+	require.Error(t, err)
+	assert.Equal(t, "explore: unexpected status 503", err.Error())
+	assert.NotContains(t, err.Error(), ": \n")
+	assert.False(t, strings.HasSuffix(err.Error(), ": "), "error message must not end with a trailing colon-space")
+}
+
+func TestRun_NilContext(t *testing.T) {
+	_, err := explore.Run(t.Context(), nil, testQueryBody())
+	require.Error(t, err)
+}
+
+// TestRun_MalformedServerURLErrors covers buildQueryURL's url.Parse failure branch: a server
+// address that cannot be parsed as a URL at all (as opposed to one that is merely unreachable).
+func TestRun_MalformedServerURLErrors(t *testing.T) {
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: "://not-a-valid-url"}}
+
+	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid server address")
+}
+
+// TestRun_NetworkErrorOnClosedServer covers client.Do's transport-level error branch: a request
+// to a server that has already been closed cannot connect at all.
+func TestRun_NetworkErrorOnClosedServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server.Close() // closed before Run ever dials it
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL}}
+
+	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "query request")
+}
+
+// TestRun_MalformedBodyOn200Errors covers Decode's error path as surfaced through Run: a 200
+// response whose body is not valid JSON must return a decode error, not a decoded QueryResponse.
+func TestRun_MalformedBodyOn200Errors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"results": not-json`))
 		assert.NoError(t, err)
 	}))
 	defer server.Close()
@@ -240,11 +312,29 @@ func TestRun_UnexpectedStatusIncludesBodySnippet(t *testing.T) {
 
 	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
-	assert.Contains(t, err.Error(), "boom")
+	assert.Contains(t, err.Error(), "decoding response")
 }
 
-func TestRun_NilContext(t *testing.T) {
-	_, err := explore.Run(t.Context(), nil, testQueryBody())
-	require.Error(t, err)
+// TestRun_ServerURLPathPrefixPreserved covers buildQueryURL's path-preservation behavior: a
+// server address with an existing path prefix (e.g. Grafana served under a subpath) must have
+// /api/ds/query appended to that prefix, not replace it.
+func TestRun_ServerURLPathPrefixPreserved(t *testing.T) {
+	var gotPath string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/grafana/api/ds/query", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"results":{}}`))
+		assert.NoError(t, err)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL + "/grafana/"}}
+
+	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
+	require.NoError(t, err)
+	assert.Equal(t, "/grafana/api/ds/query", gotPath)
 }

@@ -68,12 +68,7 @@ type FrameData struct {
 // error in the response, in sorted refID order. It returns two empty strings
 // when there is no error.
 func (r *QueryResponse) FirstError() (string, string) {
-	refIDs := make([]string, 0, len(r.Results))
-	for id := range r.Results {
-		refIDs = append(refIDs, id)
-	}
-
-	sort.Strings(refIDs)
+	refIDs := sortedRefIDs(r.Results)
 
 	for _, id := range refIDs {
 		if err := r.Results[id].Error; err != "" {
@@ -111,4 +106,18 @@ func (f Frame) Cell(col, row int) json.RawMessage {
 	}
 
 	return column[row]
+}
+
+// sortedRefIDs returns results' keys sorted lexicographically, so callers
+// that must resolve refIDs in a deterministic order (FirstError, RenderTable)
+// don't depend on Go's randomized map iteration.
+func sortedRefIDs(results map[string]FrameResult) []string {
+	refIDs := make([]string, 0, len(results))
+	for id := range results {
+		refIDs = append(refIDs, id)
+	}
+
+	sort.Strings(refIDs)
+
+	return refIDs
 }

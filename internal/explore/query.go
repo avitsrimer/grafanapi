@@ -136,6 +136,13 @@ type QueryOptions struct {
 
 // parseParam splits a raw "key=value" --param entry and decodes its value as
 // JSON when possible, falling back to the raw string.
+//
+// The key=value shape (and --interval's duration syntax in BuildQuery) is
+// also checked by cmd/grafanapi/explore.Options.Validate before this ever
+// runs. The duplication is deliberate: Validate gives a fast command-line
+// error before any network call, while this check keeps BuildQuery/parseParam
+// safe to call directly (e.g. from tests or a future non-Cobra caller) without
+// depending on that command-layer validation.
 func parseParam(param string) (string, any, error) {
 	key, value, found := strings.Cut(param, "=")
 	if !found {

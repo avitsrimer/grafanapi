@@ -8,6 +8,7 @@
 package explore
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -85,7 +86,13 @@ func (opts *Options) BindFlags(flags *pflag.FlagSet) {
 }
 
 // Validate checks the output format and every flag that BindFlags cannot validate on its own
-// (--param's key=value shape, --interval's duration syntax).
+// (--param's key=value shape, --interval's duration syntax, non-empty --from/--to).
+//
+// --param and --interval are re-validated in internal/explore (parseParam, BuildQuery) even
+// though they are checked here first. That duplication is deliberate, not an oversight: this
+// check gives a fast, pre-network command-line error (before LoadConfig/ResolveDataSource run),
+// while internal/explore's own check keeps BuildQuery safe for any other caller that does not go
+// through this command's Validate.
 func (opts *Options) Validate() error {
 	if err := opts.IO.Validate(); err != nil {
 		return err
@@ -101,6 +108,14 @@ func (opts *Options) Validate() error {
 		if _, err := time.ParseDuration(opts.Interval); err != nil {
 			return fmt.Errorf("invalid --interval %q: %w", opts.Interval, err)
 		}
+	}
+
+	if opts.From == "" {
+		return errors.New("--from must not be empty")
+	}
+
+	if opts.To == "" {
+		return errors.New("--to must not be empty")
 	}
 
 	return nil

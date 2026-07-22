@@ -23,8 +23,8 @@ grafanapi explore does-not-exist "up"
 
 ```
 Error: datasource "does-not-exist" not found; available datasources:
-  - example-postgres (uid: postgres-uid, type: postgres)
-  - example-prometheus (uid: prometheus-uid, type: prometheus)
+  example-postgres (postgres-uid, postgres)
+  example-prometheus (prometheus-uid, prometheus)
 ```
 
 ## Query field mapping
@@ -88,5 +88,6 @@ other tools today, and is the recommended way to extract specific fields.
 
 If your session cookie has expired, `explore` fails the same way every other authenticated command
 does: a "Grafana session is stale or unauthorized" error suggesting `grafanapi login update`. See
-[Explore and modify resources](./explore-modify-resources.md) and the top-level login docs for
-authenticating.
+[`grafanapi login`](../reference/cli/grafanapi_login.md) and
+[`grafanapi login update`](../reference/cli/grafanapi_login_update.md) for authenticating, or the
+[configuration guide](../configuration.md) for how the session cookie is resolved.

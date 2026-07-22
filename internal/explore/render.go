@@ -31,14 +31,9 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error {
 		return err
 	}
 
-	refIDs := make([]string, 0, len(resp.Results))
-	for id := range resp.Results {
-		refIDs = append(refIDs, id)
-	}
+	refIDs := sortedRefIDs(resp.Results)
 
-	sort.Strings(refIDs)
-
-	tab := tabwriter.NewWriter(w, 0, 4, 2, ' ', tabwriter.TabIndent)
+	tab := tabwriter.NewWriter(w, 0, 4, 2, ' ', tabwriter.TabIndent|tabwriter.DiscardEmptyColumns)
 
 	first := true
 	for _, refID := range refIDs {
@@ -177,12 +172,10 @@ func formatTimeCell(raw json.RawMessage, trimmed string) string {
 }
 
 // truncate shortens s to at most maxWidth runes, appending an ellipsis when
-// truncated. maxWidth <= 0 disables truncation.
+// truncated. maxWidth is always > 0 here: RenderTable clamps
+// RenderOptions.MaxCellWidth to defaultMaxCellWidth before calling renderFrame,
+// which is truncate's only caller.
 func truncate(s string, maxWidth int) string {
-	if maxWidth <= 0 {
-		return s
-	}
-
 	runes := []rune(s)
 	if len(runes) <= maxWidth {
 		return s

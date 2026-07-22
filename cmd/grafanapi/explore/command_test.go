@@ -10,6 +10,7 @@ import (
 	"github.com/grafana/grafanapi/cmd/grafanapi/explore"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/testutils"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,6 +89,113 @@ func samplePromResponse() map[string]any {
 			},
 		},
 	}
+}
+
+func TestOptions_Validate(t *testing.T) {
+	// baseOpts returns Options wired exactly as BindFlags would leave them (table codec
+	// registered/defaulted, valid --from/--to), so each subtest only has to break the one thing
+	// it targets.
+	baseOpts := func() *explore.Options {
+		opts := &explore.Options{From: "now-1h", To: "now"}
+		opts.BindFlags(pflag.NewFlagSet("explore", pflag.ContinueOnError))
+
+		return opts
+	}
+
+	t.Run("IO validate failure surfaces (unknown output format)", func(t *testing.T) {
+		opts := baseOpts()
+		opts.IO.OutputFormat = "not-a-real-format"
+
+		err := opts.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown output format")
+	})
+
+	t.Run("invalid --param errors", func(t *testing.T) {
+		opts := baseOpts()
+		opts.Params = []string{"no-equals-sign"}
+
+		err := opts.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--param")
+	})
+
+	t.Run("invalid --interval errors", func(t *testing.T) {
+		opts := baseOpts()
+		opts.Interval = "not-a-duration"
+
+		err := opts.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--interval")
+	})
+
+	t.Run("empty --from errors", func(t *testing.T) {
+		opts := baseOpts()
+		opts.From = ""
+
+		err := opts.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--from")
+	})
+
+	t.Run("empty --to errors", func(t *testing.T) {
+		opts := baseOpts()
+		opts.To = ""
+
+		err := opts.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--to")
+	})
+
+	t.Run("valid options pass", func(t *testing.T) {
+		require.NoError(t, baseOpts().Validate())
+	})
+}
+
+// Test_ExploreCommand_validateFailureShortCircuits confirms a Validate error (an invalid --param
+// here) is returned before any network call is attempted - LoadConfig/ResolveDataSource never run.
+func Test_ExploreCommand_validateFailureShortCircuits(t *testing.T) {
+	testCase := testutils.CommandTestCase{
+		Cmd:     explore.Command(),
+		Command: []string{"prom-uid", "up", "--param", "no-equals-sign"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("--param"),
+		},
+	}
+	testCase.Run(t)
+}
+
+// Test_ExploreCommand_loadConfigFailure covers runExplore's LoadConfig error branch: a --config
+// flag pointing at a file that does not exist.
+func Test_ExploreCommand_loadConfigFailure(t *testing.T) {
+	testCase := testutils.CommandTestCase{
+		Cmd:     explore.Command(),
+		Command: []string{"prom-uid", "up", "--config", "/nonexistent/path/config.yaml"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains(""), // any error: LoadConfig must fail, not panic
+		},
+	}
+	testCase.Run(t)
+}
+
+// Test_ExploreCommand_buildQueryFailure covers runExplore's BuildQuery error branch: an
+// unrecognized datasource type with no --field override.
+func Test_ExploreCommand_buildQueryFailure(t *testing.T) {
+	// BuildQuery fails before Run ever POSTs /api/ds/query, so the query endpoint is never hit;
+	// queryStatus is intentionally a value distinct from the other newTestServer callers here to
+	// make that plain.
+	server := newTestServer(t, "custom-uid", "Custom", "some-custom-type", http.StatusTeapot, samplePromResponse())
+	configFile, restoreStore := newTestConfig(t, server)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     explore.Command(),
+		Command: []string{"custom-uid", "up", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains(`unsupported datasource type "some-custom-type"`),
+		},
+	}
+	testCase.Run(t)
 }
 
 func Test_ExploreCommand_tableOutput(t *testing.T) {

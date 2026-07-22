@@ -114,6 +114,9 @@ func handleQueryResponse(resp *http.Response) (*QueryResponse, error) {
 		return nil, runtime.NewAPIError("explore query", payload, http.StatusUnauthorized)
 	default:
 		snippet := readBodySnippet(resp.Body)
+		if snippet == "" {
+			return nil, fmt.Errorf("explore: unexpected status %d", resp.StatusCode)
+		}
 
 		return nil, fmt.Errorf("explore: unexpected status %d: %s", resp.StatusCode, snippet)
 	}
