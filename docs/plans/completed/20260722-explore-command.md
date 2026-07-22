@@ -628,23 +628,61 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error
 - Regenerate: `docs/reference/**` (already done in Task 7; re-confirm no drift)
 - Move: this plan → `docs/plans/completed/20260722-explore-command.md` (via `git mv`)
 
-- [ ] Add a `README.md` example: `grafanapi explore <datasource> "<query>"` with a Prometheus and a
+- [x] Add a `README.md` example: `grafanapi explore <datasource> "<query>"` with a Prometheus and a
       SQL one-liner, and a `-o json | jq` piping example.
-- [ ] Add a new `docs/guides/query-datasources.md` guide (distinct from the existing
+- [x] Add a new `docs/guides/query-datasources.md` guide (distinct from the existing
       `explore-modify-resources.md`): datasource resolution (uid-or-name), the type→field mapping
       table, `--field`/`--param`/`--from`/`--to`/`--interval`/`--instant`/`--max-data-points`, and
       output formats; note single-query scope and that CSV output is possible future work (json
       covers piping today).
-- [ ] Update `AGENTS.md`: add `explore` under the command groups; add the `internal/explore` package
+- [x] Update `AGENTS.md`: add `explore` under the command groups; add the `internal/explore` package
       description; record that the query path decodes raw `/api/ds/query` JSON into local structs
       because the vendored `models.Frame`/`models.Field` are value-less and cannot round-trip the
       wire format, while datasource lookup uses the generated client.
-- [ ] Run `make reference` / `make reference-drift`; confirm zero drift (the new command's generated
+- [x] Run `make reference` / `make reference-drift`; confirm zero drift (the new command's generated
       pages are committed).
-- [ ] Add a short Review section to this plan (what changed, deviations), then `git mv` it to
+- [x] Add a short Review section to this plan (what changed, deviations), then `git mv` it to
       `docs/plans/completed/`.
-- [ ] Run `make all` (lint, tests, build, docs) — must pass (fall back to the underlying commands if
+- [x] Run `make all` (lint, tests, build, docs) — must pass (fall back to the underlying commands if
       `devbox`/`mkdocs` are unavailable, matching prior plans).
+
+## Review
+
+All 8 tasks completed as planned; the design in Solution Overview and Technical Details matches
+what shipped. Deviations, all discovered mid-implementation and recorded in-place at the time:
+
+- **Task 2**: no `*datasources.GetDataSourceByNameNotFound` type exists in the vendored client — a
+  `404` on name lookup falls through to a bare `runtime.NewAPIError`. `ResolveDataSource` detects it
+  via `errors.As(err, &apiErr)` + `apiErr.Code == http.StatusNotFound` instead of a typed sentinel.
+- **Task 5**: the `yaml` codec's JSON-compatible decode turns an explicit JSON `null` cell into a
+  `nil` `json.RawMessage` rather than a literal `RawMessage("null")`; both marshal back to the same
+  JSON `null`, so the round-trip test asserts via `assert.JSONEq` instead of `assert.Equal` on the
+  decoded structs. Not a bug in `Decode`/`RenderTable`, just a representational difference in the
+  codec.
+- **Task 6**: `config.SetKeychainStore` (package `cmd/grafanapi/config`, imported as `cmdconfig`) is
+  the real exported test seam, and the already-existing `testutils.NewFakeKeychainStore()` was
+  reused rather than writing a new local fake. Handler-goroutine assertions use `assert` rather than
+  `require` per `testifylint`'s go-require rule.
+
+Task 8 (this task) added:
+
+- `README.md` — a "query a datasource" example section (Prometheus, SQL, `-o json | jq`).
+- `docs/guides/query-datasources.md` (new; kept distinct from `explore-modify-resources.md`, which
+  covers a different concept — exploring/modifying Grafana *resources*, not datasource queries) plus
+  a card in `docs/guides/index.md`.
+- `AGENTS.md` — `explore` added as a fourth command group, an `internal/explore/` package
+  description (all five files + the raw-HTTP/lossy-model decision), and a `cmd/grafanapi/explore/`
+  line under `cmd/grafanapi/`.
+- Reference docs re-regenerated (`cli`, `environment-variables`, `configuration`) to confirm zero
+  drift from the Task 7 state — no command/flag/config changes happened in this docs-only task, so
+  `git status` on `docs/reference` was empty after regenerating.
+- Verification re-run for this task: `go build ./...` clean; `go test -race ./...` all packages pass
+  (cached, since no Go source changed); `golangci-lint run -c .golangci.yaml ./...` still exactly 14
+  findings (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck), same breakdown as the Task 7 baseline,
+  all in the same pre-existing files — zero new findings. `devbox`/`mkdocs` remain unavailable in
+  this environment, so `make all`'s `docs` target (which needs `mkdocs build`) could not be run
+  as-is; ran its constituent parts directly instead (`go build`, `go test -race`, `golangci-lint`,
+  and the three reference-generation scripts), matching the fallback the prior plans used.
 
 ## Post-Completion
 

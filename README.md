@@ -18,6 +18,21 @@ brew install avitsrimer/apps/grafanapi
 grafanapi login --server https://grafana.example.com
 ```
 
+## Example: query a datasource
+
+Run a single ad-hoc query against any configured Grafana datasource, mirroring Grafana's Explore UI:
+
+```shell
+# Prometheus/Loki
+grafanapi explore example-prometheus "up"
+
+# SQL (rawSql + format:"table" are set automatically)
+grafanapi explore example-postgres "select 1 as n"
+
+# Pipe JSON output to jq
+grafanapi explore example-prometheus "up" -o json | jq '.results.A.frames[0].schema'
+```
+
 ## Documentation
 
 See [the documentation](https://grafana.github.io/grafanapi/) to learn how to

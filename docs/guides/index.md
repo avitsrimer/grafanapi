@@ -10,6 +10,12 @@ title: Usage
 
     Browse, inspect, update, and delete resources.
 
+-   :material-magnify:{ .lg .middle } __[Query datasources](./query-datasources.md)__
+
+    ---
+
+    Run ad-hoc PromQL/LogQL/SQL queries against a datasource from the terminal.
+
 -   :material-backup-restore:{ .lg .middle } __[Manage resources](./manage-resources.md)__
 
     ---
