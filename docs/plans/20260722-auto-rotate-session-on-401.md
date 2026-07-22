@@ -534,21 +534,32 @@ usage correct — not because a live openapi 401 is common today.
 - Modify: `internal/grafana/client.go` (drop `HTTPHeaders`; wrap the runtime's `Transport`)
 - Create/Modify: `internal/grafana/client_test.go`
 
-- [ ] In `ClientFromContext`, remove the `cfg.HTTPHeaders` cookie map; keep `OrgID` and TLS passthrough
+- [x] In `ClientFromContext`, remove the `cfg.HTTPHeaders` cookie map; keep `OrgID` and TLS passthrough
       and `NewHTTPClientWithConfig`. After construction, type-assert
       `client.Transport.(*httptransport.Runtime)`; on `ok`, set `rt.Transport =
       ctx.Grafana.WrapWithSession(rt.Transport)`; on `!ok`, return an explicit error rather than
       sending unauthenticated requests.
-- [ ] Add the `github.com/go-openapi/runtime/client` import for the `*httptransport.Runtime` type
+- [x] Add the `github.com/go-openapi/runtime/client` import for the `*httptransport.Runtime` type
       (vendored; no import cycle). `go mod tidy`/`vendor` if the direct-dependency set changes.
-- [ ] Write tests for success cases: `grafana.GetVersion` (or a `Health` call) against an
+      `github.com/go-openapi/runtime` was already a direct dependency (go.mod), so `go mod
+      vendor` produced no diff.
+- [x] Write tests for success cases: `grafana.GetVersion` (or a `Health` call) against an
       `httptest.Server` scripted `401 → rotate → 200`, asserting exactly one rotate call and success;
-      the inbound `Cookie` header carries the current then rotated value.
-- [ ] Write tests for error cases: rotate rejected → the openapi `401` surfaces as a
+      the inbound `Cookie` header carries the current then rotated value. Added
+      `TestGetVersion_RotatesSessionOn401` in `internal/grafana/client_test.go`.
+- [x] Write tests for error cases: rotate rejected → the openapi `401` surfaces as a
       `runtime.APIError` (Code 401) → `convertSessionErrors` renders stale-session (asserted in
       `convert_test.go` from Task 3, or a focused case here); the `!ok` transport-assertion guard
-      returns its explicit error.
-- [ ] Run tests — must pass before next task.
+      returns its explicit error. Added `TestGetVersion_RotateRejectedSurfacesOriginal401`, which
+      asserts the surfaced error is a `*runtime.APIError` with `Code == 401` (the same shape already
+      locked in by `TestErrorToDetailedError_StaleSession` in `cmd/grafanapi/fail/convert_test.go`).
+      The `!ok` guard itself is defensive/unreachable under the vendored client (documented in a code
+      comment) and is not separately unit-tested, since `NewHTTPClientWithConfig` always returns an
+      `*httptransport.Runtime`.
+- [x] Run tests — must pass before next task. `go build ./...`, `go test -race ./...`, `golangci-lint
+      run -c .golangci.yaml ./...` (14 pre-existing findings, no new ones after fixing 3 test-file
+      lint findings: gosec G124 missing cookie attributes, modernize atomictypes, testifylint
+      error-is-as), and `GOOS=linux CGO_ENABLED=0 go build ./... && go vet ./...` all pass.
 
 ### Task 5 — serve reverse-proxy and dashboard-proxy paths
 
