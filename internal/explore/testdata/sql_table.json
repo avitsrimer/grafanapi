@@ -1,0 +1,36 @@
+{
+  "results": {
+    "A": {
+      "status": 200,
+      "frames": [
+        {
+          "schema": {
+            "name": "",
+            "refId": "A",
+            "fields": [
+              {
+                "name": "id",
+                "type": "number"
+              },
+              {
+                "name": "name",
+                "type": "string"
+              },
+              {
+                "name": "note",
+                "type": "string"
+              }
+            ]
+          },
+          "data": {
+            "values": [
+              [1, 2, 3],
+              ["alpha", "beta", null],
+              [null, "second row note", "third row note"]
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
