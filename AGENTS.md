@@ -81,7 +81,7 @@ make clean
 
 ### Command Structure
 
-grafanapi follows the Cobra command pattern with four main command groups:
+grafanapi follows the Cobra command pattern with five main command groups:
 
 1. **login**: Authenticate to a Grafana instance using a session cookie
    - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
@@ -111,6 +111,10 @@ grafanapi follows the Cobra command pattern with four main command groups:
      the type-appropriate request field (`expr`/`rawSql`/`target`/`query`, override with `--field`),
      POST it to `/api/ds/query`, and render the result as a table (default) or `json`/`yaml`
 
+5. **datasources**: List the datasources configured on the current context
+   - `datasources`: GET `/api/datasources`, sort by name, and render as a table (default,
+     NAME/UID/TYPE/DEFAULT columns) or `json`/`yaml`
+
 ### Core Packages
 
 **cmd/grafanapi/** - CLI command implementations
@@ -120,6 +124,8 @@ grafanapi follows the Cobra command pattern with four main command groups:
 - `resources/`: Resource manipulation commands
 - `explore/`: `explore` — thin Cobra wiring (flags, a `table` `format.Codec` adapter) over
   `internal/explore`; no domain logic lives here
+- `datasources/`: `datasources` — thin Cobra wiring (flags, a `table` `format.Codec` adapter)
+  calling the generated Grafana client directly; no domain logic to extract for a single list call
 - `fail/`: Error handling and detailed error messages
 - `io/`: Output formatting and user messages
 

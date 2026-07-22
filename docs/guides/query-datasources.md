@@ -12,6 +12,23 @@ or wiring a quick check into a CI job — without opening the Grafana UI.
 grafanapi explore <datasource-uid-or-name> "<query>" [flags]
 ```
 
+## Listing datasources
+
+To see every datasource configured on the current context before querying one, use
+[`grafanapi datasources`](../reference/cli/grafanapi_datasources.md):
+
+```shell
+grafanapi datasources
+```
+
+```
+NAME                UID              TYPE        DEFAULT
+example-postgres    postgres-uid     postgres    false
+example-prometheus  prometheus-uid   prometheus  true
+```
+
+Add `-o json` or `-o yaml` to pipe the list to other tools.
+
 ## Datasource resolution
 
 `DATASOURCE` is resolved first as a UID, then as a name. If neither matches, the error lists every
@@ -22,7 +39,7 @@ grafanapi explore does-not-exist "up"
 ```
 
 ```
-Error: datasource "does-not-exist" not found; available datasources:
+Error: datasource "does-not-exist" not found; run `grafanapi datasources` to list available datasources:
   example-postgres (postgres-uid, postgres)
   example-prometheus (prometheus-uid, prometheus)
 ```
