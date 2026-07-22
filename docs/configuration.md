@@ -37,13 +37,39 @@ anything is persisted. On success:
 If neither `--org-id` nor `--stack-id` is given, `grafanapi login` attempts to
 discover the Grafana Cloud stack ID automatically using the entered cookie.
 
+### Automatic session rotation
+
+Grafana session cookies stop authenticating ordinary API calls after a
+rotation interval (10 minutes by default on the server), well before the
+underlying session actually expires. Grafana CLI handles this transparently:
+when a request comes back `401`, the CLI itself calls the session-rotation
+endpoint with the current cookie, obtains a fresh one, re-persists it to the
+Keychain, and retries the original request once — all without any visible
+interruption. In practice this means a single `grafanapi login` is typically
+enough for the entire lifetime of the underlying browser session; you should
+only need `grafanapi login update` once that session truly ends (explicit
+logout, the server's maximum session lifetime, or revocation).
+
+!!! warning "Shared-cookie caveat"
+
+    A `grafana_session` cookie copied from a browser tab that is still open
+    is *shared* with that tab. The browser and `grafanapi` will then both try
+    to rotate the same underlying session, and each side's rotation
+    invalidates the other side's copy of the cookie — causing seemingly
+    random "session is stale" failures for whichever side rotates second.
+
+    To avoid this, sign in to Grafana in a **private/incognito window**,
+    copy the `grafana_session` cookie from that window, and close the window
+    afterwards. That leaves `grafanapi` as the sole party rotating the token.
+
 Once a session cookie eventually goes stale (for example, after signing out in
-the browser, or once the underlying session expires), commands fail with a
-"session is stale" error and exit with status code **2** — distinct from the
-generic exit code 1 used for other errors, so CI/CD scripts can branch on it
-specifically (for example, to trigger an alert to re-run `grafanapi login
-update` rather than treating it as an ordinary failure). Refresh the stored
-cookie without touching any other context settings:
+the browser, once the underlying session expires, or after a shared-cookie
+conflict as described above), commands fail with a "session is stale" error
+and exit with status code **2** — distinct from the generic exit code 1 used
+for other errors, so CI/CD scripts can branch on it specifically (for example,
+to trigger an alert to re-run `grafanapi login update` rather than treating it
+as an ordinary failure). Refresh the stored cookie without touching any other
+context settings:
 
 ```shell
 grafanapi login update

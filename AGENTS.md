@@ -126,6 +126,19 @@ grafanapi follows the Cobra command pattern with three main command groups:
 - Environment variable overrides for non-secret fields (GRAFANA_SERVER, GRAFANA_ORG_ID, GRAFANA_STACK_ID)
 - Automatic Stack ID discovery for Grafana Cloud
 - TLS configuration support
+- `session_source.go`: `SessionSource` — a shared, mutable session cookie holder (mutex +
+  generation counter) built once per context at credential-resolution time when a cookie is
+  loaded from the Keychain. `Rotate()` POSTs `/api/user/auth-tokens/rotate` with the current
+  cookie, extracts the new `grafana_session` from `Set-Cookie`, and re-persists it to the
+  Keychain; the generation counter deduplicates concurrent *and* sequential rotate attempts so
+  only one network rotation happens per staleness event. `(GrafanaConfig).WrapWithSession` is the
+  single helper every transport (k8s, openapi, serve) calls to get a `rotatingRoundTripper` (when
+  a `Session` is present), the older static `sessionCookieRoundTripper` (cookie without a source,
+  e.g. tests), or the underlying transport unchanged (no cookie). On a truly-dead session (rotate
+  itself gets `401`/`403`), the original `401` is returned unchanged so the existing
+  `cmd/grafanapi/fail` stale-session rendering fires — rotation is purely a transparent retry
+  layer in front of that path. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
+  **not** wired into rotation (pre-auth, single non-retryable probe, fails soft already).
 
 **internal/resources/** - Resource abstraction layer
 - `Resource`: Wraps Kubernetes-style unstructured objects for Grafana resources
@@ -165,6 +178,10 @@ grafanapi follows the Cobra command pattern with three main command groups:
 **internal/grafana/** - Grafana API client
 - Wraps grafana-openapi-client-go
 - Client construction from context configuration
+- Cookie injection is transport-level, not a static header map: `ClientFromContext` wraps the
+  vendored client's `*httptransport.Runtime.Transport` with `(GrafanaConfig).WrapWithSession`, so
+  the openapi path sees `401`s and rotates identically to the k8s path (no more static
+  `HTTPHeaders` cookie map)
 
 **internal/format/** - Format detection and conversion
 - JSON, YAML format support
@@ -183,6 +200,9 @@ grafanapi follows the Cobra command pattern with three main command groups:
 - `VerifyCookie`: validates a cookie via `GET /api/user`
 - `ErrUnauthorized`: sentinel returned by `VerifyCookie` on a 401; recognized centrally by
   `cmd/grafanapi/fail.convertSessionErrors`
+- Only used by `login`/`login update` (which always paste a fresh cookie and validate it
+  directly) — unrelated to `internal/config`'s `SessionSource` rotation, which only ever kicks in
+  for *already-authenticated* commands hitting a stale cookie mid-session
 
 **internal/secrets/** - Secret management
 - Secure handling of sensitive configuration data (currently just TLS key data; the session cookie is never serialized to disk)
@@ -558,6 +578,10 @@ The codebase is designed for extension:
 - TLS key data remains the only `datapolicy:"secret"`-tagged, redacted field
 - Legacy `token`/`user`/`password` config keys are rejected by strict YAML
   decoding, with a migration message pointing to `grafanapi login`
+- Automatic session rotation (`internal/config.SessionSource`) re-persists a fresh cookie to the
+  Keychain on every `401`, using its own dedicated, bounded-timeout HTTP client that is never
+  wrapped in a logging/debug transport — the cookie value is never written to logs at any point
+  in the rotation path
 
 **Network Security**:
 - TLS verification enabled by default

@@ -643,25 +643,59 @@ usage correct — not because a live openapi 401 is common today.
 - Regenerate: `docs/reference/**` via `make reference` if any command help changed (it should not)
 - Move: this plan → `docs/plans/completed/20260722-auto-rotate-session-on-401.md`
 
-- [ ] In `docs/configuration.md`, document that session rotation is **automatic**: after a successful
+- [x] In `docs/configuration.md`, document that session rotation is **automatic**: after a successful
       `grafanapi login`, the CLI transparently refreshes the `grafana_session` cookie on `401` and
       re-persists it to the Keychain, so a normal browser-session lifetime typically needs only one
       `login`. Explain that `grafanapi login update` is still needed only after the session truly dies
-      (logout / max-lifetime / revocation).
-- [ ] Document the **shared-chain caveat**: a cookie copied from a still-open browser tab is shared
+      (logout / max-lifetime / revocation). Added a new "Automatic session rotation" subsection under
+      "Authenticating".
+- [x] Document the **shared-chain caveat**: a cookie copied from a still-open browser tab is shared
       with that tab — the browser and the CLI then compete to rotate the same session, and each
       rotation invalidates the other party's copy. Recommend logging into Grafana in a **private/
       incognito window**, copying that window's `grafana_session`, and closing the window so only the
-      CLI drives rotation for that token.
-- [ ] Update `AGENTS.md`: note the shared, mutable `SessionSource` (mutex + generation counter) in
+      CLI drives rotation for that token. Added as a `!!! warning` admonition in the new subsection.
+- [x] Update `AGENTS.md`: note the shared, mutable `SessionSource` (mutex + generation counter) in
       `internal/config`, the single `WrapWithSession` transport wrapper across the k8s/openapi/serve
       paths, that the openapi path now injects the cookie at the transport level (no more static
-      `HTTPHeaders`), and that bootdata rotation is intentionally out of scope.
-- [ ] Run `make reference` / `make reference-drift`; confirm no drift (no command-surface change).
-- [ ] Add a short review section to this plan (what changed, deviations), then move it to
-      `docs/plans/completed/` (via `git mv`).
-- [ ] Run `make all` (lint, tests, build, docs) — must pass (fall back to the underlying commands if
-      `devbox`/`mkdocs` are unavailable, matching the prior plan's approach).
+      `HTTPHeaders`), and that bootdata rotation is intentionally out of scope. Updated the
+      `internal/config`, `internal/grafana`, and `internal/session` package descriptions, and added a
+      rotation bullet under "Security Considerations → Credential Management" (cookie never logged,
+      dedicated rotate client).
+- [x] Run `make reference` / `make reference-drift`; confirm no drift (no command-surface change).
+      `devbox` unavailable; ran the three underlying `go run scripts/*-reference/*.go` commands
+      directly against `./docs/reference/{cli,environment-variables,configuration}` — `git status
+      --porcelain docs/reference` showed no diff, confirming zero drift.
+- [x] Add a short review section to this plan (what changed, deviations), then move it to
+      `docs/plans/completed/` (via `git mv`). See the "Review" section below.
+- [x] Run `make all` (lint, tests, build, docs) — must pass (fall back to the underlying commands if
+      `devbox`/`mkdocs` are unavailable, matching the prior plan's approach). `devbox`/`mkdocs`
+      unavailable; ran the underlying steps directly: `golangci-lint run -c .golangci.yaml ./...`
+      (exactly the pre-existing 14 findings, no new ones), `go clean -testcache && go test -race
+      ./...` (all packages pass), `go build ./...` (succeeds; `mkdocs build` itself could not be run
+      since `mkdocs` is not installed on this machine — reference generation, which is the part that
+      changes with this task, was verified driftless above).
+
+## Review
+
+**What changed:** Documentation-only task. Added an "Automatic session rotation" subsection to
+`docs/configuration.md` (under "Authenticating") explaining that the CLI now transparently rotates
+a stale `grafana_session` cookie on `401` and re-persists it to the Keychain, that
+`login update` is only needed once the session truly dies, and a shared-cookie caveat recommending
+a private/incognito window so the browser and the CLI don't compete to rotate the same underlying
+session. Updated `AGENTS.md`'s `internal/config`, `internal/grafana`, and `internal/session` package
+descriptions to describe `SessionSource`/`WrapWithSession`/`rotatingRoundTripper`, the openapi
+path's move to transport-level cookie injection, and bootdata being intentionally out of scope for
+rotation; added a rotation bullet under "Security Considerations". Regenerated all three reference
+doc directories (`docs/reference/cli`, `docs/reference/environment-variables`,
+`docs/reference/configuration`) and confirmed zero drift, as expected since no command/flag/config
+surface changed in this feature.
+
+**Deviations from the plan:** None of substance. `devbox` and `mkdocs` are not installed on this
+machine, so the underlying `go run`/`golangci-lint`/`go test`/`go build` commands were run directly
+instead of via `make`, matching the fallback the plan itself anticipated; `mkdocs build` (the HTML
+site build) specifically was not exercised, but the only input that changes for this task —
+generated reference docs — was verified driftless, which is what `make reference-drift` itself
+checks.
 
 ## Post-Completion
 
