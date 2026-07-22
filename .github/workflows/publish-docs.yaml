@@ -9,9 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  DEVBOX_VERSION: 0.16.0
-
 # Allow only one concurrent release, skipping runs queued between the run in-progress and latest queued.
 # However, do NOT cancel in-progress runs as we want to allow them to complete.
 concurrency:
@@ -21,7 +18,13 @@ concurrency:
 jobs:
   build_docs:
     name: Build
-    runs-on: ubuntu-latest
+    # docs/reference generation runs the CLI's Cobra command tree (scripts/cmd-reference), which
+    # transitively imports the darwin-only internal/keychain package, so this needs a darwin
+    # runner, and actions/setup-go rather than devbox so the cgo link succeeds (see the
+    # `docs` job in ci.yaml for the full explanation). mkdocs itself has nothing to do with
+    # Go/cgo, so it's installed directly via pip instead of pulling in devbox just for that
+    # one step.
+    runs-on: macos-latest
 
     # Deploy to the github-pages environment
     environment:
@@ -32,14 +35,27 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Install devbox
-        uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 #v0.14.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          enable-cache: "true"
-          devbox-version: ${{ env.DEVBOX_VERSION }}
+          go-version-file: go.mod
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install mkdocs
+        run: pip install -qq -r requirements.txt
 
       - name: Build documentation
-        run: make docs
+        run: |
+          rm -rf ./docs/reference/cli ./docs/reference/environment-variables ./docs/reference/configuration
+          go run scripts/cmd-reference/*.go "./docs/reference/cli"
+          go run scripts/env-vars-reference/*.go "./docs/reference/environment-variables"
+          go run scripts/config-reference/*.go "./docs/reference/configuration"
+          mkdocs build -f mkdocs.yml -d ./build/documentation
 
       - name: Upload pages artifact
         id: deployment
