@@ -42,6 +42,11 @@ archives:
 checksum:
   name_template: "{{ .ProjectName }}_checksums.txt"
 
+# The GitHub release for each tag is created manually ahead of time with curated release notes;
+# keep-existing leaves that body untouched and only uploads/attaches the built artifacts to it.
+release:
+  mode: keep-existing
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next-{{ .ShortCommit }}"
 

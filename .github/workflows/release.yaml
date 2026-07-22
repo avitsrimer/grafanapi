@@ -7,9 +7,6 @@ on:
 permissions:
   contents: read
 
-env:
-  DEVBOX_VERSION: 0.16.0
-
 # Allow only one concurrent release, skipping runs queued between the run in-progress and latest queued.
 # However, do NOT cancel in-progress runs as we want to allow them to complete.
 concurrency:
@@ -23,6 +20,11 @@ jobs:
     name: Release
     # macOS runner required: the Keychain credential store (internal/keychain/keychain_darwin.go)
     # is cgo against Security.framework, so the darwin/arm64 binary must be built natively.
+    #
+    # This job uses actions/setup-go (system Go toolchain) rather than devbox: devbox's nix-pinned
+    # macOS SDK lacks the SecTrustCopyCertificateChain symbol (macOS 12+ Security.framework), which
+    # breaks the cgo link of crypto/x509 on darwin. The keychain-darwin job in ci.yaml already
+    # proves this combination builds and tests cleanly with the system toolchain.
     runs-on: macos-latest
 
     steps:
@@ -32,24 +34,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Restore go vendors
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # zizmor: ignore[cache-poisoning] this is actually fine #v4.3.0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-deps-${{ runner.os }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-deps-${{ runner.os }}
-
-      - name: Install devbox
-        uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0 #v0.14.0
-        with:
-          enable-cache: "true"
-          devbox-version: ${{ env.DEVBOX_VERSION }}
+          go-version-file: go.mod
 
       - name: Run GoReleaser
-        run: devbox run goreleaser release --clean
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
