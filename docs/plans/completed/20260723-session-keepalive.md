@@ -706,13 +706,13 @@ test seam.
   config-reference entry)
 - Move: this plan → `docs/plans/completed/20260723-session-keepalive.md` (via `git mv`)
 
-- [ ] `README.md`: add `config set ...live-window 12h`, `session refresh --all`, and `session
+- [x] `README.md`: add `config set ...live-window 12h`, `session refresh --all`, and `session
       keepalive install` examples.
-- [ ] New `docs/guides/keep-sessions-alive.md`: why proactive rotation is needed
+- [x] New `docs/guides/keep-sessions-alive.md`: why proactive rotation is needed
       (`login_maximum_inactive_lifetime`), opting a context in with `live-window`, `refresh`
       (unconditional vs `--due`), `keepalive install/status/uninstall`, the LaunchAgent + log location,
       and the caveats below.
-- [ ] `skill/grafanapi/SKILL.md`: add a "Keep sessions alive" section — `live-window` opt-in,
+- [x] `skill/grafanapi/SKILL.md`: add a "Keep sessions alive" section — `live-window` opt-in,
       `session refresh` (exit 2 = dead ⇒ `login update`) and `--due`, `keepalive install/status/
       uninstall` — plus the **caveats** (locked):
       - The **30-day `login_maximum_lifetime` hard cap** still applies: keepalive extends inactivity
@@ -722,16 +722,26 @@ test seam.
       - keepalive **requires the user to be logged into macOS** (GUI-domain LaunchAgent + Keychain
         availability); it does not run while logged out.
       - The keepalive **log never contains a cookie value** (only ✔/✘ status lines).
-- [ ] `docs/guides/index.md`: add a card for the new guide.
-- [ ] `AGENTS.md`: add the `session` command group; the `internal/launchd/` package (plist gen,
+- [x] `docs/guides/index.md`: add a card for the new guide.
+- [x] `AGENTS.md`: add the `session` command group; the `internal/launchd/` package (plist gen,
       binary-path resolution, `launchctl` seam, `Inspect`); the `live-window` field + `--due` scheduler
       model; `SessionSource.Refresh`; and `keychain.Store.ModifiedAt` as the last-rotation source.
-- [ ] Confirm the `configuration` reference documents `live-window` (regenerated in Task 10).
-- [ ] Run `make reference` / `make reference-drift`; confirm zero drift.
-- [ ] Add a short Review section (what changed, deviations), then `git mv` this plan to
+- [x] Confirm the `configuration` reference documents `live-window` (regenerated in Task 10).
+- [x] Run `make reference` / `make reference-drift`; confirm zero drift.
+- [x] Add a short Review section (what changed, deviations), then `git mv` this plan to
       `docs/plans/completed/`.
-- [ ] Run `make all` (lint, tests, build, docs) — must pass (fall back to underlying commands if
-      `devbox`/`mkdocs` unavailable).
+- [x] Run `make all` (lint, tests, build, docs) — must pass (fall back to underlying commands if
+      `devbox`/`mkdocs` unavailable). (`devbox` and `mkdocs` both unavailable in this environment —
+      `mkdocs` could not even be installed into a throwaway venv, since `pip` is pinned to a private
+      CodeArtifact index with no credentials and no public PyPI fallback. Ran the underlying
+      commands directly instead: `golangci-lint run -c .golangci.yaml ./...` (14 findings, matching
+      baseline), `go clean -testcache && go test -race ./...` (all packages pass, including the new
+      `cmd/grafanapi/session` and `internal/launchd`), `go build -buildvcs=false -o bin/grafanapi
+      ./cmd/grafanapi` (succeeds), and the three `go run scripts/*-reference/*.go` regenerations
+      (zero drift — `git status --porcelain docs/reference` empty after regenerating). The mkdocs
+      site build itself was not exercised in this environment; the new guide page was reviewed
+      manually for consistent frontmatter/heading structure against the existing guides, and
+      `mkdocs.yml` has no explicit `nav:` list to update (pages are auto-discovered).)
 
 ## Verify
 
@@ -793,3 +803,43 @@ automated. **Never record a real hostname, cookie value, or organization/company
 - **Release note (ships in the next release):** add a changelog entry — "Added per-context
   `live-window` opt-in and `grafanapi session refresh` / `session keepalive install|status|uninstall`
   for proactive, scheduled session rotation via a macOS LaunchAgent" — when the next version is cut.
+
+## Review
+
+**What changed (Task 11):**
+- `README.md` gained a "keep a session alive" example (`config set ...live-window`, `session
+  refresh --all`, `session keepalive install`) linking to the new guide.
+- New `docs/guides/keep-sessions-alive.md`: motivation (`login_maximum_inactive_lifetime`), opting
+  in via `live-window`, `session refresh` (unconditional vs `--due`), `session keepalive
+  install/status/uninstall`, and the four locked caveats (30-day hard cap, shared-cookie race,
+  macOS-login requirement, cookie-free logs).
+- `docs/guides/index.md` gained a card for the new guide.
+- `skill/grafanapi/SKILL.md` gained section "7. Keep sessions alive (`session`)" (exit-code
+  contract, `live-window` opt-in, the caveats verbatim), renumbering the old "7. Exit codes" to "8."
+- `AGENTS.md` (the real file behind the `CLAUDE.md` symlink) gained: a seventh command group entry
+  for `session`; a `cmd/grafanapi/session/` package description; `SessionSource.Refresh` and
+  `GrafanaConfig.LiveWindow`/`ParsedLiveWindow` under `internal/config/`; `Store.ModifiedAt` under
+  `internal/keychain/`; and a full new `internal/launchd/` package section (spec, paths, plist,
+  binary-path resolution, controller seam).
+- Reference docs (`docs/reference/cli/`, `docs/reference/configuration/`,
+  `docs/reference/environment-variables/`) were re-regenerated and diffed against Task 10's output:
+  zero drift.
+
+**Deviations from the plan:**
+- `mkdocs` could not be installed or run in this environment — `pip` is pinned to a private
+  CodeArtifact index requiring credentials this environment doesn't have, with no public PyPI
+  fallback reachable. Per the plan's own fallback note ("run underlying commands directly" /
+  "fall back to underlying commands if `devbox`/`mkdocs` unavailable"), `make all`'s constituent
+  checks were run directly instead: `golangci-lint run` (14/14 baseline), `go test -race ./...`
+  (all pass), `go build` (succeeds), and the three reference-doc generators (zero drift). The
+  mkdocs site itself (`make docs`) was not built; the new guide page was instead reviewed manually
+  for structural consistency (frontmatter, heading levels, relative links) against the existing
+  guides in `docs/guides/`. `mkdocs.yml` has no explicit `nav:` list — pages are auto-discovered —
+  so there was nothing to wire in beyond the `docs/guides/index.md` card.
+- No other deviations; all Task 11 checkboxes were completed as specified.
+
+**Final verification:** `go build -buildvcs=false -o bin/grafanapi ./cmd/grafanapi`, `go clean
+-testcache && go test -race ./...` (all packages pass), `golangci-lint run -c .golangci.yaml ./...`
+(exactly 14 findings, matching the pre-existing baseline: 5 gosec, 3 govet, 1 nolintlint, 5
+staticcheck — none in this task's changed files, which are documentation-only), `goreleaser check`
+(passes), and a full reference-doc regeneration showing zero drift.

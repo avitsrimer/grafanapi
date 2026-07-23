@@ -163,7 +163,38 @@ grafanapi login --context staging --server https://grafana.example.com   # creat
 - `config set contexts.<name>.grafana.<field> <value>` edits non-secret fields (server, org-id,
   TLS). The cookie is managed only through `login` / `login update`.
 
-## 7. Exit codes & troubleshooting
+## 7. Keep sessions alive (`session`)
+
+By default a session only rotates reactively (on a `401`), so an unused context can eventually
+expire. `session` adds proactive, scheduled rotation, opt-in per context via `live-window`:
+
+```shell
+grafanapi config set contexts.<name>.grafana.live-window 12h   # opt this context in
+
+grafanapi session refresh                 # force-rotate the current context now (ignores live-window)
+grafanapi session refresh --all           # force-rotate every context with a stored cookie
+grafanapi session refresh --due           # rotate only contexts whose live-window has elapsed (scheduler entry point)
+
+grafanapi session keepalive install       # schedule "session refresh --due" via a macOS LaunchAgent
+grafanapi session keepalive status        # installed? loaded? interval, log tail
+grafanapi session keepalive uninstall     # remove the LaunchAgent
+```
+
+- `session refresh` exit codes follow the same contract as everything else: exit 2 = the session
+  was rejected (dead) → tell the user to run `grafanapi login update`; exit 0 = rotated.
+- Contexts with no `live-window` set are never touched by `--due` or `keepalive` — opting in is
+  explicit, per context.
+
+**Caveats:**
+- The **30-day `login_maximum_lifetime` hard cap** still applies: keepalive extends inactivity
+  indefinitely, but a session must be re-established roughly monthly via `grafanapi login update`.
+- **Shared-cookie chains can race a browser** using the same `grafana_session`; recommend logging
+  in from a private/incognito window so the CLI owns a dedicated cookie chain.
+- keepalive **requires the user to be logged into macOS** (GUI-domain LaunchAgent + Keychain
+  availability); it does not run while logged out.
+- The keepalive **log never contains a cookie value** (only ✔/✘ status lines).
+
+## 8. Exit codes & troubleshooting
 
 - **Exit 2** = stale/unauthorized session → user runs `grafanapi login update` (or
   `pbpaste | grafanapi login update --cookie-stdin`). Distinct from generic exit 1.
