@@ -518,13 +518,13 @@ test seam.
 - Create: `internal/launchd/spec.go`, `internal/launchd/paths.go`, `internal/launchd/plist.go`,
   `internal/launchd/plist_test.go`, `internal/launchd/testdata/keepalive.plist.golden`
 
-- [ ] Define `Label`, `AgentSpec`, `DefaultAgentSpec` (`Args = session refresh --due`), interval
+- [x] Define `Label`, `AgentSpec`, `DefaultAgentSpec` (`Args = session refresh --due`), interval
       bounds, and the home-based path helpers.
-- [ ] Implement `Generate` (`text/template`, `RunAtLoad` false, `xml`-escaped binary/log paths).
-- [ ] Add the golden plist (a `12h`→`43200`s default spec, plain `/opt/homebrew/bin/grafanapi`) + a
+- [x] Implement `Generate` (`text/template`, `RunAtLoad` false, `xml`-escaped binary/log paths).
+- [x] Add the golden plist (a `12h`→`43200`s default spec, plain `/opt/homebrew/bin/grafanapi`) + a
       byte-equality test.
-- [ ] Test XML escaping (`&`/`<`/`>` in the binary path escaped and `encoding/xml`-parseable).
-- [ ] Run tests — must pass before next task.
+- [x] Test XML escaping (`&`/`<`/`>` in the binary path escaped and `encoding/xml`-parseable).
+- [x] Run tests — must pass before next task.
 
 ### Task 4 — `internal/launchd`: binary-path resolution + plist inspection
 
