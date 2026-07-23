@@ -634,15 +634,19 @@ test seam.
 **Files:**
 - Modify: `cmd/grafanapi/config/command.go`, `cmd/grafanapi/config/command_test.go`
 
-- [ ] Add the `keepaliveController` var + `SetKeepaliveController` seam; render a "Keep-alive" block:
+- [x] Add the `keepaliveController` var + `SetKeepaliveController` seam; render a "Keep-alive" block:
       LaunchAgent installed/loaded + interval/target binary (via `os.Stat`/`Print`/`Inspect`), and
       per-context `live-window` (or "not set") + last-rotation age (via `keychainStore.ModifiedAt`).
-- [ ] Ensure **every** launchd/keychain inspection error degrades to "unknown"/`—` and the command
+- [x] Ensure **every** launchd/keychain inspection error degrades to "unknown"/`—` and the command
       still returns nil (exit 0).
-- [ ] Extend `command_test.go`: fake controller + fake mtimes — installed+loaded rendering, absent
+- [x] Extend `command_test.go`: fake controller + fake mtimes — installed+loaded rendering, absent
       rendering, `live-window` set vs "not set", an age line, and an inspection-error → "unknown" with
       the check still succeeding.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task. (`go test -race ./...` all pass;
+      `golangci-lint run -c .golangci.yaml ./...` exactly 14 findings matching the baseline
+      (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck), none touching the new code;
+      `go build ./...`, `go build -o bin/grafanapi ./cmd/grafanapi`, and `goreleaser check`
+      all pass.)
 
 ### Task 10 — Verify acceptance criteria
 
