@@ -9,6 +9,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -381,6 +382,52 @@ func Test_RefreshCmd_UnknownContext(t *testing.T) {
 	testCase.Run(t)
 }
 
+// Test_RefreshCmd_Single_KeychainErrorNotRotate exercises refreshContext's non-ErrNotFound path
+// (refresh.go:112-117): a genuine Keychain read failure (not "never logged in") must surface as a
+// plain error - never dressed up as the auth-rejected exit code 2, since the rotate endpoint was
+// never even reached.
+func Test_RefreshCmd_Single_KeychainErrorNotRotate(t *testing.T) {
+	configFile := singleContextConfig(t, "http://example.invalid")
+
+	store := testutils.NewFakeKeychainStore()
+	store.GetErr = errors.New("keychain locked")
+	restore := SetKeychainStore(store)
+	defer restore()
+
+	var gotErr error
+	testCase := testutils.CommandTestCase{
+		Cmd:     Command(),
+		Command: []string{"refresh", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err },
+		},
+	}
+	testCase.Run(t)
+
+	require.Error(t, gotErr)
+	assert.Contains(t, gotErr.Error(), "resolving session cookie")
+	assert.Contains(t, gotErr.Error(), "keychain locked")
+
+	detailedErr := fail.ErrorToDetailedError(gotErr)
+	assert.Nil(t, detailedErr.ExitCode, "a keychain read failure must not use the auth exit code (defaults to exit 1)")
+}
+
+// Test_RefreshCmd_Single_NoContextNoCurrentContext exercises runSingle's "no context specified and
+// no current context is set" branch (refresh.go:151-153): a config file with contexts but no
+// current-context, and no --context flag.
+func Test_RefreshCmd_Single_NoContextNoCurrentContext(t *testing.T) {
+	configFile := testutils.CreateTempFile(t, "contexts:\n  default:\n    grafana:\n      server: https://example.invalid\n")
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     Command(),
+		Command: []string{"refresh", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("no context specified and no current context is set"),
+		},
+	}
+	testCase.Run(t)
+}
+
 func Test_RefreshCmd_NoStoredCookie(t *testing.T) {
 	configFile := testutils.CreateTempFile(t, "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: http://example.invalid\n")
 
@@ -399,19 +446,22 @@ func Test_RefreshCmd_NoStoredCookie(t *testing.T) {
 }
 
 // Test_DueContexts_Table is the direct, table-driven test of the pure dueContexts selector,
-// covering every branch: unset, fresh, stale, invalid window (warns, skipped), and no Keychain
-// item (skipped, no warning).
+// covering every branch: unset, fresh, stale, invalid window (warns, skipped), no Keychain item
+// (skipped silently, no warning - keychain.ErrNotFound means "never logged in"), and a genuine
+// (non-ErrNotFound) modAt failure (warns and is skipped, unlike ErrNotFound - see finding 1 of the
+// 2026-07-23 keepalive review).
 func Test_DueContexts_Table(t *testing.T) {
 	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 
 	cfg := &config.Config{
 		Contexts: map[string]*config.Context{
-			"no-window": {Name: "no-window", Grafana: &config.GrafanaConfig{Server: "https://a.example"}},
-			"fresh":     {Name: "fresh", Grafana: &config.GrafanaConfig{Server: "https://b.example", LiveWindow: "12h"}},
-			"stale":     {Name: "stale", Grafana: &config.GrafanaConfig{Server: "https://c.example", LiveWindow: "12h"}},
-			"no-cookie": {Name: "no-cookie", Grafana: &config.GrafanaConfig{Server: "https://d.example", LiveWindow: "12h"}},
-			"invalid":   {Name: "invalid", Grafana: &config.GrafanaConfig{Server: "https://e.example", LiveWindow: "not-a-duration"}},
-			"no-config": {Name: "no-config", Grafana: nil},
+			"no-window":      {Name: "no-window", Grafana: &config.GrafanaConfig{Server: "https://a.example"}},
+			"fresh":          {Name: "fresh", Grafana: &config.GrafanaConfig{Server: "https://b.example", LiveWindow: "12h"}},
+			"stale":          {Name: "stale", Grafana: &config.GrafanaConfig{Server: "https://c.example", LiveWindow: "12h"}},
+			"no-cookie":      {Name: "no-cookie", Grafana: &config.GrafanaConfig{Server: "https://d.example", LiveWindow: "12h"}},
+			"invalid":        {Name: "invalid", Grafana: &config.GrafanaConfig{Server: "https://e.example", LiveWindow: "not-a-duration"}},
+			"no-config":      {Name: "no-config", Grafana: nil},
+			"keychain-error": {Name: "keychain-error", Grafana: &config.GrafanaConfig{Server: "https://f.example", LiveWindow: "12h"}},
 		},
 	}
 
@@ -420,7 +470,13 @@ func Test_DueContexts_Table(t *testing.T) {
 		keychain.Account("stale"): now.Add(-13 * time.Hour),
 	}
 
+	keychainErr := errors.New("keychain locked")
+
 	modAt := func(account string) (time.Time, error) {
+		if account == keychain.Account("keychain-error") {
+			return time.Time{}, keychainErr
+		}
+
 		mtime, ok := mtimes[account]
 		if !ok {
 			return time.Time{}, keychain.ErrNotFound
@@ -437,8 +493,10 @@ func Test_DueContexts_Table(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{"stale"}, dueNames)
-	require.Len(t, warnings, 1)
+	require.Len(t, warnings, 2)
 	assert.Contains(t, warnings[0], `"invalid"`)
+	assert.Contains(t, warnings[1], `"keychain-error"`)
+	assert.Contains(t, warnings[1], "keychain locked")
 }
 
 func Test_SortedContextNames(t *testing.T) {

@@ -58,8 +58,9 @@ contexts:
           - ...
           
       # LiveWindow opts this context into scheduled keep-alive and sets how fresh its session must
-      # be kept (a Go duration such as "12h"; must be between 1m and 6d). Unset means the context is
-      # not kept alive on a schedule.
+      # be kept: a Go duration such as "12h", or a bare day count with a "d" suffix such as "6d" (a
+      # grafanapi extension - time.ParseDuration has no day unit); must be between 1m and 6d. Unset
+      # means the context is not kept alive on a schedule.
       live-window: string
       
 # CurrentContext is the name of the context currently in use.

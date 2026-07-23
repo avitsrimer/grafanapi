@@ -251,18 +251,58 @@ func refreshAll(cmd *cobra.Command, contexts []*config.Context) error {
 // context in cfg (visited in a deterministic, name-sorted order), it skips contexts with no
 // Grafana config or an unset live-window, records a warning and skips a set-but-invalid
 // live-window (never a hard error - one bad context must not fail the scheduled run for every
-// other context), skips a context with no Keychain item (modAt returns any error, most commonly
-// keychain.ErrNotFound - nothing to rotate yet), and selects a context iff its last rotation is at
-// least its live-window old as of now. now and modAt are injected so tests can use a fake clock and
-// fake modification times instead of touching the real Keychain or wall-clock time.
+// other context), skips a context with no Keychain item (modAt returns keychain.ErrNotFound -
+// nothing to rotate yet - silently, since "never logged in" is an expected, common state), records
+// a warning and skips a context whose modAt lookup failed for any OTHER reason (a genuine Keychain
+// read failure, mirroring the invalid-live-window branch's "warn, don't fail the whole run"
+// handling instead of also treating it as silent "no cookie yet"), and selects a context iff its
+// last rotation is at least its live-window old as of now. now and modAt are injected so tests can
+// use a fake clock and fake modification times instead of touching the real Keychain or wall-clock
+// time.
 //
 // Returns (due, warnings): due is the selected contexts, warnings is the set of "invalid
 // live-window" messages recorded along the way (plain returns, not named - the loop body has no
-// need for recover()-style named-return rewriting, unlike SessionSource.runRotate).
+// need for recover()-style named-return rewriting, unlike SessionSource.runRotate). The
+// iterate/skip/parse-live-window/warn skeleton is shared with minLiveWindowAcrossContexts via
+// forEachLiveWindowContext; this function's own logic starts at the Keychain lookup below.
 func dueContexts(cfg *config.Config, now time.Time, modAt func(account string) (time.Time, error)) ([]*config.Context, []string) {
 	var due []*config.Context
 	var warnings []string
 
+	forEachLiveWindowContext(cfg,
+		func(name string, err error) {
+			warnings = append(warnings, fmt.Sprintf("context %q: %s (skipping)", name, err))
+		},
+		func(name string, gCtx *config.Context, window time.Duration) {
+			lastRotation, err := modAt(keychain.Account(name))
+			if err != nil {
+				if !errors.Is(err, keychain.ErrNotFound) {
+					// A genuine Keychain read failure, not "never logged in": warn (like the
+					// invalid-live-window branch above) rather than silently skipping it.
+					warnings = append(warnings, fmt.Sprintf("context %q: reading last rotation time: %s (skipping)", name, err))
+				}
+
+				return
+			}
+
+			if now.Sub(lastRotation) >= window {
+				due = append(due, gCtx)
+			}
+		})
+
+	return due, warnings
+}
+
+// forEachLiveWindowContext iterates cfg's contexts in deterministic, name-sorted order, skipping
+// contexts with no Grafana config or an unset live-window, and reporting (via warn) a
+// set-but-invalid live-window without aborting the iteration - the skeleton shared by
+// dueContexts and minLiveWindowAcrossContexts, whose behaviors diverge only in what they do with
+// each context whose live-window did parse (fn), which this helper leaves entirely to the caller.
+func forEachLiveWindowContext(
+	cfg *config.Config,
+	warn func(name string, err error),
+	fn func(name string, gCtx *config.Context, window time.Duration),
+) {
 	for _, name := range sortedContextNames(cfg) {
 		gCtx := cfg.Contexts[name]
 		if gCtx == nil || gCtx.Grafana == nil {
@@ -271,7 +311,7 @@ func dueContexts(cfg *config.Config, now time.Time, modAt func(account string) (
 
 		window, ok, err := gCtx.Grafana.ParsedLiveWindow()
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("context %q: %s (skipping)", name, err))
+			warn(name, err)
 
 			continue
 		}
@@ -281,19 +321,8 @@ func dueContexts(cfg *config.Config, now time.Time, modAt func(account string) (
 			continue
 		}
 
-		lastRotation, err := modAt(keychain.Account(name))
-		if err != nil {
-			// No stored cookie (keychain.ErrNotFound) - or any other lookup failure - means there
-			// is nothing to rotate yet; skip silently rather than failing the scheduled run.
-			continue
-		}
-
-		if now.Sub(lastRotation) >= window {
-			due = append(due, gCtx)
-		}
+		fn(name, gCtx, window)
 	}
-
-	return due, warnings
 }
 
 // sortedContextNames returns cfg's context names in sorted order, so --all/--due iterate (and

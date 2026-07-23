@@ -15,6 +15,15 @@ type FakeKeychainStore struct {
 	mu     sync.Mutex
 	values map[string]string
 	mtimes map[string]time.Time
+
+	// GetErr, when non-nil, is returned by every Get call instead of the usual map lookup /
+	// keychain.ErrNotFound - it lets a test simulate a genuine Keychain read failure (locked
+	// keychain, timeout, ...) as distinct from "no item stored".
+	GetErr error
+	// ModifiedAtErr, when non-nil, is returned by every ModifiedAt call instead of the usual map
+	// lookup / keychain.ErrNotFound - same rationale as GetErr, for callers (like `session refresh
+	// --due`'s dueContexts) that read the last-rotation time independently of the cookie itself.
+	ModifiedAtErr error
 }
 
 // NewFakeKeychainStore returns an empty FakeKeychainStore.
@@ -34,10 +43,15 @@ func (f *FakeKeychainStore) Set(account, secret string) error {
 	return nil
 }
 
-// Get returns the secret stored under account, or keychain.ErrNotFound if none was set.
+// Get returns the secret stored under account, or keychain.ErrNotFound if none was set. If GetErr
+// is set, it is returned instead for every account, regardless of what was stored.
 func (f *FakeKeychainStore) Get(account string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.GetErr != nil {
+		return "", f.GetErr
+	}
 
 	v, ok := f.values[account]
 	if !ok {
@@ -59,10 +73,15 @@ func (f *FakeKeychainStore) Delete(account string) error {
 }
 
 // ModifiedAt returns the mtime recorded for account (either injected via SetModified or set by the
-// most recent Set), or keychain.ErrNotFound if no item exists.
+// most recent Set), or keychain.ErrNotFound if no item exists. If ModifiedAtErr is set, it is
+// returned instead for every account, regardless of what was recorded.
 func (f *FakeKeychainStore) ModifiedAt(account string) (time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.ModifiedAtErr != nil {
+		return time.Time{}, f.ModifiedAtErr
+	}
 
 	mtime, ok := f.mtimes[account]
 	if !ok {

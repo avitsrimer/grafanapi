@@ -10,6 +10,7 @@ import (
 
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
 	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/durationbounds"
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/launchd"
 	"github.com/spf13/cobra"
@@ -30,10 +31,10 @@ const (
 	// logTailLines is how many trailing lines of the keep-alive log "session keepalive status"
 	// reports.
 	logTailLines = 10
-	// launchAgentsDirPerm/logDirPerm are the permissions used when creating the directories
-	// "session keepalive install" writes into. They are not secret-bearing (the plist and log
-	// contain no cookie value - see LogPath's GoDoc), so the standard non-secret directory mode is
-	// used, matching the LaunchAgents/Logs directories macOS itself creates.
+	// launchAgentsDirPerm is the permission used when creating the LaunchAgents and Logs
+	// directories "session keepalive install" writes into. They are not secret-bearing (the plist
+	// and log contain no cookie value - see LogPath's GoDoc), so the standard non-secret directory
+	// mode is used, matching the LaunchAgents/Logs directories macOS itself creates.
 	launchAgentsDirPerm = 0o755
 )
 
@@ -58,7 +59,7 @@ opt in via the "live-window" configuration field stay warm without any manual ac
 
 // keepaliveInstallCmd returns the `session keepalive install` command.
 func keepaliveInstallCmd(opts *Options) *cobra.Command {
-	var interval time.Duration
+	var interval string
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -73,8 +74,9 @@ live-window 12h) before this command will install anything.
 
 By default the agent's wake interval is derived from the minimum live-window across every opted-in
 context (min/2, clamped to [15m, 12h]) - "session refresh --due" re-checks each context's own window
-on every wake, so a modest, derived cadence is sufficient. --interval overrides that derivation
-(validated against [1m, 6d], never clamped to the narrower derived range).
+on every wake, so a modest, derived cadence is sufficient. --interval overrides that derivation: a
+Go duration, or a bare day count with a "d" suffix such as "6d" (a grafanapi extension), validated
+against [1m, 6d] and never clamped to the narrower derived range.
 
 Installing is idempotent: running it again (e.g. after adding another opted-in context) replaces
 the previous plist and reloads it.`,
@@ -85,58 +87,99 @@ the previous plist and reloads it.`,
 				return err
 			}
 
-			minWindow, ok, warnings := minLiveWindowAcrossContexts(&cfg)
-			for _, warning := range warnings {
-				cmdio.Warning(cmd.OutOrStdout(), "%s", warning)
-			}
-
-			if !ok {
-				return errors.New("session keepalive install: no context opts into keep-alive; " +
-					"set one first, e.g. grafanapi config set contexts.<name>.grafana.live-window 12h")
-			}
-
-			effectiveInterval := interval
-			if effectiveInterval == 0 {
-				effectiveInterval = deriveInterval(minWindow)
-			} else if err := launchd.ValidateInterval(effectiveInterval); err != nil {
-				return fmt.Errorf("session keepalive install: %w", err)
-			}
-
-			binary, err := launchd.ResolveBinaryPath()
-			if err != nil {
-				return fmt.Errorf("session keepalive install: %w", err)
-			}
-
-			spec := launchd.DefaultAgentSpec(binary, effectiveInterval)
-
-			if err := writePlist(spec); err != nil {
-				return fmt.Errorf("session keepalive install: %w", err)
-			}
-
-			// Idempotent (re)install: boot the previous instance (if any) out first, ignoring a
-			// "not loaded" failure, before bootstrapping the freshly written plist.
-			_ = controller.Bootout(launchd.UserServiceTarget())
-
-			if err := controller.Bootstrap(launchd.UserDomainTarget(), launchd.PlistPath()); err != nil {
-				cmdio.Warning(cmd.OutOrStdout(),
-					"wrote the LaunchAgent plist but could not load it via launchctl: %s\nYou can load it manually: launchctl bootstrap %s %s",
-					err, launchd.UserDomainTarget(), launchd.PlistPath())
-
-				return nil
-			}
-
-			cmdio.Success(cmd.OutOrStdout(),
-				"installed keepalive LaunchAgent (polling every %s, honoring each context's live-window); logs: %s",
-				effectiveInterval, launchd.LogPath())
-
-			return nil
+			return installKeepAlive(cmd, &cfg, interval)
 		},
 	}
 
-	cmd.Flags().DurationVar(&interval, "interval", 0,
-		"How often the LaunchAgent wakes to check for due contexts (default: derived from the minimum live-window, min/2 clamped to [15m, 12h])")
+	cmd.Flags().StringVar(&interval, "interval", "",
+		`How often the LaunchAgent wakes to check for due contexts: a Go duration, or a bare day `+
+			`count with a "d" suffix such as "6d" (default: derived from the minimum live-window, `+
+			`min/2 clamped to [15m, 12h])`)
 
 	return cmd
+}
+
+// installKeepAlive is `session keepalive install`'s testable body: it derives (or parses/validates,
+// if interval is non-empty) the LaunchAgent's StartInterval from cfg's opted-in contexts, writes the
+// plist, and (re)loads it via launchctl. interval is the raw --interval flag value; an empty string
+// means "derive from the minimum opted-in live-window".
+func installKeepAlive(cmd *cobra.Command, cfg *config.Config, interval string) error {
+	minWindow, ok, warnings := minLiveWindowAcrossContexts(cfg)
+	for _, warning := range warnings {
+		cmdio.Warning(cmd.OutOrStdout(), "%s", warning)
+	}
+
+	if !ok {
+		return errors.New("session keepalive install: no context opts into keep-alive; " +
+			"set one first, e.g. grafanapi config set contexts.<name>.grafana.live-window 12h")
+	}
+
+	effectiveInterval := deriveInterval(minWindow)
+	if interval != "" {
+		parsed, err := durationbounds.ParseWithDays(interval)
+		if err != nil {
+			return fmt.Errorf("session keepalive install: %w", err)
+		}
+
+		if err := launchd.ValidateInterval(parsed); err != nil {
+			return fmt.Errorf("session keepalive install: %w", err)
+		}
+
+		effectiveInterval = parsed
+	}
+
+	binary, err := launchd.ResolveBinaryPath()
+	if err != nil {
+		return fmt.Errorf("session keepalive install: %w", err)
+	}
+
+	spec := launchd.DefaultAgentSpec(binary, effectiveInterval)
+
+	if err := writePlist(spec); err != nil {
+		return fmt.Errorf("session keepalive install: %w", err)
+	}
+
+	// Idempotent (re)install: boot the previous instance (if any) out first, ignoring a
+	// "not loaded" failure (expected on a first install, or after a manual bootout). When
+	// Bootout fails without being recognized as ErrNotLoaded (e.g. a launchctl version
+	// whose wording internal/launchd hasn't seen), ClassifyLoadState asks Print directly
+	// whether the service is actually still loaded before deciding:
+	//   - NotLoaded: confirmed absent - treated the same as ErrNotLoaded, proceed silently.
+	//   - Loaded: confirmed still loaded - surfaced as a warning, not an abort, since the
+	//     plist rewrite and Bootstrap below may still succeed even if the old instance could
+	//     not be booted out first.
+	//   - Inconclusive: Print itself failed for an unrelated reason (permission denied,
+	//     launchd unavailable, ...) - we genuinely don't know whether the old instance is
+	//     still loaded, so this also warns (with a distinct message) rather than aborting.
+	serviceTarget := launchd.UserServiceTarget()
+
+	if err := controller.Bootout(serviceTarget); err != nil && !errors.Is(err, launchd.ErrNotLoaded) {
+		switch launchd.ClassifyLoadState(controller, serviceTarget) {
+		case launchd.LoadStateNotLoaded:
+			// Confirmed absent - proceed exactly as for a directly-recognized ErrNotLoaded.
+		case launchd.LoadStateLoaded:
+			cmdio.Warning(cmd.OutOrStdout(),
+				"could not boot out the previous LaunchAgent instance before reinstalling: %s", err)
+		case launchd.LoadStateInconclusive:
+			cmdio.Warning(cmd.OutOrStdout(),
+				"could not boot out the previous LaunchAgent instance before reinstalling, and could "+
+					"not determine whether it is still loaded (launchd error: %s)", err)
+		}
+	}
+
+	if err := controller.Bootstrap(launchd.UserDomainTarget(), launchd.PlistPath()); err != nil {
+		cmdio.Warning(cmd.OutOrStdout(),
+			"wrote the LaunchAgent plist but could not load it via launchctl: %s\nYou can load it manually: launchctl bootstrap %s %s",
+			err, launchd.UserDomainTarget(), launchd.PlistPath())
+
+		return nil
+	}
+
+	cmdio.Success(cmd.OutOrStdout(),
+		"installed keepalive LaunchAgent (polling every %s, honoring each context's live-window); logs: %s",
+		effectiveInterval, launchd.LogPath())
+
+	return nil
 }
 
 // keepaliveStatusOpts holds the flags for `session keepalive status`.
@@ -188,8 +231,33 @@ func keepaliveUninstallCmd(_ *Options) *cobra.Command {
 		Long:    `Remove the keep-alive LaunchAgent: boot it out of launchd and delete its plist. Idempotent - it succeeds even when no LaunchAgent is currently installed.`,
 		Example: "\n\tgrafanapi session keepalive uninstall",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Ignore a "not loaded" failure - uninstall must be idempotent.
-			_ = controller.Bootout(launchd.UserServiceTarget())
+			// Ignore a "not loaded" failure - uninstall must be idempotent. When Bootout fails
+			// without being recognized as ErrNotLoaded (e.g. a launchctl version whose wording
+			// internal/launchd hasn't seen), ClassifyLoadState asks Print directly whether the
+			// service is actually still loaded before failing:
+			//   - NotLoaded: confirmed absent - treated the same as ErrNotLoaded, proceed and remove
+			//     the plist.
+			//   - Loaded: confirmed still loaded - a genuine problem; fail without deleting the
+			//     plist or reporting success, since the agent may still be loaded.
+			//   - Inconclusive: Print itself failed for an unrelated reason (permission denied,
+			//     launchd unavailable, ...) - we genuinely don't know whether the agent is still
+			//     loaded, so this also fails (with a distinct message) rather than risking a false
+			//     "removed" - the exact false-success outcome this disambiguation exists to prevent.
+			serviceTarget := launchd.UserServiceTarget()
+
+			if err := controller.Bootout(serviceTarget); err != nil && !errors.Is(err, launchd.ErrNotLoaded) {
+				switch launchd.ClassifyLoadState(controller, serviceTarget) {
+				case launchd.LoadStateNotLoaded:
+					// Confirmed absent - proceed exactly as for a directly-recognized ErrNotLoaded.
+				case launchd.LoadStateLoaded:
+					return fmt.Errorf(
+						"session keepalive uninstall: could not boot out the LaunchAgent (it may still be loaded): %w", err)
+				case launchd.LoadStateInconclusive:
+					return fmt.Errorf(
+						"session keepalive uninstall: could not boot out the LaunchAgent and could not determine "+
+							"whether it is still loaded (launchd error: %w)", err)
+				}
+			}
 
 			if err := os.Remove(launchd.PlistPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("session keepalive uninstall: removing %s: %w", launchd.PlistPath(), err)
@@ -294,6 +362,14 @@ func (statusTextCodec) Encode(dst io.Writer, value any) error {
 	if !report.Installed {
 		fmt.Fprintf(dst, "installed: no\nplist:     %s (not present)\n", report.PlistPath)
 
+		if report.Loaded {
+			// Parity with the json/yaml codecs, which always report Loaded: the plist is gone (or
+			// was never written by this tool) but launchctl still has the agent loaded - e.g. it
+			// was bootstrapped from elsewhere, or the plist was deleted by hand after install.
+			fmt.Fprintf(dst, "warning:   agent still loaded in launchd (%s) despite the plist being missing; "+
+				"run: launchctl bootout %s\n", launchd.UserServiceTarget(), launchd.UserServiceTarget())
+		}
+
 		return nil
 	}
 
@@ -324,7 +400,9 @@ func (statusTextCodec) Decode(io.Reader, any) error {
 // in cfg, and whether at least one was found. A context with no Grafana config or an unset
 // live-window is silently skipped (not opted in); a set-but-invalid live-window is skipped with a
 // recorded warning (mirroring dueContexts's "never fail the whole run for one bad context"
-// philosophy) rather than aborting the install.
+// philosophy) rather than aborting the install. The iterate/skip/parse-live-window/warn skeleton
+// is shared with dueContexts via forEachLiveWindowContext; this function's own logic is just
+// tracking the running minimum below.
 func minLiveWindowAcrossContexts(cfg *config.Config) (time.Duration, bool, []string) {
 	var (
 		minWindow time.Duration
@@ -332,28 +410,16 @@ func minLiveWindowAcrossContexts(cfg *config.Config) (time.Duration, bool, []str
 		warnings  []string
 	)
 
-	for _, name := range sortedContextNames(cfg) {
-		gCtx := cfg.Contexts[name]
-		if gCtx == nil || gCtx.Grafana == nil {
-			continue
-		}
-
-		window, ok, err := gCtx.Grafana.ParsedLiveWindow()
-		if err != nil {
+	forEachLiveWindowContext(cfg,
+		func(name string, err error) {
 			warnings = append(warnings, fmt.Sprintf("context %q: %s (ignoring for interval derivation)", name, err))
-
-			continue
-		}
-
-		if !ok {
-			continue
-		}
-
-		if !found || window < minWindow {
-			minWindow = window
-			found = true
-		}
-	}
+		},
+		func(_ string, _ *config.Context, window time.Duration) {
+			if !found || window < minWindow {
+				minWindow = window
+				found = true
+			}
+		})
 
 	return minWindow, found, warnings
 }

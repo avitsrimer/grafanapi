@@ -438,7 +438,7 @@ func checkContext(cmd *cobra.Command, gCtx *config.Context) {
 // (internal/launchd; see "session keepalive") is installed and loaded, its interval and target
 // binary, and, per context, its "live-window" opt-in and last-rotation age (from the Keychain
 // item's modification time). Every launchd/Keychain inspection here is best-effort - an error
-// degrades the affected line to "unknown"/"—" rather than aborting, so "config check" always
+// degrades the affected line to "unknown"/"none" rather than aborting, so "config check" always
 // exits 0 regardless of keep-alive status.
 func checkKeepAlive(cmd *cobra.Command, cfg config.Config) {
 	stdout := cmd.OutOrStdout()
@@ -484,12 +484,12 @@ func checkKeepAlive(cmd *cobra.Command, cfg config.Config) {
 			liveWindow = gCtx.Grafana.LiveWindow
 		}
 
-		age := "—"
+		age := "none"
 		if modAt, err := keychainStore.ModifiedAt(keychain.Account(name)); err == nil {
 			age = fmt.Sprintf("rotated %s ago", time.Since(modAt).Round(time.Second))
 		}
 
-		fmt.Fprintf(stdout, "  %s: live-window=%s, last-rotation=%s\n", io.Bold(name), liveWindow, age)
+		io.Info(stdout, "  %s: live-window=%s, last-rotation=%s", io.Bold(name), liveWindow, age)
 	}
 
 	cmd.Println()

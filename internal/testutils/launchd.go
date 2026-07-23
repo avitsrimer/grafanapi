@@ -31,8 +31,15 @@ type FakeController struct {
 	BootoutErr error
 	// PrintOutput is returned by every Print call alongside PrintErr.
 	PrintOutput string
-	// PrintErr is returned by every Print call. Scripting it non-nil mirrors "launchctl print"
-	// failing because the service is not currently loaded.
+	// PrintErr is returned by every Print call. Its identity - not just its non-nilness - drives
+	// launchd.ClassifyLoadState, mirroring how the real execController.Print returns ErrNotLoaded
+	// specifically for a recognized "not loaded" shape and a distinct error for anything else:
+	//   - nil: Print "succeeds" -> LoadStateLoaded (service confirmed loaded).
+	//   - launchd.ErrNotLoaded: mirrors a recognized "not loaded" Print failure -> LoadStateNotLoaded
+	//     (service confirmed absent).
+	//   - any other non-nil error: mirrors an unrecognized/genuine Print failure (permission denied,
+	//     launchd unavailable, ...) -> LoadStateInconclusive. Do NOT script an arbitrary
+	//     errors.New("...") expecting it to be read as "not loaded" - only launchd.ErrNotLoaded is.
 	PrintErr error
 
 	calls []ControllerCall

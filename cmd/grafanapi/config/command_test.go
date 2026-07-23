@@ -753,7 +753,7 @@ contexts:
 	testCase.Run(t)
 }
 
-func Test_CheckCommand_KeepAlive_NoStoredCookieRendersDash(t *testing.T) {
+func Test_CheckCommand_KeepAlive_NoStoredCookieRendersNone(t *testing.T) {
 	home := checkHome(t)
 
 	cfg := `current-context: dev
@@ -777,7 +777,7 @@ contexts:
 		Command: []string{"check", "--config", configFile},
 		Assertions: []testutils.CommandAssertion{
 			testutils.CommandSuccess(),
-			testutils.CommandOutputContains("live-window=not set, last-rotation=—"),
+			testutils.CommandOutputContains("live-window=not set, last-rotation=none"),
 		},
 		Env: map[string]string{"HOME": home},
 	}

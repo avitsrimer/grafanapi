@@ -13,8 +13,9 @@ live-window 12h) before this command will install anything.
 
 By default the agent's wake interval is derived from the minimum live-window across every opted-in
 context (min/2, clamped to [15m, 12h]) - "session refresh --due" re-checks each context's own window
-on every wake, so a modest, derived cadence is sufficient. --interval overrides that derivation
-(validated against [1m, 6d], never clamped to the narrower derived range).
+on every wake, so a modest, derived cadence is sufficient. --interval overrides that derivation: a
+Go duration, or a bare day count with a "d" suffix such as "6d" (a grafanapi extension), validated
+against [1m, 6d] and never clamped to the narrower derived range.
 
 Installing is idempotent: running it again (e.g. after adding another opted-in context) replaces
 the previous plist and reloads it.
@@ -34,8 +35,8 @@ grafanapi session keepalive install [flags]
 ### Options
 
 ```
-  -h, --help                help for install
-      --interval duration   How often the LaunchAgent wakes to check for due contexts (default: derived from the minimum live-window, min/2 clamped to [15m, 12h])
+  -h, --help              help for install
+      --interval string   How often the LaunchAgent wakes to check for due contexts: a Go duration, or a bare day count with a "d" suffix such as "6d" (default: derived from the minimum live-window, min/2 clamped to [15m, 12h])
 ```
 
 ### Options inherited from parent commands

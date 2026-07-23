@@ -131,6 +131,8 @@ func TestGrafanaConfig_ParsedLiveWindow(t *testing.T) {
 		{name: "unparseable", liveWindow: "not-a-duration", expectErr: true},
 		{name: "below minimum", liveWindow: "30s", expectErr: true},
 		{name: "above maximum", liveWindow: "7d", expectErr: true},
+		{name: "non-finite day count", liveWindow: "Infd", expectErr: true},
+		{name: "day count overflowing int64 nanoseconds", liveWindow: "1e300d", expectErr: true},
 	}
 
 	for _, testCase := range testCases {

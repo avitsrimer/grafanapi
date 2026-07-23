@@ -1,6 +1,7 @@
 package testutils_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -63,4 +64,35 @@ func TestFakeKeychainStore_ModifiedAt_DeleteClears(t *testing.T) {
 
 	_, err := store.ModifiedAt("account")
 	req.ErrorIs(err, keychain.ErrNotFound)
+}
+
+// TestFakeKeychainStore_GetErr_Scripted ensures a scripted GetErr is returned for every account
+// instead of keychain.ErrNotFound / the stored secret, so callers can simulate a genuine Keychain
+// read failure (as opposed to "no item stored").
+func TestFakeKeychainStore_GetErr_Scripted(t *testing.T) {
+	req := require.New(t)
+
+	store := testutils.NewFakeKeychainStore()
+	req.NoError(store.Set("account", "secret"))
+
+	boom := errors.New("keychain locked")
+	store.GetErr = boom
+
+	_, err := store.Get("account")
+	req.ErrorIs(err, boom)
+}
+
+// TestFakeKeychainStore_ModifiedAtErr_Scripted mirrors TestFakeKeychainStore_GetErr_Scripted for
+// ModifiedAt.
+func TestFakeKeychainStore_ModifiedAtErr_Scripted(t *testing.T) {
+	req := require.New(t)
+
+	store := testutils.NewFakeKeychainStore()
+	store.SetModified("account", time.Now())
+
+	boom := errors.New("keychain locked")
+	store.ModifiedAtErr = boom
+
+	_, err := store.ModifiedAt("account")
+	req.ErrorIs(err, boom)
 }

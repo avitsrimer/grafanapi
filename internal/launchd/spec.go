@@ -10,6 +10,8 @@ package launchd
 import (
 	"fmt"
 	"time"
+
+	"github.com/grafana/grafanapi/internal/durationbounds"
 )
 
 // Label is the fixed launchd service label for the grafanapi keep-alive LaunchAgent. It doubles
@@ -18,16 +20,6 @@ import (
 // any previously installed agent as an orphaned, un-managed LaunchAgent that "session keepalive
 // uninstall" could no longer find.
 const Label = "io.github.avitsrimer.grafanapi.keepalive"
-
-const (
-	// minInterval is the smallest StartInterval this package will generate or validate. It mirrors
-	// config.minLiveWindow; the two are kept as separate unexported constants (rather than a shared
-	// exported one) to avoid a launchd -> config import edge, but must stay in sync at [1m, 6d].
-	minInterval = time.Minute
-	// maxInterval is the largest StartInterval this package will generate or validate. See
-	// minInterval.
-	maxInterval = 6 * 24 * time.Hour
-)
 
 // AgentSpec fully describes one LaunchAgent: what to run, how often, and where its output goes.
 // It is the single value threaded through plist generation (Generate), inspection (Inspect), and
@@ -49,14 +41,14 @@ type AgentSpec struct {
 }
 
 // ValidateInterval reports an error if d falls outside the bounds this package enforces for any
-// launchd StartInterval it generates: [1m, 6d] (mirroring config.minLiveWindow/maxLiveWindow -
-// kept as a separate constant pair to avoid a launchd -> config import edge; the two must stay in
-// sync). "session keepalive install" calls this for an explicit --interval override; the value
-// derived from the minimum live-window ("session keepalive install"'s min/2, clamped to
-// [15m, 12h]) is always within these bounds by construction and need not be re-validated.
+// launchd StartInterval it generates: [durationbounds.Min, durationbounds.Max] - the same shared
+// bound pair a context's "live-window" is validated against, so the two always agree. "session
+// keepalive install" calls this for an explicit --interval override; the value derived from the
+// minimum live-window ("session keepalive install"'s min/2, clamped to [15m, 12h]) is always
+// within these bounds by construction and need not be re-validated.
 func ValidateInterval(d time.Duration) error {
-	if d < minInterval || d > maxInterval {
-		return fmt.Errorf("launchd: interval %s must be between %s and %s", d, minInterval, maxInterval)
+	if d < durationbounds.Min || d > durationbounds.Max {
+		return fmt.Errorf("launchd: interval %s must be between %s and %s", d, durationbounds.Min, durationbounds.Max)
 	}
 
 	return nil
