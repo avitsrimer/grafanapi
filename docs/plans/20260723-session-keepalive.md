@@ -575,12 +575,12 @@ test seam.
 - Create: `cmd/grafanapi/session/command.go`
 - Modify: `cmd/grafanapi/root/command.go`
 
-- [ ] Implement `Command()`, `Options{ConfigFile, Context}` + `BindFlags`/`configSource`, and the
+- [x] Implement `Command()`, `Options{ConfigFile, Context}` + `BindFlags`/`configSource`, and the
       `keychainStore`/`controller` vars + `SetKeychainStore`/`SetController` restorers.
-- [ ] Wire `AddCommand(refreshCmd, keepaliveCommand)` (stubs OK) so the package compiles.
-- [ ] Register `session.Command()` in `root/command.go` (import + `AddCommand`, alphabetical).
-- [ ] `go build ./...` compiles; `grafanapi session --help` lists `refresh` and `keepalive`.
-- [ ] Run tests — must pass before next task.
+- [x] Wire `AddCommand(refreshCmd, keepaliveCommand)` (stubs OK) so the package compiles.
+- [x] Register `session.Command()` in `root/command.go` (import + `AddCommand`, alphabetical).
+- [x] `go build ./...` compiles; `grafanapi session --help` lists `refresh` and `keepalive`.
+- [x] Run tests — must pass before next task.
 
 ### Task 7 — `session refresh` (unconditional `--all`/`--context` + scheduler `--due`)
 
