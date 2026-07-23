@@ -14,6 +14,7 @@ import (
 	"github.com/grafana/grafanapi/cmd/grafanapi/installskill"
 	"github.com/grafana/grafanapi/cmd/grafanapi/login"
 	"github.com/grafana/grafanapi/cmd/grafanapi/resources"
+	"github.com/grafana/grafanapi/cmd/grafanapi/session"
 	"github.com/grafana/grafanapi/internal/logs"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -67,6 +68,7 @@ func Command(version string) *cobra.Command {
 	rootCmd.AddCommand(installskill.Command())
 	rootCmd.AddCommand(login.Command())
 	rootCmd.AddCommand(resources.Command())
+	rootCmd.AddCommand(session.Command())
 
 	rootCmd.PersistentFlags().BoolVar(&noColors, "no-color", noColors, "Disable color output")
 	rootCmd.PersistentFlags().CountVarP(&verbosity, "verbose", "v", "Verbose mode. Multiple -v options increase the verbosity (maximum: 3).")

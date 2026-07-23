@@ -3,10 +3,14 @@ package config_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/grafana/grafanapi/internal/launchd"
 	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +54,12 @@ func (f *fakeKeychainStore) Delete(account string) error {
 	delete(f.cookies, account)
 
 	return nil
+}
+
+// ModifiedAt is a trivial stub satisfying the grown keychain.Store interface: these tests never
+// exercise last-rotation-time lookups.
+func (f *fakeKeychainStore) ModifiedAt(string) (time.Time, error) {
+	return time.Time{}, keychain.ErrNotFound
 }
 
 func Test_CurrentContextCommand(t *testing.T) {
@@ -561,6 +571,253 @@ contexts:
 			testutils.CommandOutputContains("Session cookie"),
 			testutils.CommandOutputContains("keychain: boom"),
 		},
+	}
+	testCase.Run(t)
+}
+
+// checkHome points $HOME at a fresh temporary directory for the duration of the test, so
+// internal/launchd's path helpers (PlistPath, etc., all derived from $HOME) never touch the real
+// ~/Library/LaunchAgents. It returns the directory.
+func checkHome(t *testing.T) string {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	return home
+}
+
+// writeKeepAlivePlist writes spec as a valid keep-alive plist at launchd.PlistPath() (which must
+// already resolve under a test-controlled $HOME - see checkHome), so "config check" observes an
+// "installed" LaunchAgent without ever running "session keepalive install".
+func writeKeepAlivePlist(t *testing.T, spec launchd.AgentSpec) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(launchd.PlistPath()), 0o755))
+
+	file, err := os.Create(launchd.PlistPath())
+	require.NoError(t, err)
+	defer file.Close()
+
+	require.NoError(t, launchd.Generate(file, spec))
+}
+
+func Test_CheckCommand_KeepAlive_NotInstalled(t *testing.T) {
+	home := checkHome(t)
+
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	fakeController := testutils.NewFakeController()
+	restoreController := config.SetKeepaliveController(fakeController)
+	defer restoreController()
+
+	store := &fakeKeychainStore{}
+	restoreStore := config.SetKeychainStore(store)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Keep-alive"),
+			testutils.CommandOutputContains("not installed"),
+			testutils.CommandOutputContains("live-window=not set"),
+		},
+		Env: map[string]string{"HOME": home},
+	}
+	testCase.Run(t)
+
+	// No launchctl call is made when the plist does not exist.
+	require.Empty(t, fakeController.Calls())
+}
+
+func Test_CheckCommand_KeepAlive_InstalledAndLoaded(t *testing.T) {
+	home := checkHome(t)
+
+	spec := launchd.DefaultAgentSpec("/opt/homebrew/bin/grafanapi", 6*time.Hour)
+	writeKeepAlivePlist(t, spec)
+
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      live-window: 12h`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	fakeController := testutils.NewFakeController()
+	restoreController := config.SetKeepaliveController(fakeController)
+	defer restoreController()
+
+	store := &fakeKeychainStore{}
+	restoreStore := config.SetKeychainStore(store)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("Keep-alive"),
+			testutils.CommandOutputContains("installed"),
+			testutils.CommandOutputContains("loaded: yes"),
+			testutils.CommandOutputContains("6h0m0s"),
+			testutils.CommandOutputContains("/opt/homebrew/bin/grafanapi"),
+			testutils.CommandOutputContains("live-window=12h"),
+		},
+		Env: map[string]string{"HOME": home},
+	}
+	testCase.Run(t)
+
+	calls := fakeController.Calls()
+	require.Len(t, calls, 1)
+	require.Equal(t, "Print", calls[0].Method)
+	require.Equal(t, launchd.UserServiceTarget(), calls[0].Target)
+}
+
+func Test_CheckCommand_KeepAlive_NotLoaded(t *testing.T) {
+	home := checkHome(t)
+
+	spec := launchd.DefaultAgentSpec("/opt/homebrew/bin/grafanapi", 6*time.Hour)
+	writeKeepAlivePlist(t, spec)
+
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	fakeController := testutils.NewFakeController()
+	fakeController.PrintErr = errors.New("not loaded")
+	restoreController := config.SetKeepaliveController(fakeController)
+	defer restoreController()
+
+	store := &fakeKeychainStore{}
+	restoreStore := config.SetKeychainStore(store)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("loaded: no"),
+		},
+		Env: map[string]string{"HOME": home},
+	}
+	testCase.Run(t)
+}
+
+func Test_CheckCommand_KeepAlive_LastRotationAge(t *testing.T) {
+	home := checkHome(t)
+
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example
+      live-window: 12h`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	fakeController := testutils.NewFakeController()
+	restoreController := config.SetKeepaliveController(fakeController)
+	defer restoreController()
+
+	fakeStore := testutils.NewFakeKeychainStore()
+	require.NoError(t, fakeStore.Set(keychain.Account("dev"), "cookie-value"))
+	fakeStore.SetModified(keychain.Account("dev"), time.Now().Add(-3*time.Hour))
+	restoreStore := config.SetKeychainStore(fakeStore)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("live-window=12h"),
+			testutils.CommandOutputContains("rotated 3h0m0s ago"),
+		},
+		Env: map[string]string{"HOME": home},
+	}
+	testCase.Run(t)
+}
+
+func Test_CheckCommand_KeepAlive_NoStoredCookieRendersNone(t *testing.T) {
+	home := checkHome(t)
+
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	fakeController := testutils.NewFakeController()
+	restoreController := config.SetKeepaliveController(fakeController)
+	defer restoreController()
+
+	store := &fakeKeychainStore{}
+	restoreStore := config.SetKeychainStore(store)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("live-window=not set, last-rotation=none"),
+		},
+		Env: map[string]string{"HOME": home},
+	}
+	testCase.Run(t)
+}
+
+func Test_CheckCommand_KeepAlive_InspectionErrorDegradesToUnknown(t *testing.T) {
+	home := checkHome(t)
+
+	// Write a malformed (truncated, non-XML) plist so os.Stat sees it as installed but
+	// launchd.Inspect fails to parse it.
+	require.NoError(t, os.MkdirAll(filepath.Dir(launchd.PlistPath()), 0o755))
+	require.NoError(t, os.WriteFile(launchd.PlistPath(), []byte("not a plist"), 0o600))
+
+	cfg := `current-context: dev
+contexts:
+  dev:
+    grafana:
+      server: https://grafana-dev.example`
+
+	configFile := testutils.CreateTempFile(t, cfg)
+
+	fakeController := testutils.NewFakeController()
+	restoreController := config.SetKeepaliveController(fakeController)
+	defer restoreController()
+
+	store := &fakeKeychainStore{}
+	restoreStore := config.SetKeychainStore(store)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			testutils.CommandOutputContains("could not be inspected"),
+			testutils.CommandOutputContains("interval: unknown"),
+			testutils.CommandOutputContains("binary: unknown"),
+		},
+		Env: map[string]string{"HOME": home},
 	}
 	testCase.Run(t)
 }

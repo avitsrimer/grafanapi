@@ -78,6 +78,13 @@ func (f *fakeStore) Delete(account string) error {
 	return nil
 }
 
+// ModifiedAt is a trivial stub satisfying the grown keychain.Store interface: this test file
+// exercises rotation/single-flight behavior, not last-rotation-time lookups, so a fixed zero-value
+// response (mirroring "no item found") is sufficient.
+func (f *fakeStore) ModifiedAt(string) (time.Time, error) {
+	return time.Time{}, keychain.ErrNotFound
+}
+
 // value returns the secret stored under testAccount, the fixed account name every test in this
 // file uses.
 func (f *fakeStore) value() (string, bool) {
@@ -217,6 +224,107 @@ func TestSessionSource_Rotate_Rejected(t *testing.T) {
 			assert.Equal(t, 0, store.calls(), "keychain must not be written on a rejected rotation")
 		})
 	}
+}
+
+func TestSessionSource_Refresh_HappyPath(t *testing.T) {
+	server, calls := newRotateServer(t, http.StatusOK)
+
+	store := newFakeStore()
+	src := NewSessionSource(testOldCookie, server.URL, nil, store, testAccount)
+
+	newCookie, err := src.Refresh(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, testNewCookie, newCookie)
+	assert.Equal(t, int32(1), calls.Load())
+
+	gotCookie, gen := src.Current()
+	assert.Equal(t, testNewCookie, gotCookie)
+	assert.Equal(t, uint64(1), gen)
+
+	stored, ok := store.value()
+	require.True(t, ok)
+	assert.Equal(t, testNewCookie, stored)
+}
+
+func TestSessionSource_Refresh_Rejected(t *testing.T) {
+	server, _ := newRotateServer(t, http.StatusUnauthorized)
+
+	store := newFakeStore()
+	src := NewSessionSource(testOldCookie, server.URL, nil, store, testAccount)
+
+	_, gen := src.Current()
+
+	_, err := src.Refresh(t.Context())
+	require.ErrorIs(t, err, ErrRotateUnauthorized)
+
+	_, genAfter := src.Current()
+	assert.Equal(t, gen, genAfter, "generation must be unchanged on a rejected refresh")
+
+	assert.Equal(t, 0, store.calls(), "keychain must not be written on a rejected refresh")
+}
+
+// TestSessionSource_Refresh_SingleFlight asserts that a Refresh call joins an already-in-flight
+// rotation (started directly via Rotate) rather than issuing a second network call: both callers
+// must observe the same rotated cookie and the generation must advance by exactly one.
+func TestSessionSource_Refresh_SingleFlight(t *testing.T) {
+	release := make(chan struct{})
+	rotateStarted := make(chan struct{})
+	var startedOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		startedOnce.Do(func() { close(rotateStarted) })
+		<-release
+		http.SetCookie(w, &http.Cookie{Name: SessionCookieName, Value: testNewCookie, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	store := newFakeStore()
+	src := NewSessionSource(testOldCookie, server.URL, nil, store, testAccount)
+
+	firstDone := make(chan struct{})
+	var firstCookie string
+	var firstErr error
+
+	go func() {
+		defer close(firstDone)
+		firstCookie, firstErr = src.Rotate(t.Context(), 0)
+	}()
+
+	select {
+	case <-rotateStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotate handler never received the first request")
+	}
+
+	// The winning rotation is now blocked inside the handler, holding no lock. A concurrent
+	// Refresh for the same (still-unadvanced) generation must join it rather than starting a
+	// second network call.
+	secondDone := make(chan struct{})
+	var secondCookie string
+	var secondErr error
+
+	go func() {
+		defer close(secondDone)
+		secondCookie, secondErr = src.Refresh(t.Context())
+	}()
+
+	// Give Refresh a moment to reach the inflight check before releasing the handler.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	<-firstDone
+	<-secondDone
+
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
+	assert.Equal(t, testNewCookie, firstCookie)
+	assert.Equal(t, testNewCookie, secondCookie)
+
+	_, gen := src.Current()
+	assert.Equal(t, uint64(1), gen, "exactly one rotation expected across the concurrent wave")
+
+	assert.Equal(t, 1, store.calls(), "keychain must be written exactly once")
 }
 
 func TestSessionSource_Rotate_KeychainPersistFailure(t *testing.T) {

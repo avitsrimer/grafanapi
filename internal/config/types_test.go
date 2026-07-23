@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/format"
@@ -103,6 +104,96 @@ func TestGrafanaConfig_IsEmpty_IgnoresSession(t *testing.T) {
 
 	req.True(config.GrafanaConfig{Session: src}.IsEmpty())
 	req.False(config.GrafanaConfig{Server: "value", Session: src}.IsEmpty())
+}
+
+// TestGrafanaConfig_IsEmpty_LiveWindow guards the plan's IsEmpty() requirement: unlike
+// SessionCookie/Session, LiveWindow is a real persisted field and must participate in the
+// emptiness comparison normally (empty => still empty; set => non-empty).
+func TestGrafanaConfig_IsEmpty_LiveWindow(t *testing.T) {
+	req := require.New(t)
+
+	req.True(config.GrafanaConfig{}.IsEmpty())
+	req.False(config.GrafanaConfig{LiveWindow: "12h"}.IsEmpty())
+}
+
+func TestGrafanaConfig_ParsedLiveWindow(t *testing.T) {
+	testCases := []struct {
+		name           string
+		liveWindow     string
+		expectedWindow time.Duration
+		expectedSet    bool
+		expectErr      bool
+	}{
+		{name: "unset", liveWindow: "", expectedWindow: 0, expectedSet: false},
+		{name: "valid", liveWindow: "12h", expectedWindow: 12 * time.Hour, expectedSet: true},
+		{name: "minimum boundary", liveWindow: "1m", expectedWindow: time.Minute, expectedSet: true},
+		{name: "maximum boundary", liveWindow: "6d", expectedWindow: 6 * 24 * time.Hour, expectedSet: true},
+		{name: "unparseable", liveWindow: "not-a-duration", expectErr: true},
+		{name: "below minimum", liveWindow: "30s", expectErr: true},
+		{name: "above maximum", liveWindow: "7d", expectErr: true},
+		{name: "non-finite day count", liveWindow: "Infd", expectErr: true},
+		{name: "day count overflowing int64 nanoseconds", liveWindow: "1e300d", expectErr: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := require.New(t)
+
+			window, set, err := config.GrafanaConfig{LiveWindow: testCase.liveWindow}.ParsedLiveWindow()
+
+			if testCase.expectErr {
+				req.Error(err)
+				return
+			}
+
+			req.NoError(err)
+			req.Equal(testCase.expectedSet, set)
+			req.Equal(testCase.expectedWindow, window)
+		})
+	}
+}
+
+// TestGrafanaConfig_Validate_LiveWindow ensures Validate rejects a set-but-invalid live-window
+// (unparseable or out of [1m, 6d]) while accepting the boundaries and an unset value.
+func TestGrafanaConfig_Validate_LiveWindow(t *testing.T) {
+	testCases := []struct {
+		name       string
+		liveWindow string
+		expectErr  bool
+	}{
+		{name: "unset", liveWindow: "", expectErr: false},
+		{name: "minimum boundary", liveWindow: "1m", expectErr: false},
+		{name: "maximum boundary", liveWindow: "6d", expectErr: false},
+		{name: "unparseable", liveWindow: "not-a-duration", expectErr: true},
+		{name: "below minimum", liveWindow: "30s", expectErr: true},
+		{name: "above maximum", liveWindow: "7d", expectErr: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := require.New(t)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"settings": map[string]any{
+						"namespace": "stacks-12345",
+					},
+				})
+			}))
+			defer server.Close()
+
+			cfg := config.GrafanaConfig{Server: server.URL, LiveWindow: testCase.liveWindow}
+			err := cfg.Validate("ctx")
+
+			if testCase.expectErr {
+				req.Error(err)
+				req.ErrorContains(err, "live-window")
+				return
+			}
+
+			req.NoError(err)
+		})
+	}
 }
 
 func TestGrafanaConfig_Validate_AllowsDiscoveredStackID(t *testing.T) {

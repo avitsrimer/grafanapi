@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-openapi/runtime"
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
@@ -26,6 +27,10 @@ type nopStore struct{}
 func (nopStore) Set(string, string) error   { return nil }
 func (nopStore) Get(string) (string, error) { return "", keychain.ErrNotFound }
 func (nopStore) Delete(string) error        { return nil }
+
+// ModifiedAt is a trivial stub satisfying the grown keychain.Store interface: these tests never
+// exercise last-rotation-time lookups.
+func (nopStore) ModifiedAt(string) (time.Time, error) { return time.Time{}, keychain.ErrNotFound }
 
 func testQueryBody() map[string]any {
 	return map[string]any{

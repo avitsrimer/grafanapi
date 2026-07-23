@@ -81,7 +81,7 @@ make clean
 
 ### Command Structure
 
-grafanapi follows the Cobra command pattern with six main command groups:
+grafanapi follows the Cobra command pattern with seven main command groups:
 
 1. **login**: Authenticate to a Grafana instance using a session cookie
    - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
@@ -119,6 +119,20 @@ grafanapi follows the Cobra command pattern with six main command groups:
    - `install-skill`: Write the embedded `skill/grafanapi` tree to `<--to>/skills/grafanapi`
      (default `--to ~/.claude`), replacing any existing installation. No config/auth dependency.
 
+7. **session**: Keep a context's Grafana session alive proactively, on a schedule, opt-in per
+   context via a `live-window` configuration field
+   - `session refresh`: force a rotation now, reusing the exact `SessionSource` rotate +
+     Keychain-persist path as automatic 401-triggered rotation; unconditional by default
+     (`--context`/current context, or `--all` for every context with a stored cookie); `--due`
+     restricts the target set to contexts whose `live-window` has elapsed since their last
+     rotation (the scheduler entry point) — mutually exclusive with `--all`/`--context`
+   - `session keepalive install`: write and load a macOS launchd LaunchAgent that periodically runs
+     `session refresh --due`; errors if no context has `live-window` set; `--interval` overrides the
+     derived wake interval (`min(live-window)/2`, clamped `[15m, 12h]`), itself bounded `[1m, 6d]`
+   - `session keepalive status`: report installed/loaded, interval, target binary, and a tail of the
+     keep-alive log (never contains a cookie)
+   - `session keepalive uninstall`: boot the LaunchAgent out and remove its plist, idempotently
+
 ### Core Packages
 
 **cmd/grafanapi/** - CLI command implementations
@@ -132,6 +146,17 @@ grafanapi follows the Cobra command pattern with six main command groups:
   calling the generated Grafana client directly; no domain logic to extract for a single list call
 - `installskill/`: `install-skill` — writes the `skill.Files` embedded FS to `<--to>/skills/grafanapi`
   (`os.RemoveAll` then `fs.WalkDir`, directories `0o750`/files `0o600`); no config/auth dependency
+- `session/`: `session refresh` / `session keepalive install|status|uninstall` — a **standalone**
+  top-level command (like `login`), owning its own `--config`/`--context` persistent flags plus
+  package-level `keychainStore`/`controller` test seams (`SetKeychainStore`/`SetController`), since
+  `refresh --all`/`--due` resolve *every* context themselves rather than just the current one.
+  `refresh.go` holds the pure `dueContexts(cfg, now, modAt)` selector (unset `live-window` → skip;
+  set-but-invalid → warn+skip, never a hard error; `keychain.ErrNotFound` → skip; otherwise select
+  iff `now.Sub(lastRotation) >= window`) and maps a rejected rotation to
+  `runtime.NewAPIError(..., 401)` for the standard exit-2 stale-session rendering, exactly as the
+  completed `explore` plan did for its own dead-session path. `keepalive.go` derives the LaunchAgent
+  spec from `internal/launchd` and shells out only through the `Controller` seam — never real
+  `launchctl` in tests.
 - `fail/`: Error handling and detailed error messages
 - `io/`: Output formatting and user messages
 
@@ -162,6 +187,15 @@ grafanapi follows the Cobra command pattern with six main command groups:
   `cmd/grafanapi/fail` stale-session rendering fires — rotation is purely a transparent retry
   layer in front of that path. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
   **not** wired into rotation (pre-auth, single non-retryable probe, fails soft already).
+  `Refresh(ctx) (string, error)` (added for `session refresh`) is a 3-line force-now wrapper —
+  `Current()` → `Rotate(ctx, gen)` — that reuses `Rotate`'s single-flight join instead of
+  duplicating `doRotate`/`persist`; it lives in `internal/config` (not `internal/session`) to avoid
+  an import cycle, so only the `session` **command** package needs both packages.
+- `types.go`: `GrafanaConfig.LiveWindow` (`yaml:"live-window,omitempty"`, no env tag) is an optional,
+  persisted `string` opting a context into scheduled keep-alive — presence, not a boolean, signals
+  opt-in; a `ParsedLiveWindow()` helper centralizes `time.ParseDuration` + bounds-check `[1m, 6d]`
+  (`Validate` rejects a set-but-invalid value; unset always passes; `IsEmpty()` treats it like any
+  other persisted field, i.e. it does **not** get zeroed the way `SessionCookie`/`Session` do).
 
 **internal/explore/** - Ad-hoc datasource query domain logic (no Cobra)
 - `dataframe.go`: wire structs (`QueryResponse`/`FrameResult`/`Frame`/`FrameSchema`/`FieldSchema`/
@@ -240,9 +274,38 @@ grafanapi follows the Cobra command pattern with six main command groups:
 - Request/response handling
 
 **internal/keychain/** - macOS Keychain credential store
-- `Store` interface (`Set`/`Get`/`Delete`) keyed by `"grafanapi:<context-name>"`
+- `Store` interface (`Set`/`Get`/`Delete`/`ModifiedAt`) keyed by `"grafanapi:<context-name>"`
 - Darwin-only cgo implementation against `Security.framework` (package build tag `darwin`);
   grafanapi does not build on any other platform
+- `ModifiedAt(account) (time.Time, error)` is the **last-rotation-time source** for keep-alive: the
+  Keychain item's `kSecAttrModificationDate` is updated by `securityd` on every `Set` (login, login
+  update, and every rotation), so it is exactly "the last time this context's cookie was
+  (re)written" with zero new persisted state. The darwin implementation queries
+  `SecItemCopyMatching` with `kSecReturnAttributes` and **no** `kSecReturnData`, so — unlike a real
+  `Get` — it never decrypts the secret and therefore does not trigger the Keychain ACL "Allow"
+  prompt; `config check` and the `--due` scheduler read it silently. Returns `ErrNotFound` when no
+  item exists.
+
+**internal/launchd/** - macOS launchd LaunchAgent management (no third-party plist library; plist
+generation is stdlib `text/template`, inspection is stdlib `encoding/xml` token scanning)
+- `spec.go`: `Label` (locked `io.github.avitsrimer.grafanapi.keepalive`), `AgentSpec`,
+  `DefaultAgentSpec` (`Args = session refresh --due` — **not** `--all`, so the scheduler honors each
+  context's own `live-window`), interval bounds `[1m, 6d]`
+- `paths.go`: home-based path helpers — plist at
+  `~/Library/LaunchAgents/io.github.avitsrimer.grafanapi.keepalive.plist`, log at
+  `~/Library/Logs/grafanapi/keepalive.log`
+- `plist.go`: `Generate` (XML-escaped binary/log paths, `RunAtLoad` false) and `Inspect` (Label,
+  StartInterval, ProgramArguments) round-trip a plist without any third-party dependency
+- `path.go`: `ResolveBinaryPath` — `os.Executable()` → `EvalSymlinks`, then prefers a stable
+  Homebrew symlink (`/opt/homebrew/bin/grafanapi` or `/usr/local/bin/grafanapi`) over a versioned
+  `Cellar`/`Caskroom` path, so the plist's absolute program path survives a `brew upgrade`
+- `controller.go`: `Controller` interface (`Bootstrap`/`Bootout`/`Print`) over `launchctl`'s modern
+  `gui/<uid>`/`gui/<uid>/<label>` targets; the real implementation shells out through an injectable
+  `commandFunc` seam (never a literal `exec.Command` selector, so no gosec G204 finding); tests use
+  `testutils.FakeController` and never invoke real `launchctl`
+- `session keepalive install` derives `StartInterval` as `min(live-window)/2` clamped to
+  `[15m, 12h]` unless `--interval` overrides it (bounded `[1m, 6d]`, never re-clamped to the
+  narrower derived range)
 
 **internal/session/** - Session cookie verification and stale-session errors
 - `VerifyCookie`: validates a cookie via `GET /api/user`

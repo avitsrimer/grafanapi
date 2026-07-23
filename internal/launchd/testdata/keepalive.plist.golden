@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.avitsrimer.grafanapi.keepalive</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/grafanapi</string>
+		<string>session</string>
+		<string>refresh</string>
+		<string>--due</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>43200</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/tester/Library/Logs/grafanapi/keepalive.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/tester/Library/Logs/grafanapi/keepalive.log</string>
+</dict>
+</plist>

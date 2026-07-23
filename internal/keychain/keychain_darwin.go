@@ -98,6 +98,45 @@ static int getItem(const char *service, const char *account, void **outData, int
 	return (int)status;
 }
 
+// getItemModDate reads the kSecAttrModificationDate attribute for service/account, without ever
+// requesting kSecReturnData: the query is attributes-only, so it does not decrypt the secret and
+// therefore does NOT trigger the Keychain "Allow / Always Allow" ACL prompt. On success it sets
+// *outUnixSeconds to the item's modification time converted from CFAbsoluteTime (seconds since
+// 2001-01-01) to Unix seconds (seconds since 1970-01-01) and returns errSecSuccess.
+static int getItemModDate(const char *service, const char *account, double *outUnixSeconds) {
+	CFStringRef svc = makeString(service);
+	CFStringRef acct = makeString(account);
+
+	CFMutableDictionaryRef q = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+		&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	CFDictionarySetValue(q, kSecClass, kSecClassGenericPassword);
+	CFDictionarySetValue(q, kSecAttrService, svc);
+	CFDictionarySetValue(q, kSecAttrAccount, acct);
+	CFDictionarySetValue(q, kSecReturnAttributes, kCFBooleanTrue);
+	CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
+
+	CFDictionaryRef result = NULL;
+	OSStatus status = SecItemCopyMatching(q, (CFTypeRef *)&result);
+	CFRelease(q);
+	CFRelease(acct);
+	CFRelease(svc);
+
+	if (status == errSecSuccess && result != NULL) {
+		CFDateRef modDate = (CFDateRef)CFDictionaryGetValue(result, kSecAttrModificationDate);
+		if (modDate != NULL) {
+			// kCFAbsoluteTimeIntervalSince1970 (978307200.0) converts CFAbsoluteTime (seconds
+			// since 2001-01-01) to Unix seconds (seconds since 1970-01-01).
+			*outUnixSeconds = CFDateGetAbsoluteTime(modDate) + 978307200.0;
+		} else {
+			status = errSecItemNotFound;
+		}
+	}
+	if (result != NULL) {
+		CFRelease(result);
+	}
+	return (int)status;
+}
+
 // deleteItem removes the item for service/account. errSecItemNotFound is treated as success by
 // the Go caller. Returns the OSStatus.
 static int deleteItem(const char *service, const char *account) {
@@ -198,6 +237,30 @@ func (darwinStore) Get(account string) (string, error) {
 		defer C.free(data)
 		secret := C.GoStringN((*C.char)(data), n)
 		return secret, nil
+	})
+}
+
+// ModifiedAt returns the last modification time of the item stored under account, read from the
+// item's kSecAttrModificationDate attribute (updated by securityd on every Set). The query
+// requests attributes only, never the secret data, so it does not trigger the Keychain
+// "Allow / Always Allow" prompt.
+func (darwinStore) ModifiedAt(account string) (time.Time, error) {
+	return withTimeout(keychainTimeout, func() (time.Time, error) {
+		cSvc := C.CString(Service)
+		defer C.free(unsafe.Pointer(cSvc))
+		cAcct := C.CString(account)
+		defer C.free(unsafe.Pointer(cAcct))
+
+		var unixSeconds C.double
+		status := C.getItemModDate(cSvc, cAcct, &unixSeconds)
+		if int(status) != 0 {
+			if int(status) == errSecItemNotFound {
+				return time.Time{}, fmt.Errorf("keychain modification date for account %q: %w", account, ErrNotFound)
+			}
+			return time.Time{}, fmt.Errorf("keychain modification date for account %q failed: OSStatus %d", account, int(status))
+		}
+
+		return time.Unix(int64(unixSeconds), 0), nil
 	})
 }
 

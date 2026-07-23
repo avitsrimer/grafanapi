@@ -42,6 +42,24 @@ grafanapi explore example-postgres "select 1 as n"
 grafanapi explore example-prometheus "up" -o json | jq '.results.A.frames[0].schema'
 ```
 
+## Example: keep a session alive
+
+Opt a context into scheduled keep-alive, then let a macOS LaunchAgent keep it warm:
+
+```shell
+# Opt a context in: keep its session no older than 12h
+grafanapi config set contexts.<name>.grafana.live-window 12h
+
+# Force a rotation right now for every context with a stored cookie
+grafanapi session refresh --all
+
+# Install a LaunchAgent that runs "session refresh --due" on a schedule
+grafanapi session keepalive install
+```
+
+See the [keep sessions alive guide](https://avitsrimer.github.io/grafanapi/guides/keep-sessions-alive/)
+for the full workflow and caveats.
+
 ## Documentation
 
 See [the documentation](https://avitsrimer.github.io/grafanapi/) to learn how to

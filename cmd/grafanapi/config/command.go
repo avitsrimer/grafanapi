@@ -3,8 +3,11 @@ package config
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
@@ -13,6 +16,7 @@ import (
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/grafana"
 	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/grafana/grafanapi/internal/launchd"
 	"github.com/grafana/grafanapi/internal/resources/discovery"
 	"github.com/grafana/grafanapi/internal/secrets"
 	"github.com/spf13/cobra"
@@ -34,6 +38,24 @@ func SetKeychainStore(store keychain.Store) func() {
 	keychainStore = store
 
 	return func() { keychainStore = previous }
+}
+
+// keepaliveController resolves the keep-alive LaunchAgent's launchctl-backed status (loaded?) for
+// "config check"'s Keep-alive section (checkKeepAlive). It is a package-level var, defaulting to
+// the real launchctl-backed controller, so tests can substitute a fake via
+// SetKeepaliveController instead of touching real launchd state.
+//
+//nolint:gochecknoglobals // test seam; see SetKeepaliveController
+var keepaliveController launchd.Controller = launchd.NewExecController()
+
+// SetKeepaliveController overrides the launchd.Controller used by "config check"'s Keep-alive
+// section. It exists for tests; it returns a function that restores the previously configured
+// controller.
+func SetKeepaliveController(controller launchd.Controller) func() {
+	previous := keepaliveController
+	keepaliveController = controller
+
+	return func() { keepaliveController = previous }
 }
 
 type Options struct {
@@ -334,6 +356,8 @@ func checkCmd(configOpts *Options) *cobra.Command {
 				checkContext(cmd, gCtx)
 			}
 
+			checkKeepAlive(cmd, cfg)
+
 			return nil
 		},
 	}
@@ -408,6 +432,67 @@ func checkContext(cmd *cobra.Command, gCtx *config.Context) {
 	}
 
 	io.Success(stdout, "Grafana version: %s", io.Green(version.String())+"\n")
+}
+
+// checkKeepAlive renders "config check"'s Keep-alive section: whether the keep-alive LaunchAgent
+// (internal/launchd; see "session keepalive") is installed and loaded, its interval and target
+// binary, and, per context, its "live-window" opt-in and last-rotation age (from the Keychain
+// item's modification time). Every launchd/Keychain inspection here is best-effort - an error
+// degrades the affected line to "unknown"/"none" rather than aborting, so "config check" always
+// exits 0 regardless of keep-alive status.
+func checkKeepAlive(cmd *cobra.Command, cfg config.Config) {
+	stdout := cmd.OutOrStdout()
+
+	title := "Keep-alive"
+	cmd.Println(io.Yellow(io.Bold(title)))
+	cmd.Println(io.Yellow(strings.Repeat("=", len(title))))
+
+	if _, err := os.Stat(launchd.PlistPath()); err != nil {
+		io.Warning(stdout, "LaunchAgent: %s", io.Yellow("not installed"))
+	} else {
+		loaded := "no"
+		if _, err := keepaliveController.Print(launchd.UserServiceTarget()); err == nil {
+			loaded = "yes"
+		}
+
+		interval := "unknown"
+		binary := "unknown"
+
+		if spec, err := launchd.Inspect(launchd.PlistPath()); err == nil {
+			interval = (time.Duration(spec.IntervalSeconds) * time.Second).String()
+			binary = spec.BinaryPath
+		} else {
+			io.Warning(stdout, "LaunchAgent: installed but could not be inspected: %s", err)
+		}
+
+		io.Success(stdout, "LaunchAgent: %s (loaded: %s, interval: %s, binary: %s)",
+			io.Green("installed"), loaded, interval, binary)
+	}
+
+	names := make([]string, 0, len(cfg.Contexts))
+	for name := range cfg.Contexts {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	for _, name := range names {
+		gCtx := cfg.Contexts[name]
+
+		liveWindow := "not set"
+		if gCtx != nil && gCtx.Grafana != nil && gCtx.Grafana.LiveWindow != "" {
+			liveWindow = gCtx.Grafana.LiveWindow
+		}
+
+		age := "none"
+		if modAt, err := keychainStore.ModifiedAt(keychain.Account(name)); err == nil {
+			age = fmt.Sprintf("rotated %s ago", time.Since(modAt).Round(time.Second))
+		}
+
+		io.Info(stdout, "  %s: live-window=%s, last-rotation=%s", io.Bold(name), liveWindow, age)
+	}
+
+	cmd.Println()
 }
 
 func useContextCmd(configOpts *Options) *cobra.Command {

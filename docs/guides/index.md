@@ -28,4 +28,10 @@ title: Usage
 
     Write, preview and deploy dashboards as code.
 
+-   :material-timer-sync-outline:{ .lg .middle } __[Keep sessions alive](./keep-sessions-alive.md)__
+
+    ---
+
+    Opt contexts into scheduled session keep-alive instead of relying on reactive rotation.
+
 </div>

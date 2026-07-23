@@ -6,6 +6,9 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/grafana/grafanapi/internal/durationbounds"
 )
 
 const (
@@ -90,6 +93,12 @@ type GrafanaConfig struct {
 	// TLS contains TLS-related configuration settings.
 	TLS *TLS `json:"tls,omitempty" yaml:"tls,omitempty"`
 
+	// LiveWindow opts this context into scheduled keep-alive and sets how fresh its session must
+	// be kept: a Go duration such as "12h", or a bare day count with a "d" suffix such as "6d" (a
+	// grafanapi extension - time.ParseDuration has no day unit); must be between 1m and 6d. Unset
+	// means the context is not kept alive on a schedule.
+	LiveWindow string `json:"live-window,omitempty" yaml:"live-window,omitempty"`
+
 	// SessionCookie holds the resolved Grafana session cookie (see
 	// internal/config.CookieHeaderValue) for the current context. It is populated at config-load
 	// time from the platform Keychain (internal/keychain) and is never serialized to disk: no env
@@ -145,6 +154,30 @@ func (grafana GrafanaConfig) validateNamespace(contextName string) error {
 	return nil
 }
 
+// ParsedLiveWindow parses LiveWindow (via durationbounds.ParseWithDays, which additionally accepts
+// a "6d"-style day suffix beyond standard Go durations) and validates it falls within
+// [durationbounds.Min, durationbounds.Max]. It returns (0, false, nil) when LiveWindow is unset
+// (the context has not opted into keep-alive), (d, true, nil) when it is set and valid, and a
+// descriptive error when it is set but unparseable or out of bounds. GrafanaConfig.Validate,
+// `config set` round-trips, `session refresh --due`'s due-selection, and `config check`'s
+// keep-alive section all call this helper so the parse+bounds rule stays in exactly one place.
+func (grafana GrafanaConfig) ParsedLiveWindow() (time.Duration, bool, error) {
+	if grafana.LiveWindow == "" {
+		return 0, false, nil
+	}
+
+	window, err := durationbounds.ParseWithDays(grafana.LiveWindow)
+	if err != nil {
+		return 0, false, fmt.Errorf("live-window: invalid duration %q: %w", grafana.LiveWindow, err)
+	}
+
+	if window < durationbounds.Min || window > durationbounds.Max {
+		return 0, false, fmt.Errorf("live-window: %s must be between %s and %s", grafana.LiveWindow, durationbounds.Min, durationbounds.Max)
+	}
+
+	return window, true, nil
+}
+
 func (grafana GrafanaConfig) Validate(contextName string) error {
 	if grafana.Server == "" {
 		return ValidationError{
@@ -158,6 +191,16 @@ func (grafana GrafanaConfig) Validate(contextName string) error {
 
 	if err := grafana.validateNamespace(contextName); err != nil {
 		return err
+	}
+
+	if _, _, err := grafana.ParsedLiveWindow(); err != nil {
+		return ValidationError{
+			Path:    fmt.Sprintf("$.contexts.'%s'.grafana.live-window", contextName),
+			Message: err.Error(),
+			Suggestions: []string{
+				"Use a Go duration between 1m and 6d, e.g. 12h",
+			},
+		}
 	}
 
 	return nil
