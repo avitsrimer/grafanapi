@@ -12,7 +12,10 @@
 // no credential-agent daemon — every call goes straight to the Keychain.
 package keychain
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Service is the generic-password service string for every item this package manages.
 const Service = "grafanapi"
@@ -49,4 +52,10 @@ type Store interface {
 	Get(account string) (string, error)
 	// Delete removes the item for account; a missing item is not an error.
 	Delete(account string) error
+	// ModifiedAt returns the item's last modification time for account, or ErrNotFound if no item
+	// exists. It is updated by securityd on every Set (both the create and the update path), so it
+	// doubles as "the last time this context's cookie was (re)written" with no new persisted
+	// state. The lookup reads item attributes only (never the secret data), so it does not trigger
+	// the Keychain "Allow / Always Allow" prompt.
+	ModifiedAt(account string) (time.Time, error)
 }

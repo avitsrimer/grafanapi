@@ -493,24 +493,24 @@ test seam.
   `cmd/grafanapi/config/command_test.go` (`fakeKeychainStore`),
   `cmd/grafanapi/login/command_test.go` (`fakeKeychainStore`)
 
-- [ ] Add the `live-window` `string` field (`yaml:"live-window,omitempty"`, no env tag) with an
+- [x] Add the `live-window` `string` field (`yaml:"live-window,omitempty"`, no env tag) with an
       **explicit GoDoc comment** (the config-reference generator renders it as user-facing text and
       the linter requires it) + a parse/bounds helper (`ParsedLiveWindow`), wire it into
       `GrafanaConfig.Validate` (set-but-invalid or out-of-`[1m,6d]` → `ValidationError`), and confirm
       `IsEmpty()` treats it correctly.
-- [ ] Add `ModifiedAt(account) (time.Time, error)` to `keychain.Store`; implement the darwin cgo
+- [x] Add `ModifiedAt(account) (time.Time, error)` to `keychain.Store`; implement the darwin cgo
       `getItemModDate` (attributes-only `SecItemCopyMatching`, `kSecAttrModificationDate` → Unix
       seconds, `errSecItemNotFound` → `ErrNotFound`), documenting the no-prompt property.
-- [ ] Extend `FakeKeychainStore` with injectable mtimes (`SetModified`, `Set` updates mtime) +
+- [x] Extend `FakeKeychainStore` with injectable mtimes (`SetModified`, `Set` updates mtime) +
       `ModifiedAt`; add a trivial `ModifiedAt` to the whitebox `fakeStore`.
-- [ ] Add trivial `ModifiedAt` stubs to the four unlisted `Store` implementers above (`nopStore`,
+- [x] Add trivial `ModifiedAt` stubs to the four unlisted `Store` implementers above (`nopStore`,
       the two `fakeKeychainStore`s in cmd tests, and `credentials_test.go`'s `fakeKeychainStore`);
       `panickingStore` inherits via its embedded `*fakeStore`, so it needs none. This unblocks every
       package's compilation for the Task-2 gate.
-- [ ] Tests: validation (invalid, `[1m,6d]` bounds, unset); `ParsedLiveWindow` cases; `config set
+- [x] Tests: validation (invalid, `[1m,6d]` bounds, unset); `ParsedLiveWindow` cases; `config set
       contexts.x.grafana.live-window 12h` round-trip; fake `ModifiedAt` returns set/injected mtime and
       `ErrNotFound` otherwise.
-- [ ] Run tests (all packages — must compile with the grown interface) — must pass before next task.
+- [x] Run tests (all packages — must compile with the grown interface) — must pass before next task.
 
 ### Task 3 — `internal/launchd`: spec, paths, and plist generation
 

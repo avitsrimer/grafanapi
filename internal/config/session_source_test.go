@@ -78,6 +78,13 @@ func (f *fakeStore) Delete(account string) error {
 	return nil
 }
 
+// ModifiedAt is a trivial stub satisfying the grown keychain.Store interface: this test file
+// exercises rotation/single-flight behavior, not last-rotation-time lookups, so a fixed zero-value
+// response (mirroring "no item found") is sufficient.
+func (f *fakeStore) ModifiedAt(string) (time.Time, error) {
+	return time.Time{}, keychain.ErrNotFound
+}
+
 // value returns the secret stored under testAccount, the fixed account name every test in this
 // file uses.
 func (f *fakeStore) value() (string, bool) {

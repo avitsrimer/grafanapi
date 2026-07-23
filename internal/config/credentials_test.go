@@ -3,6 +3,7 @@ package config_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/keychain"
@@ -42,6 +43,12 @@ func (f *fakeKeychainStore) Get(account string) (string, error) {
 func (f *fakeKeychainStore) Delete(account string) error {
 	delete(f.cookies, account)
 	return nil
+}
+
+// ModifiedAt is a trivial stub satisfying the grown keychain.Store interface: these tests never
+// exercise last-rotation-time lookups.
+func (f *fakeKeychainStore) ModifiedAt(string) (time.Time, error) {
+	return time.Time{}, keychain.ErrNotFound
 }
 
 func Test_ResolveSessionCookie_populatesCurrentContext(t *testing.T) {

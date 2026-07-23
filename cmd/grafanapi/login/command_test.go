@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
 	"github.com/grafana/grafanapi/cmd/grafanapi/login"
@@ -58,6 +59,12 @@ func (f *fakeKeychainStore) Delete(account string) error {
 	delete(f.cookies, account)
 
 	return nil
+}
+
+// ModifiedAt is a trivial stub satisfying the grown keychain.Store interface: these tests never
+// exercise last-rotation-time lookups.
+func (f *fakeKeychainStore) ModifiedAt(string) (time.Time, error) {
+	return time.Time{}, keychain.ErrNotFound
 }
 
 // fakePrompter feeds canned answers (or a canned error) to login's server/cookie prompts, and

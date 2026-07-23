@@ -2,6 +2,7 @@ package testutils
 
 import (
 	"sync"
+	"time"
 
 	"github.com/grafana/grafanapi/internal/keychain"
 )
@@ -13,19 +14,22 @@ import (
 type FakeKeychainStore struct {
 	mu     sync.Mutex
 	values map[string]string
+	mtimes map[string]time.Time
 }
 
 // NewFakeKeychainStore returns an empty FakeKeychainStore.
 func NewFakeKeychainStore() *FakeKeychainStore {
-	return &FakeKeychainStore{values: map[string]string{}}
+	return &FakeKeychainStore{values: map[string]string{}, mtimes: map[string]time.Time{}}
 }
 
-// Set stores secret under account.
+// Set stores secret under account and records the current time as its modification time, mirroring
+// the real Keychain's securityd-managed kSecAttrModificationDate being updated on every write.
 func (f *FakeKeychainStore) Set(account, secret string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.values[account] = secret
+	f.mtimes[account] = time.Now()
 
 	return nil
 }
@@ -49,8 +53,37 @@ func (f *FakeKeychainStore) Delete(account string) error {
 	defer f.mu.Unlock()
 
 	delete(f.values, account)
+	delete(f.mtimes, account)
 
 	return nil
+}
+
+// ModifiedAt returns the mtime recorded for account (either injected via SetModified or set by the
+// most recent Set), or keychain.ErrNotFound if no item exists.
+func (f *FakeKeychainStore) ModifiedAt(account string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	mtime, ok := f.mtimes[account]
+	if !ok {
+		return time.Time{}, keychain.ErrNotFound
+	}
+
+	return mtime, nil
+}
+
+// SetModified injects mtime as the modification time for account, without affecting its stored
+// secret. It lets tests control "last rotation age" precisely (fresh vs. stale) independently of
+// when Set was actually called.
+func (f *FakeKeychainStore) SetModified(account string, mtime time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.mtimes == nil {
+		f.mtimes = map[string]time.Time{}
+	}
+
+	f.mtimes[account] = mtime
 }
 
 // Value returns the secret currently stored under account, for test assertions.

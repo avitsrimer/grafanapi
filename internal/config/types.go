@@ -6,11 +6,21 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
 )
 
 const (
 	// DefaultContextName is the name of the default context.
 	DefaultContextName = "default"
+
+	// minLiveWindow is the smallest live-window a context may declare. Mirrored by the interval
+	// bounds in internal/launchd (kept separate to avoid a config->launchd import edge); the two
+	// must stay in sync at [1m, 6d].
+	minLiveWindow = time.Minute
+	// maxLiveWindow is the largest live-window a context may declare. See minLiveWindow.
+	maxLiveWindow = 6 * 24 * time.Hour
 )
 
 // Config holds the information needed to connect to remote Grafana instances.
@@ -90,6 +100,11 @@ type GrafanaConfig struct {
 	// TLS contains TLS-related configuration settings.
 	TLS *TLS `json:"tls,omitempty" yaml:"tls,omitempty"`
 
+	// LiveWindow opts this context into scheduled keep-alive and sets how fresh its session must
+	// be kept (a Go duration such as "12h"; must be between 1m and 6d). Unset means the context is
+	// not kept alive on a schedule.
+	LiveWindow string `json:"live-window,omitempty" yaml:"live-window,omitempty"`
+
 	// SessionCookie holds the resolved Grafana session cookie (see
 	// internal/config.CookieHeaderValue) for the current context. It is populated at config-load
 	// time from the platform Keychain (internal/keychain) and is never serialized to disk: no env
@@ -145,6 +160,29 @@ func (grafana GrafanaConfig) validateNamespace(contextName string) error {
 	return nil
 }
 
+// ParsedLiveWindow parses LiveWindow and validates it falls within [1m, 6d]. It returns
+// (0, false, nil) when LiveWindow is unset (the context has not opted into keep-alive),
+// (d, true, nil) when it is set and valid, and a descriptive error when it is set but
+// unparseable or out of bounds. GrafanaConfig.Validate, `config set` round-trips, `session
+// refresh --due`'s due-selection, and `config check`'s keep-alive section all call this helper
+// so the parse+bounds rule stays in exactly one place.
+func (grafana GrafanaConfig) ParsedLiveWindow() (time.Duration, bool, error) {
+	if grafana.LiveWindow == "" {
+		return 0, false, nil
+	}
+
+	window, err := parseDurationWithDays(grafana.LiveWindow)
+	if err != nil {
+		return 0, false, fmt.Errorf("live-window: invalid duration %q: %w", grafana.LiveWindow, err)
+	}
+
+	if window < minLiveWindow || window > maxLiveWindow {
+		return 0, false, fmt.Errorf("live-window: %s must be between %s and %s", grafana.LiveWindow, minLiveWindow, maxLiveWindow)
+	}
+
+	return window, true, nil
+}
+
 func (grafana GrafanaConfig) Validate(contextName string) error {
 	if grafana.Server == "" {
 		return ValidationError{
@@ -158,6 +196,16 @@ func (grafana GrafanaConfig) Validate(contextName string) error {
 
 	if err := grafana.validateNamespace(contextName); err != nil {
 		return err
+	}
+
+	if _, _, err := grafana.ParsedLiveWindow(); err != nil {
+		return ValidationError{
+			Path:    fmt.Sprintf("$.contexts.'%s'.grafana.live-window", contextName),
+			Message: err.Error(),
+			Suggestions: []string{
+				"Use a Go duration between 1m and 6d, e.g. 12h",
+			},
+		}
 	}
 
 	return nil
@@ -262,4 +310,31 @@ func Minify(config Config) (Config, error) {
 	}
 
 	return minified, nil
+}
+
+// parseDurationWithDays parses s as a time.Duration, additionally accepting a bare "d" (day) unit
+// suffix (e.g. "6d", "1.5d") that the standard library's time.ParseDuration deliberately does not
+// support (a day is not always exactly 24h once time zones/DST are involved; grafanapi treats it
+// as exactly 24h here, which is precise enough for a keep-alive scheduling window). This lets
+// live-window (and, mirrored in internal/launchd, --interval) express its documented [1m, 6d]
+// bounds in the most readable unit at either end.
+func parseDurationWithDays(s string) (time.Duration, error) {
+	if window, err := time.ParseDuration(s); err == nil {
+		return window, nil
+	}
+
+	days, ok := strings.CutSuffix(s, "d")
+	if !ok {
+		// Return time.ParseDuration's own error: it is more descriptive than a generic one, and
+		// callers only see it when both the plain and the "d"-suffixed forms failed.
+		_, err := time.ParseDuration(s)
+		return 0, err
+	}
+
+	count, err := strconv.ParseFloat(days, 64)
+	if err != nil {
+		return 0, fmt.Errorf("time: invalid day count in duration %q: %w", s, err)
+	}
+
+	return time.Duration(count * float64(24*time.Hour)), nil
 }

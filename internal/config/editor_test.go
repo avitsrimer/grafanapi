@@ -93,6 +93,19 @@ func Test_SetValue(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:  "live-window in new context",
+			input: config.Config{},
+			path:  "contexts.new.grafana.live-window",
+			value: "12h",
+			expectedOutput: config.Config{
+				Contexts: map[string]*config.Context{
+					"new": {
+						Grafana: &config.GrafanaConfig{LiveWindow: "12h"},
+					},
+				},
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
