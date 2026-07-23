@@ -610,18 +610,24 @@ test seam.
 **Files:**
 - Create: `cmd/grafanapi/session/keepalive.go`, `cmd/grafanapi/session/keepalive_test.go`
 
-- [ ] `install`: **error if no context has `live-window`** (helpful "set ... first" message); else
+- [x] `install`: **error if no context has `live-window`** (helpful "set ... first" message); else
       StartInterval = `--interval` (validated `[1m,6d]`) or derived `min(live-window)/2` clamped to
       `[15m,12h]`; resolve binary; write plist (`Args = session refresh --due`); `Bootout`→`Bootstrap`
       via the seam; graceful fallback on `Bootstrap` failure; idempotent.
-- [ ] `status`: `io.Options` (`text` default + `json`/`yaml`); gather `statusReport` from `os.Stat`+
+- [x] `status`: `io.Options` (`text` default + `json`/`yaml`); gather `statusReport` from `os.Stat`+
       `Inspect`+`controller.Print`+log tail; verbatim log tail.
-- [ ] `uninstall`: `Bootout`+`os.Remove`, both idempotent; ✔ even when absent.
-- [ ] Tests (fake controller + temp `HOME` + fake Keychain + temp config): install-with-window writes
+- [x] `uninstall`: `Bootout`+`os.Remove`, both idempotent; ✔ even when absent.
+- [x] Tests (fake controller + temp `HOME` + fake Keychain + temp config): install-with-window writes
       plist + Bootout→Bootstrap + correct derived interval + idempotent; **install-without-any-window
       errors**; `--interval` override + bounds (`30s`/`7d` rejected, `1m`/`6d` accepted); status
       installed+loaded vs not-installed + `-o json` decode; uninstall removes plist + idempotent.
-- [ ] Run tests — must pass before next task.
+      (Fake Keychain was not needed for this task's tests — install/status/uninstall touch only
+      launchd/config, not the Keychain; per-context Keychain-derived state is Task 9's `config check`
+      section.)
+- [x] Run tests — must pass before next task. (`go test -race ./...` all pass;
+      `golangci-lint run -c .golangci.yaml ./...` exactly 14 findings matching the baseline
+      (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck); `go build ./...`, `go build -o bin/grafanapi
+      ./cmd/grafanapi`, and `goreleaser check` all pass.)
 
 ### Task 9 — `config check` keep-alive status section
 

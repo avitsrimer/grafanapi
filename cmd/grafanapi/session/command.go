@@ -8,8 +8,6 @@
 package session
 
 import (
-	"fmt"
-
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/launchd"
@@ -98,31 +96,4 @@ func (opts *Options) configSource() config.Source {
 	}
 
 	return config.StandardLocation()
-}
-
-// keepaliveCommand returns the `session keepalive` command. This is a placeholder: the real
-// install/status/uninstall subcommands land in keepalive.go in a later task.
-func keepaliveCommand(_ *Options) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "keepalive",
-		Short: "Schedule session refresh through a macOS LaunchAgent",
-		Long: `Schedule "session refresh --due" through a macOS launchd LaunchAgent, so contexts that
-opt in via the "live-window" configuration field stay warm without any manual action.`,
-	}
-
-	notImplemented := func(use, short string) *cobra.Command {
-		return &cobra.Command{
-			Use:   use,
-			Short: short,
-			RunE: func(*cobra.Command, []string) error {
-				return fmt.Errorf("session keepalive %s: not yet implemented", use)
-			},
-		}
-	}
-
-	cmd.AddCommand(notImplemented("install", "Install the keep-alive LaunchAgent"))
-	cmd.AddCommand(notImplemented("status", "Show the keep-alive LaunchAgent's status"))
-	cmd.AddCommand(notImplemented("uninstall", "Remove the keep-alive LaunchAgent"))
-
-	return cmd
 }
