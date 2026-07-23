@@ -532,14 +532,14 @@ test seam.
 - Create: `internal/launchd/path.go`, `internal/launchd/path_test.go`
 - Modify: `internal/launchd/plist.go`, `internal/launchd/plist_test.go`
 
-- [ ] `ResolveBinaryPath()` with `os.Executable`→`EvalSymlinks`→Homebrew-stable-symlink preference
+- [x] `ResolveBinaryPath()` with `os.Executable`→`EvalSymlinks`→Homebrew-stable-symlink preference
       behind a `fileSystem` seam; document the survives-`brew upgrade` rationale.
-- [ ] Table test: plain passthrough; Cellar + matching symlink → symlink; Cellar + no symlink →
+- [x] Table test: plain passthrough; Cellar + matching symlink → symlink; Cellar + no symlink →
       resolved path; `os.Executable` error propagates.
-- [ ] `Inspect(plistPath)` via `encoding/xml` token scanning (Label, StartInterval, ProgramArguments);
+- [x] `Inspect(plistPath)` via `encoding/xml` token scanning (Label, StartInterval, ProgramArguments);
       malformed/absent → clear error.
-- [ ] Test `Inspect` round-trips the golden plist and errors on truncated/missing input.
-- [ ] Run tests — must pass before next task.
+- [x] Test `Inspect` round-trips the golden plist and errors on truncated/missing input.
+- [x] Run tests — must pass before next task.
 
 ### Task 5 — `internal/launchd`: the `launchctl` Controller seam
 
