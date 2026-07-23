@@ -57,6 +57,10 @@ contexts:
           - string
           - ...
           
+      # LiveWindow opts this context into scheduled keep-alive and sets how fresh its session must
+      # be kept (a Go duration such as "12h"; must be between 1m and 6d). Unset means the context is
+      # not kept alive on a schedule.
+      live-window: string
       
 # CurrentContext is the name of the context currently in use.
 current-context: string

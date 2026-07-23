@@ -653,21 +653,49 @@ test seam.
 **Files:**
 - Modify: none (verification only; fix regressions in-place if found)
 
-- [ ] `make tests` (race) passes across all packages (fall back to `go test -race ./...` if `devbox`
-      is unavailable, as prior plans did).
-- [ ] `make build` produces `./bin/grafanapi` on darwin/arm64; `grafanapi session --help`, `session
+- [x] `make tests` (race) passes across all packages (fall back to `go test -race ./...` if `devbox`
+      is unavailable, as prior plans did). (`devbox` not installed in this environment; ran
+      `go test -race ./...` directly — every package passes, including `cmd/grafanapi/session` and
+      `internal/launchd`.)
+- [x] `make build` produces `./bin/grafanapi` on darwin/arm64; `grafanapi session --help`, `session
       refresh --help` (`--all`/`--due`), and `session keepalive install|status|uninstall --help`
-      (`--interval`/`-o`) all render with the documented flags.
-- [ ] `make lint` passes with **no new findings** vs the 14-finding baseline (5 gosec, 3 govet, 1
+      (`--interval`/`-o`) all render with the documented flags. (Ran `go build` directly with the
+      Makefile's `-ldflags` (`main.version`/`main.commit`/`main.date`) to `./bin/grafanapi`; confirmed
+      `file bin/grafanapi` reports "Mach-O 64-bit executable arm64"; exercised all six `--help`
+      surfaces — `session`, `session refresh` (shows `--all`/`--due`), `session keepalive`, `session
+      keepalive install` (shows `--interval`), `session keepalive status` (shows `-o/--output`),
+      `session keepalive uninstall` — all render correctly with documented flags.)
+- [x] `make lint` passes with **no new findings** vs the 14-finding baseline (5 gosec, 3 govet, 1
       nolintlint, 5 staticcheck); diff `golangci-lint run -c .golangci.yaml ./...` and annotate any
       unavoidable new finding (e.g. gosec G204 on the `launchctl` exec, or the new cgo) with a
-      justified `//nolint` + comment recorded here.
-- [ ] `goreleaser check` passes.
-- [ ] **Reference docs (MANDATORY):** `make cli-reference` (new `session*` pages + `grafanapi.md`
+      justified `//nolint` + comment recorded here. (Ran `golangci-lint run -c .golangci.yaml ./...`
+      directly — exactly 14 findings (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck), all in
+      pre-existing files (`internal/server/grafana/requests.go`, `scripts/cmd-reference/main.go`,
+      `scripts/env-vars-reference/main.go`, `internal/config/editor.go`,
+      `internal/httputils/client.go`, `cmd/grafanapi/fail/detailed.go`, `scripts/config-reference/
+      main.go`) — none in `internal/launchd`, `cmd/grafanapi/session`, or the `live-window`/
+      `ModifiedAt` additions. No new `//nolint` annotation was needed.)
+- [x] `goreleaser check` passes. (Ran `goreleaser check` directly — "1 configuration file(s)
+      validated".)
+- [x] **Reference docs (MANDATORY):** `make cli-reference` (new `session*` pages + `grafanapi.md`
       index), `make config-reference` (picks up `live-window`), `make env-var-reference`; then `make
       reference-drift` passes with the regenerated files staged. If `devbox` is unavailable, run the
-      underlying `go run scripts/*-reference/*.go ...` directly.
-- [ ] `go clean -testcache && go test -race ./...` once more — must pass before the docs task.
+      underlying `go run scripts/*-reference/*.go ...` directly. (`devbox` unavailable; ran
+      `go run scripts/cmd-reference/*.go`, `scripts/config-reference/*.go`, and
+      `scripts/env-vars-reference/*.go` directly against fresh output dirs. Generated 6 new CLI pages
+      (`grafanapi_session.md`, `grafanapi_session_refresh.md`, `grafanapi_session_keepalive.md`,
+      `grafanapi_session_keepalive_install.md`, `..._status.md`, `..._uninstall.md`), updated
+      `grafanapi.md`'s index, and added the `live-window` field (with its GoDoc-derived description) to
+      `docs/reference/configuration/index.md`. Confirmed **idempotent** regeneration (md5sum of every
+      output file identical across two consecutive runs). Reviewed all diffs/new files for security:
+      no company names, internal hostnames, or credential values present. These regenerated files are
+      staged and committed with this task (drift w.r.t. the pre-this-commit `HEAD` is expected and is
+      exactly what this task's regeneration resolves).
+
+- [x] `go clean -testcache && go test -race ./...` once more — must pass before the docs task. (Ran
+      after the reference-docs regeneration above — all packages pass again with a clean cache; no
+      regressions found. No production code changes were needed in this task; only reference-doc
+      artifacts changed.)
 
 ### Task 11 — Update documentation and complete the plan
 
