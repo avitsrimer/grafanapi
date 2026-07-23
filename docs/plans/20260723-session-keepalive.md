@@ -545,14 +545,29 @@ test seam.
 
 **Files:**
 - Create: `internal/launchd/controller.go`, `internal/launchd/controller_test.go`
+- ➕ Create: `internal/testutils/launchd.go` (the reusable `FakeController`, following the exact
+  precedent of `internal/testutils/keychain.go`'s `FakeKeychainStore` — a fake needed by
+  `cmd/grafanapi/session` and `cmd/grafanapi/config` tests in Tasks 7–9 must live in a regular,
+  non-`_test.go`, importable package, not inside `controller_test.go`)
 
-- [ ] `Controller` interface + `UserDomainTarget`/`UserServiceTarget` (uid from `os.Getuid()`) +
+- [x] `Controller` interface + `UserDomainTarget`/`UserServiceTarget` (uid from `os.Getuid()`) +
       `execController`/`NewExecController` shelling to `launchctl` with fixed subcommands (justified
-      `//nolint:gosec` if G204 flags it).
-- [ ] Test target formatting against a stubbed uid; test `execController` argv construction **without**
-      running real `launchctl`.
-- [ ] Provide a reusable `fakeController` (recording calls, scripted returns) for Tasks 7–9.
-- [ ] Run tests — must pass before next task.
+      `//nolint:gosec` if G204 flags it). (G204 did not fire: the shell-out goes through an
+      injectable `commandFunc` seam rather than a literal `exec.Command`/`exec.CommandContext`
+      selector, so no `//nolint:gosec` was needed or added — verified against the 14-finding lint
+      baseline, see below.)
+- [x] Test target formatting against a stubbed uid; test `execController` argv construction **without**
+      running real `launchctl`. (Implemented via the `commandFunc`/`SetCommandFunc` seam: tests
+      substitute a fake that records argv and returns `exec.CommandContext(ctx, "true"/"false")`
+      instead of ever invoking `launchctl`.)
+- [x] Provide a reusable `fakeController` (recording calls, scripted returns) for Tasks 7–9.
+      (`testutils.FakeController` in `internal/testutils/launchd.go`, satisfying
+      `launchd.Controller`; a compile-time `var _ launchd.Controller = (*FakeController)(nil)`
+      check pins the contract.)
+- [x] Run tests — must pass before next task. (`go test -race ./...` — all packages pass;
+      `golangci-lint run -c .golangci.yaml ./...` — exactly 14 findings, matching the baseline
+      (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck); `go build -buildvcs=false -o bin/grafanapi
+      ./cmd/grafanapi` and `goreleaser check` both pass.)
 
 ### Task 6 — `session` parent, `Options`, seams, and root registration
 
