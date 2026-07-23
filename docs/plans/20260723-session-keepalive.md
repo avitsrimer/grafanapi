@@ -587,20 +587,23 @@ test seam.
 **Files:**
 - Create: `cmd/grafanapi/session/refresh.go`, `cmd/grafanapi/session/refresh_test.go`
 
-- [ ] Implement `refreshCmd` with `--all`/`--due` (mutually exclusive with each other and
+- [x] Implement `refreshCmd` with `--all`/`--due` (mutually exclusive with each other and
       `--context`), config load via `config.Load`, and the shared per-context `refreshContext` helper.
-- [ ] Implement the **pure** `dueContexts(cfg, now, modAt)` selector (unset skip; invalid-window
+- [x] Implement the **pure** `dueContexts(cfg, now, modAt)` selector (unset skip; invalid-window
       warn+skip; `ErrNotFound` skip; select iff `now-lastRotation >= window`) and wire `--due` to it
       (`keychainStore.ModifiedAt` as `modAt`, `time.Now()` as `now`), emitting warnings and a
       "nothing due" success when empty.
-- [ ] Implement exit-code mapping: single rejection → `*runtime.APIError{401}` (exit 2); `--all`/
+- [x] Implement exit-code mapping: single rejection → `*runtime.APIError{401}` (exit 2); `--all`/
       `--due` aggregate (attempt all; auth ⇒ 2, non-auth-only ⇒ 1, else 0); cookie never in output.
-- [ ] Tests (httptest + fake Keychain + temp config): single `200` ✔/exit 0/no-cookie; single `401`
+- [x] Tests (httptest + fake Keychain + temp config): single `200` ✔/exit 0/no-cookie; single `401`
       exit 2; `--all` live+dead+no-cookie → both attempted, exit 2; `--all` network-only → exit 1;
       **`--due` with fake mtimes** (fresh+stale+unset) → only stale rotated (exit 0); `--due` dead
       due-context → exit 2. Plus a **direct** table-driven test of `dueContexts` (fake clock/mtimes)
       covering every branch.
-- [ ] Run tests — must pass before next task.
+- [x] Run tests — must pass before next task. (`go test -race ./...` all pass;
+      `golangci-lint run -c .golangci.yaml ./...` exactly 14 findings matching the baseline
+      (5 gosec, 3 govet, 1 nolintlint, 5 staticcheck); `go build ./...` and `goreleaser check`
+      both pass.)
 
 ### Task 8 — `session keepalive install / status / uninstall`
 

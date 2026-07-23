@@ -8,7 +8,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/grafana/grafanapi/internal/config"
@@ -99,24 +98,6 @@ func (opts *Options) configSource() config.Source {
 	}
 
 	return config.StandardLocation()
-}
-
-// refreshCmd returns the `session refresh` command. This is a placeholder: the real
-// implementation (unconditional refresh, --all, --due) lands in refresh.go in a later task.
-func refreshCmd(opts *Options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "refresh",
-		Short: "Force a Grafana session rotation now",
-		Long: `Force a Grafana session rotation now, reusing the same rotation and Keychain-persist
-path as the automatic 401-triggered rotation.`,
-		RunE: func(*cobra.Command, []string) error {
-			// opts.configSource() is exercised here only to keep the seam wired for the real
-			// implementation that replaces this stub; the stub itself does not load configuration.
-			_ = opts.configSource()
-
-			return errors.New("session refresh: not yet implemented")
-		},
-	}
 }
 
 // keepaliveCommand returns the `session keepalive` command. This is a placeholder: the real
