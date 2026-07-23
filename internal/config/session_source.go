@@ -138,6 +138,22 @@ func (s *SessionSource) Rotate(ctx context.Context, usedGen uint64) (string, err
 	return newCookie, nil
 }
 
+// Refresh forces a rotation now, regardless of staleness, reusing the same single-flight rotate +
+// Keychain-persist path as the automatic 401-triggered rotation (see Rotate). It is safe to call
+// concurrently with an in-flight 401 rotation: it joins that rotation rather than starting a second
+// one.
+//
+// Refresh cannot be "missed": Rotate's only short-circuit fires when s.gen has already advanced
+// past the generation observed here, which can only happen if a peer rotation completed in the tiny
+// window between Current and Rotate re-acquiring mu - in which case returning that just-completed
+// rotation's cookie is correct, not a skipped refresh. In the common case (no concurrent rotation)
+// s.gen is unchanged and Rotate always performs a real network rotation.
+func (s *SessionSource) Refresh(ctx context.Context) (string, error) {
+	_, gen := s.Current()
+
+	return s.Rotate(ctx, gen)
+}
+
 // WrapWithSession returns the RoundTripper used to inject (and, when possible, rotate) the
 // Grafana session cookie for every outbound request built from cfg. It is the single mechanism
 // shared by every transport path (k8s dynamic client, openapi client, serve reverse proxy):
