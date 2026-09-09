@@ -81,7 +81,7 @@ make clean
 
 ### Command Structure
 
-grafanapi follows the Cobra command pattern with seven main command groups:
+grafanapi follows the Cobra command pattern with eight main command groups:
 
 1. **login**: Authenticate to a Grafana instance using a session cookie
    - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
@@ -133,6 +133,41 @@ grafanapi follows the Cobra command pattern with seven main command groups:
      keep-alive log (never contains a cookie)
    - `session keepalive uninstall`: boot the LaunchAgent out and remove its plist, idempotently
 
+8. **alerts**: Read-only access to Grafana Unified Alerting. Every parent in the group (`alerts`,
+   `alerts rules`, `alerts contact-points`) has no `RunE`, so a bare invocation prints help and
+   exits 0; `alerts` carries `--config`/`--context` as persistent flags. No write method of the
+   generated client's provisioning service is wired anywhere in the group.
+   - `alerts rules list`: join rule **definitions** (`GET /api/v1/provisioning/alert-rules`, via the
+     generated client) with live **evaluation state**
+     (`GET /api/prometheus/grafana/api/v1/rules`, raw HTTP) on rule `uid`, so one command answers
+     both "what is defined" and "what is firing". Renders
+     FOLDER/GROUP/TITLE/UID/TYPE/STATE/HEALTH/FOR/PAUSED/ALERTS as a table (default) or
+     `json`/`yaml`. FOLDER is the folder's **full path** (`Parent/Child`), which is what the state
+     endpoint's `file` field carries — per rule for a rule it lists, and per *folder*
+     (`folderUid` → `file` on each group) for one it does not, so an unevaluated rule still shows a
+     FOLDER and is still reachable by `--folder <path>`; the residual gap is a folder with **no**
+     group in the state response at all (every rule in it unevaluated), which has no path anywhere
+     in the payload and stays UID-only. Client-side filters `--folder` (folder UID, full path, **or**
+     the path's last segment — exact and case-sensitive; a parent never matches its children, while
+     the last-segment form matches the folder *title* and therefore spans every folder with that
+     title, `Reports` selecting both `A/Reports` and `B/Reports`) and
+     `--state` (single value, trimmed/lowercased, `normal` aliased to `inactive`, matched
+     case-insensitively against the endpoint's verbatim state, validated by the
+     one `alerts.ValidateState` both layers call, against `alerts.KnownStates()` =
+     `firing|pending|recovering|inactive|unknown|recording|unavailable`). Both filters depend on the
+     state call: if it fails (non-401) they **fail the command** instead of degrading — the two
+     exceptions are `--state recording` and `--state unavailable`, the only values decided without
+     the state view. See `stateDependentFilter`. A degraded run stamps STATE `unavailable` (never
+     `unknown`) on every alerting rule, which is the **machine-readable** signal that the state half
+     was never fetched — the warning goes to stderr, invisible to `-o json | jq`
+   - `alerts contact-points list`: `GET /api/v1/provisioning/contact-points` via the generated
+     client, sorted by name (UID as tie-break — Grafana allows duplicate names), rendered as
+     NAME/TYPE/UID/PROVENANCE or `json`/`yaml`. Contact points are **org-scoped**, not
+     folder-scoped. Grafana redacts each type's **schema-declared secure fields** as
+     `"[REDACTED]"` server-side — a credential embedded in a webhook URL or a custom header is not
+     a secure field and comes back verbatim, so no doc may call `settings` secret-free; it is a
+     json/yaml-only field
+
 ### Core Packages
 
 **cmd/grafanapi/** - CLI command implementations
@@ -157,6 +192,23 @@ grafanapi follows the Cobra command pattern with seven main command groups:
   completed `explore` plan did for its own dead-session path. `keepalive.go` derives the LaunchAgent
   spec from `internal/launchd` and shells out only through the `Controller` seam — never real
   `launchctl` in tests.
+- `alerts/`: `alerts rules list` / `alerts contact-points list` — thin Cobra wiring over
+  `internal/alerts`, mirroring `datasources`/`explore`: flag binding, a fast pre-network `--state`
+  check that calls the same `internal/alerts.ValidateState` `ListRules` uses (so the message and
+  the accepted set have one source, while the domain function stays safe for non-Cobra callers),
+  and two `table` `format.Codec` adapters. `table.go` holds the shared seam both codecs use — a
+  single `tableFormat` const (the one source for both `RegisterCustomCodec` and `DefaultFormat`),
+  `newTableWriter` (the one tabwriter configuration), the `cell` sanitizer and the `errTableDecode`
+  sentinel — which is why `dupl` does not fire on the second codec. Every string cell goes through
+  `cell`, which replaces control **and** Unicode format (`Cf`) characters with a space: a folder
+  title or rule name is arbitrary user input, one embedded tab or newline is read by the tabwriter
+  as a column or row terminator (silently shifting or splitting the row), and a `Cf` bidi override
+  makes a terminal re-order the rest of the line without changing a byte of the layout (the
+  json/yaml codecs keep the raw value).
+  `newTableWriter` deliberately drops the
+  `tabwriter.TabIndent` the repo's other table renderers pass: that flag pads a *leading* empty
+  cell with raw tabs, and FOLDER is empty for every row in degraded mode, which would shift whole
+  rows to the terminal's next tab stop. No domain logic lives here
 - `fail/`: Error handling and detailed error messages
 - `io/`: Output formatting and user messages
 
@@ -217,6 +269,101 @@ grafanapi follows the Cobra command pattern with seven main command groups:
   column value (`data.values`) while decoding, so its payload cannot be re-marshalled into the real
   wire shape. Datasource **lookup** still goes through the generated client, since its response
   models (`models.DataSource`) round-trip correctly; only the query response is lossy.
+
+**internal/alerts/** - Read-only Unified Alerting domain logic (no Cobra)
+- `rules.go`: carries the package doc. `Rule` — the single flat output shape for all three formats
+  (explicit json **and** yaml tags), `ruleFromProvisioned` (every `models.ProvisionedAlertRule`
+  deref is nil-guarded), `formatDuration` (trims only *whole* trailing components, so `1m0s`→`1m`
+  and `1h0m0s`→`1h` but `10s` stays `10s`),
+  `KnownStates()`/`NormalizeState`/`ValidateState` (the single `--state` validation path),
+  `ListRulesOptions`, `stateDependentFilter` (the degrade-or-fail decision: `--folder` in any form,
+  or a `--state` value other than `recording`/`unavailable`, cannot be answered without the state
+  view, so a non-401 state failure is fatal for it — `unknown` is deliberately **not** exempt, see
+  the two-value rule below), `folderLeaf` (last unescaped-`/` segment of a folder
+  path — a *title* match, so it spans folders sharing a leaf title; undoes Grafana's
+  `\/` escaping — Grafana does **not** escape a literal backslash, so `bs\/Child` is irreducibly
+  ambiguous between the folder `bs\` and a root folder `bs/Child`; it is read as the latter, which
+  the doc comment and the `TestListRules_FolderFilterNestedPath` cases pin),
+  `applyState(states, unjoined)` (merges the rule's `RuleStates.ByUID` entry, then falls back to
+  `RuleStates.FolderPaths[r.FolderUID]` when that entry carried no folder path — the join-miss case,
+  which is what keeps FOLDER filled and `--folder <path>`/`<leaf>` working for a rule the state view
+  never listed; `TestListRules_FolderFilterMatchesUnjoinedRule` pins it and the residual UID-only
+  case — `unjoined` is the state an unlisted alerting rule gets, `unknown` or `unavailable`, passed
+  in by `ListRules` rather than hardcoded, which is what makes a degraded run visible in the
+  output), and
+  `ListRules` — provisioning defs → `FetchRuleStates` → join on uid → join folder paths on
+  folderUID → filter →
+  sort (folder/group/title, UID as final tie-break) → **never-nil** slice, so `-o json` emits `[]`
+  rather than `null`. Optional output fields (`updated`, `lastEvaluation`) are `*time.Time` with
+  `omitempty`, so a rule the server reported no timestamp for has no key rather than
+  `0001-01-01T00:00:00Z`
+- `state.go`: local wire structs for the `{status,data}` envelope of
+  `GET /api/prometheus/grafana/api/v1/rules` plus `RuleState`, `RuleStates` and `FetchRuleStates` —
+  raw HTTP over
+  `httputils.NewTransport` wrapped with `GrafanaConfig.WrapWithSession` (rotate-on-401), bounded
+  `stateTimeout`/`maxErrorBodySnippet`, `401` returned as an **unwrapped**
+  `runtime.NewAPIError(..., 401)`. `FetchRuleStates` returns `RuleStates` — **two** maps, not just
+  the uid-keyed one: `ByUID` (per-rule state) and `FolderPaths` (`folderUid` → `file`, one entry per
+  group that carries both, so it resolves a folder path for a rule the response never listed). They
+  are separate joins on purpose; a rule can need the second without appearing in the first.
+  `ActiveAlerts` is an **exact scan of `alerts[]`**, counting
+  instances whose state is not Normal after trimming Grafana's `" (reason)"` suffix (`"Normal
+  (Error)"` is a Normal instance; an instance with no state at all counts as Normal too, since a
+  malformed payload must not inflate a count the output cannot explain). The per-rule `totals` map is deliberately **not** decoded and
+  the request deliberately sends **no** `limit_alerts`, even though `limit_alerts=0` would keep the
+  response proportional to the rule count instead of the org's alert-instance count: `totals` is
+  not a partition of the instance set, so no arithmetic over it is exact. Verified on Grafana
+  12.3.2, one instance per rule — `execErrState: Error` → `alerts[].state "Alerting"`,
+  `totals {alerting:1}`; `Error` → `"Error"`, `{error:1}`; `OK` → `"Normal (Error)"`,
+  `{normal:1}`; `Alerting` → `"Alerting (Error)"`, `{alerting:1, error:1}`. `sum(totals) -
+  totals[normal]` reads 2 for that last single active instance, while skipping the `error` key
+  reads 0 for the second row's single active instance, and nothing in the payload distinguishes
+  the two cases (`execErrState` is not reported). A non-`success` envelope surfaces the server's
+  own `errorType`/`error` — either one on its own, not just both together — which is the only
+  diagnostic degraded mode can show
+- `contactpoints.go`: `ListContactPoints` via the generated client
+  (`provisioning.NewGetContactpointsParams().WithContext(ctx)`), sorted by name then UID, non-nil
+  and **nil-element-free** (the payload is a `[]*EmbeddedContactPoint`, so a `null` element would
+  both panic the sort comparator and render as `null` in `-o json`/`-o yaml`)
+- **`unknown` vs `unavailable` — two values, never one**: `unknown` means "the state view was read
+  and had no entry for this rule" (not evaluated yet); `unavailable` means "the state view could not
+  be read at all", so it is stamped on **every** alerting rule of a degraded run. Collapsing them
+  breaks two things at once: `-o json` would carry a plausible `"unknown"` for every rule with no
+  machine-readable trace of the outage (the warning is on stderr, which a jq pipe never sees), and
+  `--state unknown` — exempt from `stateDependentFilter` because the join assigns it — would
+  silently change meaning from "not yet evaluated" to "every alerting rule" and answer with exit 0.
+  So `unavailable` is in `KnownStates()`, `stateDependentFilter` exempts `recording` and
+  `unavailable` **only**, and `--state unknown` fails in degraded mode exactly like `--state
+  firing`. `--state unavailable` is the filter that works during an outage. Pinned at both layers
+  (`TestListRules_DegradedStateEndpoint`, `TestListRules_UnavailableStateOnlyOnStateFailure`,
+  `Test_RulesListCommand_degradedStateEndpoint{,Filtered}`)
+- **Definitions are primary, state is enrichment**: a rule with no state entry gets
+  `State: "unknown"` rather than being dropped — and keeps its FOLDER, resolved by folder UID from
+  the state response's group objects, so "still listed" also means "still filterable by
+  `--folder <path>`" — and a recording rule (`Record != nil`) gets
+  `Type`/`State` `"recording"` so it never looks like a broken join. A non-401 state-call failure
+  degrades to a `logging.FromContext(ctx).Warn` and continues **only when the request does not
+  depend on state**; a `401` from **either** call is fatal, so the stale-session exit-2 contract
+  holds. Degrading a *filtered* request would apply the filter to a fabricated state
+  (or to folder paths that were never fetched) and return an empty list with a nil error — `--state
+  firing -o json` printing `[]` and exiting 0 during an outage is indistinguishable from "nothing is
+  firing" and invisible to a jq pipe — so `stateDependentFilter` makes that case a plain wrapped
+  error (exit 1, never the 401 exit 2): `alerts: cannot apply --folder|--state <v> without the
+  alert rule state: %w`. The degraded warning goes to stderr so `-o json` stays pipeable; both the
+  warning and the five fail-instead-of-degrade cases are asserted at both layers. The `401` check
+  comes **first** in that branch, and the precedence is pinned at both layers
+  (`TestListRules_StateEndpoint401BeatsStateDependentFilter`,
+  `Test_RulesListCommand_stateEndpoint401WithFilter`) by asserting the message is *not* the
+  "cannot apply" one — `errors.As` alone cannot catch a swap, since wrapping the `401` in
+  `cannot apply ...: %w` still satisfies it (and still exits 2) while telling the user to retry with
+  fewer flags instead of to re-authenticate
+- `state.go` as a whole is ~90 lines cloned from `internal/explore/run.go` — not only
+  `buildStateURL` (a fourth copy of the trim-slash-and-append helper, alongside
+  `internal/explore`'s `buildQueryURL`, `internal/session`'s `buildUserURL` and
+  `internal/config`'s `buildRotateURL`) but also `readBodySnippet`/`maxErrorBodySnippet` verbatim,
+  the request-construction block and the 200/401/default status tree. Accepted deliberately;
+  extraction into one `internal/httputils` raw-GET-JSON seam is earmarked for the planned `api`
+  passthrough group, which adds the fifth call site (see Technical Debt Inventory item 13)
 
 **internal/resources/** - Resource abstraction layer
 - `Resource`: Wraps Kubernetes-style unstructured objects for Grafana resources
@@ -342,6 +489,18 @@ generation is stdlib `text/template`, inspection is stdlib `encoding/xml` token 
    the generated model is verifiably lossy — datasource lookup in the same package still uses the
    generated client, since `models.DataSource` round-trips correctly.
 
+   `internal/alerts/state.go` also uses local wire structs, but **for a different reason, and the
+   distinction matters**: the generated `models.RuleDiscovery`/`RuleGroup`/`AlertingRule` are
+   **not** lossy — they would round-trip every field the prometheus rules view needs. Nothing calls
+   them because (a) there is no generated *service* for
+   `/api/prometheus/grafana/api/v1/rules` at all (there is no `client/prometheus`), (b) they do not
+   model the `{status, data}` envelope the endpoint actually returns, and (c) every field arrives as
+   a pointer or `strfmt` type needing a nil-safe deref for the ~8 values the package reads. So: the
+   explore case is "the generated model is broken for this payload", the alerts case is "the
+   envelope and the deref ergonomics"; do not conclude from `internal/alerts` that the alerting
+   models are lossy. Rule and contact-point **definitions** in the same package go through the
+   generated client, as `models.ProvisionedAlertRule`/`EmbeddedContactPoint` round-trip correctly.
+
 ## Configuration
 
 Configuration is stored in `$XDG_CONFIG_HOME/grafanapi/config.yaml` (typically `~/.config/grafanapi/config.yaml`).
@@ -410,7 +569,8 @@ Flags set in Makefile via `-ldflags` on `main.version`, `main.commit`, `main.dat
 
 ### System Overview
 
-**grafanapi** is a ~12,500 line Go codebase that provides a kubectl-like interface for managing Grafana resources. It bridges Grafana's REST API with Kubernetes-style resource management patterns, enabling Infrastructure-as-Code workflows for Grafana dashboards, folders, and other resources.
+**grafanapi** is a ~16,000 line (non-test; ~32,000 with tests, excluding `vendor/`) Go codebase
+that provides a kubectl-like interface for managing Grafana resources. It bridges Grafana's REST API with Kubernetes-style resource management patterns, enabling Infrastructure-as-Code workflows for Grafana dashboards, folders, and other resources.
 
 The tool's architecture is heavily influenced by Kubernetes client patterns, using k8s.io/client-go and k8s.io/apimachinery libraries to provide a consistent, familiar interface for developers already comfortable with kubectl.
 
@@ -563,6 +723,57 @@ Wraps k8s.io/client-go's dynamic client for Grafana:
 
 4. Render the result (internal/explore.RenderTable)
    - Table (default) via text/tabwriter, or json/yaml for piping
+```
+
+#### Alerts Flow (`alerts rules list`)
+
+```
+1. Validate the flags (cmd/grafanapi/alerts.rulesListOptions.Validate)
+   - Output format + --state (NormalizeState -> KnownStates), before any
+     config load or network call
+
+2. Fetch the definitions (internal/alerts.ListRules)
+   - Generated client: Provisioning.GetAlertRulesWithParams(...WithContext(ctx))
+   - Any error is fatal, wrapped "alerts: list alert rules: %w" so a 401 stays
+     reachable via errors.As
+
+3. Fetch the live state (internal/alerts.FetchRuleStates)
+   - Raw GET /api/prometheus/grafana/api/v1/rules over httputils.NewTransport
+     wrapped with GrafanaConfig.WrapWithSession (so a 401 rotates-and-retries);
+     ActiveAlerts is an exact scan of each rule's `alerts[]` (`totals` is not a
+     partition of the instance set - see internal/alerts/state.go)
+   - Decode the {status,data} envelope into local wire structs; flatten the
+     group tree into RuleStates{ByUID, FolderPaths} - per-rule state keyed by
+     uid (entries with no uid are skipped) plus folderUid -> `file` path per
+     group (groups missing either half are skipped)
+   - 401 -> fatal, unwrapped *runtime.APIError{401} - checked BEFORE
+     stateDependentFilter, so a dead session never renders as "cannot apply"
+   - any other failure -> fatal too if the request depends on state
+     (stateDependentFilter: any --folder, or a --state other than
+     recording/unavailable) -> plain wrapped error, exit 1
+   - any other failure on an unfiltered request -> warn and continue with a
+     zero RuleStates and unjoined = "unavailable" (degraded mode), so the
+     degraded run is detectable in -o json and not on stderr alone
+
+4. Join, filter, sort (internal/alerts.ListRules)
+   - Join on uid: recording rules -> "recording", unjoined alerting rules ->
+     "unknown" (healthy state view) or "unavailable" (degraded); state entries
+     with no definition are ignored
+   - --state is matched case-insensitively against the endpoint's verbatim
+     state, since the filter has been lowercased by NormalizeState
+   - Second join, on folderUID: a rule with no state entry still gets its
+     folder path from RuleStates.FolderPaths, so FOLDER is populated and
+     --folder by path/leaf reaches it (see applyState)
+   - Filter --folder (UID, full folder path, or the path's last segment - a
+     title match, so it spans folders sharing that leaf) and --state, then sort
+     folder/group/title/uid
+   - Always a non-nil slice, so -o json emits [] not null
+
+5. Render the result (cmd/grafanapi/alerts.rulesTableCodec)
+   - Table (default) via text/tabwriter, or json/yaml encoding []alerts.Rule
+
+`alerts contact-points list` is steps 1, 2 (GetContactpoints), 4 (sort only)
+and 5 (contactPointsTableCodec over models.ContactPoints) - no state join.
 ```
 
 ### Key Technology Choices
@@ -887,6 +1098,25 @@ Based on TODO comments in code:
     - *Impact*: Low - May incorrectly filter alerts resources
     - *Effort*: Low - Verification and potential fix
     - *Fix*: Confirm with team, adjust filter if needed
+
+13. **Raw-HTTP Seam Duplicated Across Four Packages**
+    - *Current*: `internal/alerts/state.go` and `internal/explore/run.go` are ~90 lines of the same
+      shape, not just the URL helper: `readBodySnippet` + `maxErrorBodySnippet` are byte-identical,
+      as are the request-construction block (transport → `WrapWithSession` → bounded-timeout
+      client) and the 200/401/default status tree. The trim-slash-and-append URL helper itself
+      exists four times: `buildQueryURL` (`internal/explore/run.go`), `buildUserURL`
+      (`internal/session/session.go`), `buildRotateURL` (`internal/config/session_source.go`) and
+      `buildStateURL` (`internal/alerts/state.go`)
+    - *Impact*: Low - each copy is independently tested and `dupl` (enabled in `.golangci.yaml`)
+      does not fire on them; the risk is drift, e.g. a 401-handling fix landing in one copy only
+    - *Effort*: Medium - one `internal/httputils.GetJSON(ctx, gCtx, path, op, out)` owning the URL
+      join, org header, session wrap, timeout and status tree, then migrating all four call sites
+      (each has its own error-message prefix and one bespoke branch, so the helper needs an
+      operation label and a way to hand back the raw non-2xx body)
+    - *Fix*: Extract when the planned read-only `grafanapi api PATH` passthrough group lands — that
+      group adds a fifth call site and is the natural home for the shared seam. Deliberately
+      deferred (YAGNI) until then: extracting it for a single new caller would leave a one-user
+      helper next to three unmigrated copies
 
 ### Performance Bottlenecks & Recommendations
 

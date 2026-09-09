@@ -42,6 +42,30 @@ grafanapi explore example-postgres "select 1 as n"
 grafanapi explore example-prometheus "up" -o json | jq '.results.A.frames[0].schema'
 ```
 
+## Example: inspect alerting
+
+Read-only access to Grafana Unified Alerting, with rule definitions joined onto their live
+evaluation state:
+
+```shell
+# Alert rules with their state (FOLDER GROUP TITLE UID TYPE STATE HEALTH FOR PAUSED ALERTS)
+grafanapi alerts rules list
+
+# Filter by folder (UID, full path, or the path's last segment) and evaluation state
+grafanapi alerts rules list --folder "Probe Folder" --state firing
+
+# Notification contact points (declared secure fields are redacted server-side)
+grafanapi alerts contact-points list
+```
+
+`STATE` is one of `firing`, `pending`, `recovering`, `inactive`, `recording`, `unknown` (not
+evaluated yet) or `unavailable`. `unavailable` means Grafana's state view could not be read at all,
+so an unfiltered list still exits 0 but no rule's state is known — automation should check for it
+before trusting an empty `select(.state == "firing")`.
+
+See the [alerting guide](https://avitsrimer.github.io/grafanapi/guides/alerting/) for the state
+vocabulary, filtering rules and `jq` recipes.
+
 ## Example: keep a session alive
 
 Opt a context into scheduled keep-alive, then let a macOS LaunchAgent keep it warm:
