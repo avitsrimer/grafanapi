@@ -603,12 +603,15 @@ is `*string`.
 - [x] stale-session path: revoke the viewer's session server-side (`POST /api/admin/users/:id/revoke-all-auth-tokens`
       as admin), then `alerts rules list --context local-viewer` → exit **2** with the stale-session
       message
-- [ ] against a real (non-docker) context, read-only: `alerts rules list` and
+- [x] against a real (non-docker) context, read-only: `alerts rules list` and
       `alerts contact-points list` succeed with the built binary (expect a one-time Keychain
-      "Always Allow" prompt since the binary changed) — record counts only — BLOCKED: the freshly
-      built `bin/grafanapi` has a new code identity, so reading the pre-existing Keychain item for
-      that context needs a human to click "Always Allow"; both commands (attempted once each)
-      exited 1 with `keychain access timed out after 15s`, no network call made
+      "Always Allow" prompt since the binary changed) — record counts only. Automated attempts
+      exited 1 with `keychain access timed out after 15s` until the human answered the dialog once;
+      re-run afterwards against a real Grafana 12.3.1 OSS context (Editor session), read-only:
+      `alerts rules list -o json` → exit 0, **35 rules**, state histogram `{firing: 3, inactive: 32}`
+      (no `unknown`, no `unavailable`, so the state view joined every rule);
+      `alerts contact-points list -o json` → exit 0, **10 contact points**. No other context was
+      contacted.
 - [x] `make test-env-clean`; record results here: ➕
 
 ➕ **Task 6 results (Grafana 12.3.2, docker, `admin/admin`):**
@@ -668,9 +671,9 @@ is `*string`.
   login update`. `contact-points list` is identical bar `[GET /v1/provisioning/contact-points]
   GetContactpoints (status 401)`. So the exit-2 contract holds on **both** endpoints against a real
   401, and rotation-then-fail leaves the `*runtime.APIError{401}` rendering intact (Common Gotcha 6).
-- **Real (non-docker) context:** BLOCKED, see the checkbox above — one attempt per command, both
-  exit 1 on `keychain access timed out after 15s` (new binary code identity ⇒ macOS wants an
-  interactive "Always Allow" click). No counts obtained; no other remote context was contacted.
+- **Real (non-docker) context:** verified after the human answered the one-time Keychain dialog —
+  rules list exit 0 (35 rules, 3 firing / 32 inactive, none `unknown`/`unavailable`), contact-points
+  list exit 0 (10). Counts only; no other remote context was contacted.
 - **Hygiene:** the cookie was only ever piped from the curl jar into `--cookie-stdin`, never echoed,
   logged or written to a file. All jars deleted after the run; `make test-env-clean` (removes
   volumes) exit 0. `bin/grafanapi` deliberately left on disk (gitignored) for Task 7. No Go source
@@ -763,8 +766,8 @@ is `*string`.
   - Working tree after all gates: only `.grafanapi-alerts-brief.md` untracked — no regenerated docs,
     no `bin/`, no `vendor/` churn.
 - `CLAUDE.md` re-verified as a symlink to `AGENTS.md` (`ls -la`) and never written.
-- Task 6's single remaining checkbox (the real, non-docker context) was left untouched: it is
-  blocked on an interactive macOS Keychain "Always Allow" click and is out of this task's scope.
+- Task 6's real-context checkbox was blocked at this point on an interactive macOS Keychain
+  "Always Allow" click; it was completed afterwards by the human (see Task 6 results).
 
 ### Task 8: [Final] Wrap up
 
