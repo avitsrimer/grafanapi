@@ -8,6 +8,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/go-logr/logr"
 	"github.com/grafana/grafana-app-sdk/logging"
+	"github.com/grafana/grafanapi/cmd/grafanapi/alerts"
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/cmd/grafanapi/datasources"
 	"github.com/grafana/grafanapi/cmd/grafanapi/explore"
@@ -62,6 +63,7 @@ func Command(version string) *cobra.Command {
 	rootCmd.SetErr(os.Stderr)
 	rootCmd.SetIn(os.Stdin)
 
+	rootCmd.AddCommand(alerts.Command())
 	rootCmd.AddCommand(config.Command())
 	rootCmd.AddCommand(datasources.Command())
 	rootCmd.AddCommand(explore.Command())
