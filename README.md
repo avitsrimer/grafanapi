@@ -44,8 +44,7 @@ grafanapi explore example-prometheus "up" -o json | jq '.results.A.frames[0].sch
 
 ## Example: inspect alerting
 
-Read-only access to Grafana Unified Alerting, with rule definitions joined onto their live
-evaluation state:
+Rule definitions joined onto their live evaluation state (a Viewer session is enough):
 
 ```shell
 # Alert rules with their state (FOLDER GROUP TITLE UID TYPE STATE HEALTH FOR PAUSED ALERTS)
@@ -63,8 +62,39 @@ evaluated yet) or `unavailable`. `unavailable` means Grafana's state view could 
 so an unfiltered list still exits 0 but no rule's state is known — automation should check for it
 before trusting an empty `select(.state == "firing")`.
 
+## Example: alerting as code
+
+Keep rule groups, contact points and the notification policy tree in files you can review, diff and
+promote between environments. Writing needs the Editor role:
+
+```shell
+# Grafana → disk (rules/<folder UID>/<group>.yaml, contact-points.yaml, policies.yaml)
+grafanapi alerts pull -p ./alerting
+
+# Review the plan before touching anything — always
+grafanapi alerts push -p ./alerting --dry-run
+
+# disk → Grafana
+grafanapi alerts push -p ./alerting
+
+# Pause, resume or delete individual rules by UID
+grafanapi alerts rules pause  rule-uid-1 rule-uid-2
+grafanapi alerts rules resume rule-uid-1
+grafanapi alerts rules delete rule-uid-3 --dry-run
+```
+
+A rule group is written whole, so a rule removed from a group file is **deleted** from that group —
+`--dry-run` prints exactly that as a `-` line. Objects another provisioner owns are refused rather
+than overwritten, folders are never created, nothing remote-only is ever pruned, and Grafana offers
+no optimistic concurrency here: the last writer wins.
+
+A contact point's **declared secure fields** arrive as `[REDACTED]`, and pushing the placeholder
+back over an existing contact point keeps the stored secret (creating one needs the real value).
+Anything Grafana does not treat as a secure field — a token in a webhook URL or a custom header — is
+written to the bundle in plain text, so treat the bundle as sensitive.
+
 See the [alerting guide](https://avitsrimer.github.io/grafanapi/guides/alerting/) for the state
-vocabulary, filtering rules and `jq` recipes.
+vocabulary, filtering rules, `jq` recipes and the full pull → edit → push workflow.
 
 ## Example: keep a session alive
 

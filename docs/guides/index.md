@@ -20,7 +20,8 @@ title: Usage
 
     ---
 
-    Inspect alert rules with their live evaluation state, and notification contact points.
+    Inspect alert rules with their live evaluation state, pull and push the whole alerting
+    configuration as code, and pause, resume or delete individual rules.
 
 -   :material-backup-restore:{ .lg .middle } __[Manage resources](./manage-resources.md)__
 

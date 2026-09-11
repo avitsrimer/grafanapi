@@ -60,5 +60,5 @@ grafanapi alerts rules list [flags]
 
 ### SEE ALSO
 
-* [grafanapi alerts rules](grafanapi_alerts_rules.md)	 - Inspect alert rules
+* [grafanapi alerts rules](grafanapi_alerts_rules.md)	 - Inspect and manage alert rules
 

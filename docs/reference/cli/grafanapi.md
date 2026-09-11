@@ -12,7 +12,7 @@
 
 ### SEE ALSO
 
-* [grafanapi alerts](grafanapi_alerts.md)	 - Inspect Grafana alert rules and contact points
+* [grafanapi alerts](grafanapi_alerts.md)	 - Inspect and manage Grafana alert rules, contact points and notification policies
 * [grafanapi config](grafanapi_config.md)	 - View or manipulate configuration settings
 * [grafanapi datasources](grafanapi_datasources.md)	 - List the datasources configured on the current context
 * [grafanapi explore](grafanapi_explore.md)	 - Run an ad-hoc query against a Grafana datasource

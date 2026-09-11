@@ -4,9 +4,11 @@ description: >-
   Query Grafana datasources and manage Grafana resources as code from the terminal with the
   grafanapi CLI. Use when the user wants to run a PromQL, LogQL, SQL, or ad-hoc query against a
   Grafana datasource, sanity-check a metric or log query, list Grafana datasources, check which
-  Grafana alert rules are defined or firing, list notification contact points, pull or push
-  dashboards/folders as code, back up or migrate Grafana resources between environments, or manage
-  Grafana login sessions and contexts (multi-environment) from the command line.
+  Grafana alert rules are defined or firing, list notification contact points, pull or push Grafana
+  alerting configuration (alert rules, contact points, notification policies) as code, pause,
+  resume or delete alert rules, pull or push dashboards/folders as code, back up or migrate Grafana
+  resources between environments, or manage Grafana login sessions and contexts
+  (multi-environment) from the command line.
 ---
 
 # grafanapi
@@ -128,11 +130,17 @@ Structure: `.results.<refId>.frames[]`, each frame having `.schema` (field names
 
 ## 5. Alerting (`alerts`)
 
-Read-only. Nothing in this group can create, update or delete a rule or a contact point.
+Reading needs Viewer, writing needs Editor. No command here performs an org-admin operation.
 
 ```shell
+# read
 grafanapi alerts rules list [--folder UID|PATH|LAST-SEGMENT] [--state STATE] [-o table|json|yaml]
 grafanapi alerts contact-points list [-o table|json|yaml]
+
+# write (see §5.1 — always --dry-run first)
+grafanapi alerts pull [-p ./alerting] [--folder-uid UID]... [-o yaml|json]
+grafanapi alerts push [-p ./alerting] [--dry-run] [--ui-editable] [--on-error ignore|fail|abort]
+grafanapi alerts rules pause|resume|delete UID [UID...] [--dry-run]
 ```
 
 `rules list` joins rule **definitions** (provisioning API) with **live evaluation state**
@@ -191,6 +199,89 @@ grafanapi alerts contact-points list -o json | jq '.[] | {name, type}'
 - A **Viewer** session suffices for both commands on a default-roles Grafana; under fine-grained
   RBAC they need alert-rule read and notification read permissions. Alert rules in folders the
   user cannot read are filtered out server-side.
+
+### 5.1 Alerting as code — writes
+
+**SAFETY FIRST. These commands change a live Grafana.**
+
+- **Always run `--dry-run` first** and show the user the plan. Every write command takes it. On
+  `alerts push` the dry run also runs the read-only checks, so an entry the apply would refuse is
+  printed below the plan as `✘ would fail: …` — read those lines out too; it still exits 0.
+- **Never run a non-dry-run write against a real instance without the user reviewing the plan**
+  and saying to go ahead. Do not "just apply" because the dry run looked fine.
+- Exit codes: **0** success (a `--dry-run` is always 0 when it completes), **1** refused or not
+  found (403, validation error, unknown rule UID, missing folder, foreign provenance), **2** stale
+  session → `grafanapi login update` (§9). A `403` needs a pending change to surface: a push whose
+  plan is entirely `Unchanged` writes nothing and exits **0** even without the Editor role.
+- Nothing here prints or decrypts a secret. Do not ask the user for one.
+
+```shell
+grafanapi alerts pull -p ./alerting             # Grafana → disk
+grafanapi alerts push -p ./alerting --dry-run   # review
+grafanapi alerts push -p ./alerting             # disk → Grafana
+```
+
+Bundle layout (`-o json` writes the same keys as `.json`):
+
+```
+alerting/rules/<folder UID>/<group title>.yaml   # one models.AlertRuleGroup per file
+alerting/contact-points.yaml                     # list
+alerting/policies.yaml                           # notification policy tree
+```
+
+What to tell the user, and what to check before pushing:
+
+- **A rule group is written whole.** A rule missing from a group file is **DELETED** from that
+  group; the dry run prints it as a `- title (uid)` line. That line is the one to read carefully.
+- **Pull again after a push that added a rule.** Rules are matched by UID, and a rule added by hand
+  has none until Grafana assigns one on the first push — so pushing the same file twice plans the
+  rule as both a `+` and a `-` for the same title and replaces it with a fresh copy (losing its UID,
+  alert state and silence history). The plan flags it with a `! <title> (<uid>) would be replaced,
+  not updated; run alerts pull first` line. Re-pull (or write the assigned `uid` into the file)
+  before editing further.
+- **Nothing remote-only is pruned.** Groups/contact points/policies that exist only in Grafana are
+  left alone, so a partial bundle is safe to push.
+- **Directory names are not authoritative** — the `folderUid` and `title` *inside* each file are
+  what gets sent. Note the two spellings in one file: `folderUid` on the group, `folderUID` on each
+  rule. Both are correct; edit the group-level one (a push overwrites each rule's from it).
+- **Do not hand-edit `orgID`** — a push overwrites it from the remote group or the context.
+- **Secrets:** each contact-point type's **declared** secure fields arrive as `"[REDACTED]"`. Leave
+  the placeholder exactly as-is; pushing it back over an **existing** contact point keeps the stored
+  secret, replacing it sets a new one. That is what makes editing a channel name next to a secret
+  safe. **Creating** a contact point is the exception — nothing is stored yet, so a create carrying
+  the marker is refused until the file holds the real value, which is what pushing a bundle into a
+  *different* instance hits. Anything Grafana does not classify as a secure field (a token in a
+  webhook URL or a custom header) is written to `contact-points.yaml` in **plain text**: treat the
+  bundle as sensitive and tell the user before they commit it.
+- **Folders are never created.** A group naming a missing folder fails with "push folders first
+  (`grafanapi resources push`)"; push folders/dashboards first.
+- **Provenance:** an object owned by another provisioner (`file`, `converted_prometheus`, …) is
+  **refused**, not overwritten. `--ui-editable` applies to objects the push **creates** only; an
+  update always mirrors the stored provenance.
+- **No concurrency control** — last writer wins. A UI edit between pull and push is silently
+  overwritten.
+- `--on-error ignore|fail|abort` (default `fail`) behaves as on `resources push`. Output is **one
+  line per change** plus `N change(s) applied, M error(s)` — not `resources push`'s single line.
+- A pull **prunes stale files** under `rules/` (restricted to `--folder-uid` when given), so a
+  group deleted in Grafana is not resurrected by the next push. `--folder-uid` takes a UID only
+  (repeatable); unlike `rules list --folder`, no paths.
+
+Individual rules, by UID (the `UID` column of `rules list`):
+
+```shell
+grafanapi alerts rules pause  rule-uid-1 rule-uid-2
+grafanapi alerts rules resume rule-uid-1
+grafanapi alerts rules delete rule-uid-3 --dry-run
+```
+
+- Pausing has no dedicated Grafana endpoint: it **rewrites the rule's whole group**, sending the
+  group's other rules back untouched. Several rules of one group = one write.
+- A rule already in the requested state is reported (`already paused` / `not paused`) and nothing
+  is written. Under `--dry-run` every outcome reads `would be …`.
+- `delete` looks each rule up first, so an unknown UID is a clean "not found" (exit 1) and the
+  other named rules are still deleted. There is no `--force` — every rule is named on the command
+  line.
+- Degraded/`unavailable` state (above) applies to `rules list` only; it has no bearing on writes.
 
 ## 6. Dashboards as code (`resources`)
 
@@ -265,6 +356,9 @@ grafanapi session keepalive uninstall     # remove the LaunchAgent
 
 - **Exit 2** = stale/unauthorized session → user runs `grafanapi login update` (or
   `pbpaste | grafanapi login update --cookie-stdin`). Distinct from generic exit 1.
+- **Exit 1 with "Grafana denied the request: your user lacks the required permission"** = a `403`.
+  Re-authenticating does **not** help — the user needs the Editor role for alerting writes, or is
+  pointed at the wrong instance (`grafanapi config current-context`).
 - "datasource not found" → the error lists every datasource; copy the right name/uid.
 - "unsupported datasource type" → add `--field expr` (Prometheus-like) or `--field query`.
 - macOS Keychain "Allow" dialog after a binary upgrade → expected, choose "Always Allow".
@@ -281,6 +375,9 @@ grafanapi explore example-postgres "select count(*) from users"           # SQL 
 grafanapi alerts rules list --state firing                                # what is firing right now
 grafanapi alerts rules list -o json | jq -r '.[] | "\(.state)\t\(.title)"' # rule state + title
 grafanapi alerts contact-points list -o json | jq '.[] | {name, type}'    # who gets notified
+grafanapi alerts pull -p ./alerting                                       # alerting config → disk
+grafanapi alerts push -p ./alerting --dry-run                             # preview an alerting push
+grafanapi alerts rules pause rule-uid-1 --dry-run                         # what pausing would touch
 grafanapi resources pull -p ./backup --context prod                       # back up an environment
 grafanapi resources push -p ./resources --dry-run                         # preview a push
 ```

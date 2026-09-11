@@ -2,28 +2,52 @@
 title: Alerting
 ---
 
-This section describes how to inspect Grafana Unified Alerting from your terminal: which alert
-rules are defined, which of them are firing right now, and which contact points they notify.
-
-Every command in the `alerts` group is **read-only** — nothing in it can create, update or delete
-an alert rule or a contact point.
+This section describes how to inspect and manage Grafana Unified Alerting from your terminal:
+which alert rules are defined, which of them are firing right now, which contact points they
+notify — and how to keep the whole configuration in files you can review, diff and promote between
+environments.
 
 ```shell
 grafanapi alerts rules list [flags]
 grafanapi alerts contact-points list [flags]
+
+grafanapi alerts pull [-p ./alerting] [--folder-uid UID]... [-o yaml|json]
+grafanapi alerts push [-p ./alerting] [--dry-run] [--ui-editable] [--on-error ignore|fail|abort]
+
+grafanapi alerts rules pause  UID [UID...] [--dry-run]
+grafanapi alerts rules resume UID [UID...] [--dry-run]
+grafanapi alerts rules delete UID [UID...] [--dry-run]
 ```
+
+Every command that changes Grafana takes `--dry-run`. Run it first.
 
 ## Permissions
 
-Both commands only read. On a Grafana with the default basic roles a **Viewer** session is enough
-(verified on OSS 12.3.2). With fine-grained RBAC the session needs alert-rule read and
-notification read permissions; without them Grafana answers `403` and the command fails rather
-than returning a shorter list.
+| Command                        | Role needed | Notes                                                |
+| ------------------------------ | ----------- | ---------------------------------------------------- |
+| `alerts rules list`            | Viewer      | rules in folders you cannot read are filtered out server-side |
+| `alerts contact-points list`   | Viewer      | contact points are org-wide, so it is all or nothing |
+| `alerts pull`                  | Viewer      | writes only to disk                                  |
+| `alerts push`                  | **Editor**  | creates and updates rule groups, contact points, the policy tree |
+| `alerts rules pause`/`resume`  | **Editor**  | rewrites the rule's whole group                      |
+| `alerts rules delete`          | **Editor**  | deletes the named rules                              |
 
-What Grafana *does* filter silently is folder access: alert rules in folders your user cannot read
-are simply absent from the response and the command still succeeds. Contact points are **not**
-folder-scoped — they are org-wide objects gated by notification permissions, so you either see all
-of them or none.
+Verified on Grafana OSS 12.3.2 with the default basic roles. With fine-grained RBAC a read needs
+alert-rule read and notification read permissions, and a write needs `alert.provisioning:write`;
+without them Grafana answers `403`, which the CLI renders as "Grafana denied the request: your
+user lacks the required permission" and exit code **1** (not the stale-session exit 2 — see
+[Stale sessions](#stale-sessions)). A `403` needs a pending change to surface, though: a `push`
+whose plan is entirely `Unchanged` attempts no write at all, so it exits **0** even for a Viewer.
+
+No command in this group performs an **org-admin** operation. Resetting the Alertmanager
+configuration, exporting decrypted secrets, deleting contact points and editing data sources are
+all outside it, deliberately.
+
+What Grafana *does* filter silently is folder access on reads: alert rules in folders your user
+cannot read are simply absent from the response and the command still succeeds. Contact points are
+**not** folder-scoped — they are org-wide objects gated by notification permissions, so you either
+see all of them or none. On a `push`, a folder you may not read is reported per folder rather than
+failing the whole run — see [Folders must exist first](#folders-must-exist-first).
 
 ## Listing alert rules
 
@@ -252,7 +276,9 @@ table shows `NAME`, `TYPE`, `UID` and `PROVENANCE` only.
 
 ## Output formats
 
-Both commands accept `-o table` (the default), `-o json` and `-o yaml`.
+Both **list** commands accept `-o table` (the default), `-o json` and `-o yaml`. (On
+[`alerts pull`](#alerting-as-code) `-o` means something else: the format of the *files* it writes,
+`yaml` or `json` only.)
 
 `table` is the human-readable rendering described above. `json` and `yaml` encode the full objects
 and use the **same camelCase keys** (`folderUID`, `isPaused`, `activeAlerts`, `lastEvaluation`,
@@ -295,12 +321,382 @@ grafanapi alerts rules list -o json | jq -r 'group_by(.folderUID)[] | "\(.[0].fo
 grafanapi alerts contact-points list -o json | jq -r '.[] | "\(.name)\t\(.type)"'
 ```
 
+## Alerting as code
+
+[`grafanapi alerts pull`](../reference/cli/grafanapi_alerts_pull.md) writes the alerting
+configuration of the current context to a directory, and
+[`grafanapi alerts push`](../reference/cli/grafanapi_alerts_push.md) sends a directory back — the
+same pull → edit → review → push loop `resources pull`/`push` gives dashboards and folders.
+
+```shell
+grafanapi alerts pull -p ./alerting            # Grafana → disk
+$EDITOR ./alerting/rules/folder-uid-1/probe-group.yaml
+grafanapi alerts push -p ./alerting --dry-run  # review the plan
+grafanapi alerts push -p ./alerting            # disk → Grafana
+```
+
+### The bundle layout
+
+```
+alerting/
+  rules/
+    folder-uid-1/
+      probe-group.yaml          # one rule group
+    folder-uid-2/
+      latency.yaml
+  contact-points.yaml           # every contact point, one list
+  policies.yaml                 # the notification policy tree
+```
+
+`-o json` writes the same layout with `.json` files and the **same keys**; pick one format per
+bundle and stay with it. A pull removes the top-level file in every other extension it recognises,
+so `pull -o json` after `pull -o yaml` cannot leave two files disagreeing about the same object.
+
+The directory names are **not authoritative**. `<folder UID>` and the file name are sanitised
+(`/`, `\`, control characters and a leading `.` become `_`), so what a later push sends to Grafana
+is the `folderUid` and `title` recorded *inside* each file. Rename a file freely; change the
+`title` inside it and you have renamed the group.
+
+That sanitisation is many-to-one, so two groups in one folder can map to the same file name (`a/b`
+and `a_b` both become `a_b.yaml`). A pull that hits such a collision **aborts before writing
+anything**, naming both groups — silently overwriting one with the other would look, to the next
+push, like every rule of the overwritten group had been deleted. Rename one of the two groups in
+Grafana and pull again. The same rule applies to the bundle you hand back: two files declaring the
+same `folderUid` and `title` are refused by `alerts push`, naming both files.
+
+Names are compared **case-insensitively**, and after Unicode normalisation, because macOS holds
+`Alpha.yaml` and `alpha.yaml` as one file. Two groups in a folder titled `Alpha` and `alpha` are
+therefore a collision, and so are two folder UIDs that differ only in case — even though Grafana
+itself treats each pair as two distinct objects. Re-titling a group from `Alpha` to `alpha` is
+fine: the next pull rewrites the one file that exists and keeps it.
+
+!!! warning "`folderUid` on the group, `folderUID` on each rule"
+
+    Both spellings appear in one group file, because Grafana's own API models spell them
+    differently — the group carries `folderUid` and every rule under `rules[]` carries `folderUID`.
+    They are not a typo and they must agree. A push overwrites each rule's `folderUID` and
+    `ruleGroup` from the group's own values, so the group-level `folderUid` is the one to edit.
+
+Each rule also carries an `orgID`. **Do not hand-edit it** — a push overwrites it from the remote
+group when the group already exists, otherwise from the context's `org-id`, and only falls back to
+what the file says. It is written out so the file round-trips, not so you can change an org.
+
+Because a push fills all three in, a **hand-written** rule may leave `folderUID`, `ruleGroup`,
+`orgID` and `uid` out entirely: the group file is what addresses the group, and Grafana assigns the
+uid on create. The fields a rule cannot be written without are `title`, `condition`, `data`,
+`execErrState`, `noDataState` and `for`. The one case a push cannot fill in is `orgID` for a group
+that does not exist yet on a Grafana Cloud context (which addresses a stack, so its `org-id` is 0);
+that group fails by name, telling you to set `org-id` on the context or `orgID` on every rule.
+Leaving the three out is not a permanent diff: the plan compares the rule a push would *send*, with
+those fields already filled in, so an omitted — or disagreeing — value is never reported as a change
+(see [Review the plan first](#review-the-plan-first)).
+
+A `uid`, when present, must be unique across the whole bundle: it addresses one rule in the whole
+instance, so two rules claiming it — in one file or in two — are refused, naming both.
+
+An `alerts pull` never writes an object's `id`, `updated` or `provenance`: those are Grafana's to
+set, and a file carrying them would be rejected as an unknown key on the way back in. Both formats
+are read **strictly** — an unknown or misspelled key is an error naming the file, before any
+network call.
+
+### Stale files are pruned on pull
+
+A pull removes files under `rules/` that it did not just write, so a group deleted in Grafana is
+not resurrected by the next push. With `--folder-uid` that pruning is restricted to the named
+folders, which keeps a partial bundle's other folders intact:
+
+```shell
+grafanapi alerts pull -p ./alerting --folder-uid folder-uid-1   # only folder-uid-1/ is reconciled
+```
+
+Pruning only touches files the layout owns — `.yaml`, `.yml` and `.json` one level below `rules/` —
+so a `README.md`, an editor backup or a directory of your own under `rules/` is left alone, and no
+directory is ever removed.
+
+`--folder-uid` takes a folder **UID** only (unlike `rules list --folder`, which also accepts a
+path) and is repeatable; a UID no folder carries is an error. Contact points and the policy tree
+are org-wide and are pulled whatever it is set to.
+
+`alerts pull` also takes `--max-concurrent` (default 10), which bounds the rule-group fetches the
+same way it bounds a push's writes.
+
+### Review the plan first
+
+```shell
+grafanapi alerts push -p ./alerting --dry-run
+```
+
+```
+ACTION     KIND          ID                        DETAIL
+Update     ContactPoint  cp-uid-1
+Unchanged  PolicyTree    policies
+Update     RuleGroup     folder-uid-1/probe-group  ~ interval 60s→120s
+                                                     + disk-almost-full (rule-uid-2)
+                                                     - old-rule (rule-uid-3)
+Create     RuleGroup     folder-uid-2/latency      + p99-latency (rule-uid-4)
+1 to create, 2 to update, 1 unchanged
+```
+
+A dry run issues **no writes at all** and exits 0. `Unchanged` entries are listed rather than
+hidden, because "nothing to do" is the answer a dry run is most often asked for.
+
+Rules are matched by UID, so moving one within a group file is not reported as a change to that
+rule — but it *is* a change to the group: Grafana evaluates a group's rules in the order the group
+body lists them, so a file whose rules were only re-ordered still needs the group write, and the
+plan says so with a single line naming no rule:
+
+```
+Update     RuleGroup     folder-uid-1/probe-group  ~ rule order
+```
+
+What a rule is compared against is the body the push would **send**, not the rule as the file spells
+it: `folderUID`, `ruleGroup` and `orgID` are filled in from the group being pushed first, so a rule
+that leaves them out or disagrees about them is `Unchanged` rather than a `~` line no push could
+ever close. Every other field is compared exactly as written.
+
+It does run the read-only checks that decide whether a write is *allowed* — the folder lookup, the
+provenance classification, the redacted-secret check — so an entry the apply would refuse is
+reported below the plan instead of appearing in it:
+
+```
+ACTION     KIND          ID                        DETAIL
+Update     ContactPoint  cp-uid-1
+Unchanged  PolicyTree    policies
+0 to create, 1 to update, 1 unchanged
+✘ would fail: Update RuleGroup folder-uid-1/probe-group: alerts: push rule group folder-uid-1/probe-group: provenance "file" is managed outside the API
+```
+
+A dry run still exits **0** in that case: it changed nothing, and showing the refusal before the
+apply hits it is the point. `--on-error` has no effect on a dry run — stopping at the first refusal
+would hide the rest of the plan.
+
+### A rule group is written whole
+
+!!! danger "A rule missing from a group file is deleted from that group"
+
+    Grafana replaces a rule group with exactly what the push sends, so removing a rule from the
+    file removes it from Grafana. The dry run prints that as the `- old-rule (rule-uid-3)` line
+    above — the one line to read carefully before applying.
+
+Run `alerts pull` again after a push that **added** a rule, before editing the bundle further.
+Rules are matched by UID, and a rule you typed into the file by hand has none until Grafana assigns
+one on the first push; pushing the same file a second time therefore plans it as both a `+` and a
+`-` for the same title and replaces the rule with a fresh copy — losing its UID, its alert state
+and its silence history. The plan says so on a line of its own, above the pair it explains:
+
+```
+Update     RuleGroup     folder-uid-1/probe-group  ! disk-almost-full (rule-uid-2) would be replaced, not updated; run alerts pull first
+                                                     + disk-almost-full
+                                                     - disk-almost-full (rule-uid-2)
+```
+
+Re-pulling (or writing the assigned `uid` into the file yourself) makes the next plan read
+`unchanged`. The match stays by UID rather than falling back to the title: a title is not an
+identity, and matching on it would silently update the wrong rule the moment one is renamed.
+
+The reverse is not true: groups, contact points and policies that exist **only in Grafana** are
+left alone. This command never prunes remote objects, so a bundle covering one folder is safe to
+push against an instance that has twenty.
+
+### Folders must exist first
+
+Folders are never created by a push. A group naming a folder that does not exist fails with
+
+```
+folder folder-uid-9 does not exist; push folders first (grafanapi resources push)
+```
+
+and the other groups are still pushed. Push the folders with
+[`grafanapi resources push`](../reference/cli/grafanapi_resources_push.md) first, then the alerting
+bundle.
+
+A folder your user may not *read* is treated the same way — one refusal, not the end of the push:
+
+```
+folder folder-uid-9: permission denied
+```
+
+Grafana grants `folders:read` per folder, so a bundle spanning folders you only partly own is
+expected to report this for the ones you do not. The groups in the folders you can read are still
+pushed, and `--dry-run` still prints their plan alongside the `✘ would fail` lines — which is how
+you find out which half of a bundle you are allowed to write. A `401` is different: the session
+itself is gone, so the push stops there and exits 2.
+
+### Who owns an object: provenance
+
+Grafana records how each rule, contact point and policy tree was created, and enforces the rules
+around it. `grafanapi` classifies that value before every write, three ways:
+
+| Stored provenance | What it means | What a push does |
+| ----------------- | ------------- | ---------------- |
+| empty | editable in the Grafana UI | writes it, leaving it UI-editable |
+| `api` | created through the provisioning API | writes it, keeping it API-owned |
+| anything else (`file`, `converted_prometheus`, `disabled`, …) | owned by another provisioner | **refuses the write** |
+
+A refused object fails on its own — the rest of the push continues (subject to `--on-error`) —
+with
+
+```
+alerts: push rule group folder-uid-1/probe-group: provenance "file" is managed outside the API
+```
+
+This is not caution for its own sake: an object file provisioning owns would simply be re-created
+from its file on the next reload, and Grafana answers some of those writes with a 500 or a 409
+anyway. A rule group whose rules disagree with each other about provenance is refused the same
+way.
+
+For a **new** object, `--ui-editable` picks which side it lands on: by default a push claims what
+it creates for the API (`provenance: api`, matching what the UI shows as "provisioned"), and
+`--ui-editable` leaves it editable in the UI instead. It applies to **creates only** — an update
+always mirrors the provenance the object already carries, whatever the flag says.
+
+### Secrets: what is redacted, and what is not
+
+Grafana replaces the fields a contact-point type **declares secure** with the literal string
+`"[REDACTED]"` server-side, so that is what a pull writes to `contact-points.yaml`. **Leave it
+there.** Pushing the placeholder back keeps the stored secret; replacing it with a real value sets
+a new one. That is what makes pull → edit → push safe for contact points: you can change a channel
+name next to a secret you never see.
+
+```yaml
+- uid: cp-uid-1
+  name: probe-slack
+  type: slack
+  settings:
+    recipient: "#probe-v2"   # edited
+    url: "[REDACTED]"        # left alone — the stored secret is kept
+```
+
+The plan treats a `"[REDACTED]"` value as unchanged, so it never shows up as a diff, and it never
+hides a change to a field next to it — including inside an array, such as a webhook's custom
+headers.
+
+!!! warning "Only declared secure fields are redacted — treat the bundle as sensitive"
+
+    A credential Grafana does not treat as a secure field is written to disk **verbatim**: a token
+    embedded in a webhook URL path or query string, or in a custom header value, lands in
+    `contact-points.yaml` in plain text. The bundle files are created `0600`, but that is the only
+    protection they have. Read `contact-points.yaml` before committing a bundle to a repository,
+    attaching it to a ticket, or copying it between machines.
+
+#### Creating a contact point needs the real secret
+
+"Push the placeholder back and the stored secret is kept" is a property of an **update**. There is
+nothing stored for an object that does not exist yet, so a push that would *create* a contact point
+carrying `"[REDACTED]"` is refused rather than sent:
+
+```
+alerts: push contact point cp-uid-1: secret field(s) settings.url are redacted; set the real value(s) in the file before creating
+```
+
+This is what promoting a bundle from one instance to **another** runs into: over there every contact
+point is a create. Fill in the real values for the new contact points first (and keep that copy of
+the bundle out of version control), or create them once in the target instance's UI and re-pull.
+
+### Applying, and what the output means
+
+```shell
+grafanapi alerts push -p ./alerting
+```
+
+```
+✔ Update ContactPoint cp-uid-1
+✔ Unchanged PolicyTree policies
+✔ Update RuleGroup folder-uid-1/probe-group
+✔ Create RuleGroup folder-uid-2/latency
+✔ 4 change(s) applied, 0 error(s)
+```
+
+Unlike [`resources push`](../reference/cli/grafanapi_resources_push.md), which prints a single
+summary line, `alerts push` prints **one line per change**. A bundle holds few objects and each one
+has a large blast radius — a rule group covers every rule in it — so the intent is that the output
+is short enough to read in full.
+
+`--on-error` decides what a failed change does, exactly as on `resources push`:
+
+- `ignore` — attempt every change, exit **0** even if some failed
+- `fail` (default) — attempt every change, exit **1** if any failed
+- `abort` — stop at the first failure and exit **1**. Under `abort` the rule groups are written one
+  at a time, so "stop" means what it says; otherwise they are written concurrently, bounded by
+  `--max-concurrent` (default 10).
+
+Failures are printed after the successes, so the thing to act on is the last thing on screen, and
+the exit status carries the *first* failure's own error — a `403` still renders as the
+permission-denied message and a `401` still exits 2.
+
+!!! warning "No concurrency control: the last writer wins"
+
+    Grafana's provisioning API has no ETag, version or `If-Match` on any of these objects. If
+    someone edits a rule in the UI between your `pull` and your `push`, the push silently
+    overwrites their edit — and if two pushes race, whichever finishes last is what survives. A
+    `--dry-run` immediately before applying narrows the window; it does not close it.
+
+## Pause, resume, delete
+
+Individual rules are changed in place by UID, without a bundle:
+
+```shell
+grafanapi alerts rules pause  rule-uid-1 rule-uid-2
+grafanapi alerts rules resume rule-uid-1
+grafanapi alerts rules delete rule-uid-3 --dry-run
+```
+
+The UIDs are the ones the `UID` column of
+[`alerts rules list`](../reference/cli/grafanapi_alerts_rules_list.md) prints, and its `PAUSED`
+column shows the result.
+
+```
+✔ rule-uid-1 (probe-rule in probe-group) paused
+✔ rule-uid-2 (disk-almost-full in probe-group) paused
+✔ 2 rule(s) paused, 0 unchanged, 0 error(s)
+```
+
+A rule already in the state you asked for is reported as `already paused` (or `not paused` for a
+resume) and its group is **not** rewritten. Under `--dry-run` every outcome is prefixed
+`would be`, in the summary line too.
+
+!!! note "Pausing rewrites the rule's whole group"
+
+    Grafana has no endpoint for pausing a single rule: on 12.3.x a single-rule update that only
+    flips `isPaused` returns `200` but does not persist for an Editor. So `pause`/`resume` flip the
+    flag and write the whole rule group back, sending every *other* rule in it exactly as Grafana
+    reported it. Naming several rules of one group is therefore a single write, and a group owned
+    by another provisioner — or whose rules disagree about provenance — is refused rather than
+    claimed, as on a push.
+
+`delete` fetches each rule first, so a UID no rule carries is a clean "not found" rather than the
+`500` Grafana answers a `DELETE` for an unknown UID with, and the other named rules are still
+deleted:
+
+```
+✔ rule-uid-1 (probe-rule in probe-group) deleted
+✘ rule-uid-9 alerts: rule rule-uid-9 not found
+⚠ 1 rule(s) deleted, 0 unchanged, 1 error(s)
+```
+
+There is no `--force`: every rule these commands touch is named on the command line, so there is no
+"delete everything matching" case to guard. Run `--dry-run` to see the list first.
+
+### Exit codes
+
+| Exit | Meaning |
+| ---- | ------- |
+| 0 | everything succeeded (also the whole of a `--dry-run`, and of a push run with `--on-error ignore`) |
+| 1 | something was refused or not found: a `403`, a validation error, an unknown rule UID, a missing or unreadable folder, foreign provenance |
+| 2 | the session cookie is stale or unauthorized — see [Stale sessions](#stale-sessions) |
+
 ## Stale sessions
 
-If your session cookie has expired, both commands fail the same way every other authenticated
-command does: a "Grafana session is stale or unauthorized" error suggesting
+If your session cookie has expired, every command in the group fails the same way every other
+authenticated command does: a "Grafana session is stale or unauthorized" error suggesting
 `grafanapi login update`, and exit code **2** (distinct from the generic exit code 1). This holds
-for a `401` from either endpoint `rules list` calls.
+for a `401` from either endpoint `rules list` calls, and from any call a write makes — a `401`
+mid-push ends the push rather than being recorded as one more failed change, since nothing after it
+could succeed.
+
+A `403` is different and is *not* exit 2: re-authenticating cannot help a session whose user lacks
+the Editor role. It renders as "Grafana denied the request: your user lacks the required
+permission" and exits **1**.
 
 See [`grafanapi login`](../reference/cli/grafanapi_login.md) and
 [`grafanapi login update`](../reference/cli/grafanapi_login_update.md) for authenticating, or the
@@ -308,6 +704,26 @@ See [`grafanapi login`](../reference/cli/grafanapi_login.md) and
 
 ## Scope
 
-This group is read-only and covers alert rules and contact points only. Notification policies,
-silences, mute timings, message templates and alert-rule history are not exposed, and there is no
-create/update/delete path — use the Grafana UI or the provisioning API for those.
+The group covers alert rules, contact points and the notification policy tree. Silences, mute
+timings, message templates and alert-rule history are not exposed — use the Grafana UI or the
+provisioning API for those.
+
+Within what it does cover, five limits are worth knowing before you rely on it:
+
+- **No pruning.** A push adds and replaces; it never deletes an object the bundle omits. Delete a
+  rule by removing it from its group file (which *is* a deletion, see
+  [A rule group is written whole](#a-rule-group-is-written-whole)), or a rule group in the Grafana
+  UI.
+- **No concurrency control.** The last writer wins, always.
+- **Nothing org-admin.** No Alertmanager reset, no decrypted export, no contact-point deletion, no
+  data-source or mute-timing management.
+- **Objects another provisioner owns are refused**, not overwritten — an instance managed by file
+  provisioning cannot be managed with this group.
+- **A field the client's model does not know is dropped.** Bundles are decoded into the API models
+  the client was generated from, so a rule field a newer Grafana added — `metadata.editor_settings`
+  is the one to watch — is not written to the file on pull, and a push of that file therefore sends
+  the object without it. Grafana applies exactly the body it is sent, so the field is reset to its
+  default on the objects you push. Values *inside* a known field are not affected: a
+  `noDataState: KeepLast` or a contact point of a type this client predates round-trips unchanged,
+  because the bundle is checked for structure, not against the generated enums. Check the Grafana
+  UI after the first push of a rule that relies on such a field.

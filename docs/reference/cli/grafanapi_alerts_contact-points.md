@@ -23,6 +23,6 @@ Inspect the notification contact points alert rules deliver to.
 
 ### SEE ALSO
 
-* [grafanapi alerts](grafanapi_alerts.md)	 - Inspect Grafana alert rules and contact points
+* [grafanapi alerts](grafanapi_alerts.md)	 - Inspect and manage Grafana alert rules, contact points and notification policies
 * [grafanapi alerts contact-points list](grafanapi_alerts_contact-points_list.md)	 - List notification contact points
 
