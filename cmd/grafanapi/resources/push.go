@@ -6,6 +6,7 @@ import (
 
 	cmdconfig "github.com/grafana/grafanapi/cmd/grafanapi/config"
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
+	"github.com/grafana/grafanapi/cmd/grafanapi/onerror"
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/resources"
 	"github.com/grafana/grafanapi/internal/resources/discovery"
@@ -19,7 +20,7 @@ import (
 type pushOpts struct {
 	Paths             []string
 	MaxConcurrent     int
-	OnError           OnErrorMode
+	OnError           onerror.Mode
 	DryRun            bool
 	OmitManagerFields bool
 	IncludeManaged    bool
@@ -28,7 +29,7 @@ type pushOpts struct {
 func (opts *pushOpts) setup(flags *pflag.FlagSet) {
 	flags.StringSliceVarP(&opts.Paths, "path", "p", []string{defaultResourcesPath}, "Paths on disk from which to read the resources to push")
 	flags.IntVar(&opts.MaxConcurrent, "max-concurrent", 10, "Maximum number of concurrent operations")
-	bindOnErrorFlag(flags, &opts.OnError)
+	onerror.BindFlag(flags, &opts.OnError)
 	flags.BoolVar(&opts.DryRun, "dry-run", opts.DryRun, "If set, the push operation will be simulated, without actually creating or updating any resources")
 	flags.BoolVar(&opts.OmitManagerFields, "omit-manager-fields", opts.OmitManagerFields, "If set, the manager fields will not be appended to the resources")
 	flags.BoolVar(&opts.IncludeManaged, "include-managed", opts.IncludeManaged, "If set, resources managed by other tools will be included in the push operation")

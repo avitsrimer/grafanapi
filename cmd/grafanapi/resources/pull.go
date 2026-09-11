@@ -6,6 +6,7 @@ import (
 
 	cmdconfig "github.com/grafana/grafanapi/cmd/grafanapi/config"
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
+	"github.com/grafana/grafanapi/cmd/grafanapi/onerror"
 	"github.com/grafana/grafanapi/internal/resources/local"
 	"github.com/grafana/grafanapi/internal/resources/process"
 	"github.com/grafana/grafanapi/internal/resources/remote"
@@ -19,7 +20,7 @@ const (
 
 type pullOpts struct {
 	IO             cmdio.Options
-	OnError        OnErrorMode
+	OnError        onerror.Mode
 	IncludeManaged bool
 	Path           string
 }
@@ -28,7 +29,7 @@ func (opts *pullOpts) setup(flags *pflag.FlagSet) {
 	// Bind all the flags
 	opts.IO.BindFlags(flags)
 
-	bindOnErrorFlag(flags, &opts.OnError)
+	onerror.BindFlag(flags, &opts.OnError)
 	flags.StringVarP(&opts.Path, "path", "p", defaultResourcesPath, "Path on disk in which the resources will be written")
 	flags.BoolVar(
 		&opts.IncludeManaged,

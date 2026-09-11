@@ -8,6 +8,7 @@ import (
 
 	cmdconfig "github.com/grafana/grafanapi/cmd/grafanapi/config"
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
+	"github.com/grafana/grafanapi/cmd/grafanapi/onerror"
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/resources"
 	"github.com/spf13/cobra"
@@ -21,12 +22,12 @@ import (
 
 type getOpts struct {
 	IO      cmdio.Options
-	OnError OnErrorMode
+	OnError onerror.Mode
 }
 
 func (opts *getOpts) setup(flags *pflag.FlagSet) {
 	// Setup some additional formatting options
-	bindOnErrorFlag(flags, &opts.OnError)
+	onerror.BindFlag(flags, &opts.OnError)
 	opts.IO.RegisterCustomCodec("text", &tableCodec{wide: false})
 	opts.IO.RegisterCustomCodec("wide", &tableCodec{wide: true})
 	opts.IO.DefaultFormat("text")

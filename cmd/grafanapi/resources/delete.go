@@ -8,6 +8,7 @@ import (
 	cmdconfig "github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
+	"github.com/grafana/grafanapi/cmd/grafanapi/onerror"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/resources"
@@ -19,7 +20,7 @@ import (
 )
 
 type deleteOpts struct {
-	OnError       OnErrorMode
+	OnError       onerror.Mode
 	Force         bool
 	MaxConcurrent int
 	DryRun        bool
@@ -27,7 +28,7 @@ type deleteOpts struct {
 }
 
 func (opts *deleteOpts) setup(flags *pflag.FlagSet) {
-	bindOnErrorFlag(flags, &opts.OnError)
+	onerror.BindFlag(flags, &opts.OnError)
 	flags.IntVar(&opts.MaxConcurrent, "max-concurrent", 10, "Maximum number of concurrent operations")
 	flags.BoolVar(&opts.Force, "force", opts.Force, "Delete all resources of the specified resource types")
 	flags.BoolVar(&opts.DryRun, "dry-run", opts.DryRun, "If set, the delete operation will be simulated")

@@ -57,9 +57,9 @@ grafanapi resources get [RESOURCE_SELECTOR]... [flags]
 
 ```
   -h, --help              help for get
-      --on-error string   How to handle errors during resource operations:
-                            ignore — continue processing all resources and exit 0
-                            fail   — continue processing all resources and exit 1 if any failed (default)
+      --on-error string   How to handle errors while processing items:
+                            ignore — continue processing all items and exit 0
+                            fail   — continue processing all items and exit 1 if any failed (default)
                             abort  — stop on the first error and exit 1 (default "fail")
   -o, --output string     Output format. One of: json, text, wide, yaml (default "text")
 ```
