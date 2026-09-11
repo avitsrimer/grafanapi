@@ -3,6 +3,7 @@ package alerts_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -194,22 +195,37 @@ func newTestServerWithStateStatus(
 // newTestConfig writes a temp config file whose current context points at server and has org-id
 // set (so LoadConfig's validation does not attempt Grafana Cloud stack-id discovery), and seeds
 // the fake keychain with a session cookie for that context.
-func newTestConfig(t *testing.T, server *httptest.Server) (string, func()) {
+//
+// The fake store is uninstalled through t.Cleanup rather than by a closure the caller has to
+// defer: forgetting that defer leaves the real macOS Keychain wired up for every test that runs
+// after it, which fails somewhere else entirely - or blocks on an ACL prompt.
+func newTestConfig(t *testing.T, server *httptest.Server) string {
 	t.Helper()
 
-	configFile := testutils.CreateTempFile(t,
-		"current-context: test\ncontexts:\n  test:\n    grafana:\n      server: "+server.URL+"\n      org-id: 1\n")
+	return newTestConfigInOrg(t, server, 1)
+}
+
+// newTestConfigInOrg is newTestConfig with the context's org-id under test control, which is what
+// lets a push prove it claims created rules for the org the *context* names rather than the one
+// the file happens to carry.
+func newTestConfigInOrg(t *testing.T, server *httptest.Server, orgID int) string {
+	t.Helper()
+
+	configFile := testutils.CreateTempFile(t, fmt.Sprintf(
+		"current-context: test\ncontexts:\n  test:\n    grafana:\n      server: %s\n      org-id: %d\n",
+		server.URL, orgID,
+	))
 
 	store := testutils.NewFakeKeychainStore()
 	require.NoError(t, store.Set(keychain.Account("test"), "the-cookie"))
-	restoreStore := config.SetKeychainStore(store)
+	t.Cleanup(config.SetKeychainStore(store))
 
-	return configFile, restoreStore
+	return configFile
 }
 
 // newRulesFixture is the happy-path setup shared by most tests: both endpoints serving the
 // fixtures above, plus a matching config file.
-func newRulesFixture(t *testing.T) (string, func()) {
+func newRulesFixture(t *testing.T) string {
 	t.Helper()
 
 	return newTestConfig(t, newTestServer(t, http.StatusOK, provisionedRules, ruleStates))
@@ -249,8 +265,7 @@ func decodedTitles(t *testing.T, decoded []map[string]any) []string {
 }
 
 func Test_RulesListCommand_tableOutput(t *testing.T) {
-	configFile, restoreStore := newRulesFixture(t)
-	defer restoreStore()
+	configFile := newRulesFixture(t)
 
 	result := runRulesList(t, configFile)
 	require.NoError(t, result.Err)
@@ -280,8 +295,7 @@ func Test_RulesListCommand_tableOutput(t *testing.T) {
 // columns: the fixture's labels, annotations, provenance and folder UIDs are all present in the
 // payload and must all stay a json/yaml-only concern.
 func Test_RulesListCommand_tableOutputHidesLabels(t *testing.T) {
-	configFile, restoreStore := newRulesFixture(t)
-	defer restoreStore()
+	configFile := newRulesFixture(t)
 
 	result := runRulesList(t, configFile)
 	require.NoError(t, result.Err)
@@ -303,8 +317,7 @@ func Test_RulesListCommand_tableOutputHidesLabels(t *testing.T) {
 }
 
 func Test_RulesListCommand_jsonOutput(t *testing.T) {
-	configFile, restoreStore := newRulesFixture(t)
-	defer restoreStore()
+	configFile := newRulesFixture(t)
 
 	result := runRulesList(t, configFile, "-o", "json")
 	require.NoError(t, result.Err)
@@ -326,8 +339,7 @@ func Test_RulesListCommand_jsonOutput(t *testing.T) {
 // Test_RulesListCommand_jsonEmptyListIsArray pins the non-nil slice contract: `jq '.[]'` pipes
 // must keep working when nothing matches.
 func Test_RulesListCommand_jsonEmptyListIsArray(t *testing.T) {
-	configFile, restoreStore := newTestConfig(t, newTestServer(t, http.StatusOK, `[]`, emptyStates))
-	defer restoreStore()
+	configFile := newTestConfig(t, newTestServer(t, http.StatusOK, `[]`, emptyStates))
 
 	result := runRulesList(t, configFile, "-o", "json")
 	require.NoError(t, result.Err)
@@ -335,8 +347,7 @@ func Test_RulesListCommand_jsonEmptyListIsArray(t *testing.T) {
 }
 
 func Test_RulesListCommand_yamlOutput(t *testing.T) {
-	configFile, restoreStore := newRulesFixture(t)
-	defer restoreStore()
+	configFile := newRulesFixture(t)
 
 	result := runRulesList(t, configFile, "-o", "yaml")
 	require.NoError(t, result.Err)
@@ -350,8 +361,7 @@ func Test_RulesListCommand_yamlOutput(t *testing.T) {
 }
 
 func Test_RulesListCommand_unknownOutputFormat(t *testing.T) {
-	configFile, restoreStore := newRulesFixture(t)
-	defer restoreStore()
+	configFile := newRulesFixture(t)
 
 	result := runRulesList(t, configFile, "-o", "toml")
 	require.Error(t, result.Err)
@@ -359,8 +369,7 @@ func Test_RulesListCommand_unknownOutputFormat(t *testing.T) {
 }
 
 func Test_RulesListCommand_invalidState(t *testing.T) {
-	configFile, restoreStore := newRulesFixture(t)
-	defer restoreStore()
+	configFile := newRulesFixture(t)
 
 	result := runRulesList(t, configFile, "--state", "bogus")
 	require.Error(t, result.Err)
@@ -402,8 +411,7 @@ func Test_RulesListCommand_filters(t *testing.T) {
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			configFile, restoreStore := newRulesFixture(t)
-			defer restoreStore()
+			configFile := newRulesFixture(t)
 
 			result := runRulesList(t, configFile, append([]string{"-o", "json"}, testCase.args...)...)
 			require.NoError(t, result.Err)
@@ -418,9 +426,8 @@ func Test_RulesListCommand_filters(t *testing.T) {
 // Test_RulesListCommand_apiError500 pins the exit-code contract for a non-auth failure: the
 // error surfaces with the status code and no explicit exit code, i.e. the default exit 1.
 func Test_RulesListCommand_apiError500(t *testing.T) {
-	configFile, restoreStore := newTestConfig(t,
+	configFile := newTestConfig(t,
 		newTestServer(t, http.StatusInternalServerError, `{"message":"boom"}`, ruleStates))
-	defer restoreStore()
 
 	result := runRulesList(t, configFile)
 	require.Error(t, result.Err)
@@ -432,9 +439,8 @@ func Test_RulesListCommand_apiError500(t *testing.T) {
 // Test_RulesListCommand_apiError401 is the stale-session regression test: a dead session must
 // still render as exit 2 through the whole command stack.
 func Test_RulesListCommand_apiError401(t *testing.T) {
-	configFile, restoreStore := newTestConfig(t,
+	configFile := newTestConfig(t,
 		newTestServer(t, http.StatusUnauthorized, `{"message":"Unauthorized"}`, ruleStates))
-	defer restoreStore()
 
 	result := runRulesList(t, configFile)
 	require.Error(t, result.Err)
@@ -462,8 +468,7 @@ func Test_RulesListCommand_stateEndpoint401WithFilter(t *testing.T) {
 				http.StatusOK, provisionedRules,
 				http.StatusUnauthorized, `{"message":"Unauthorized"}`)
 
-			configFile, restoreStore := newTestConfig(t, server)
-			defer restoreStore()
+			configFile := newTestConfig(t, server)
 
 			result := runRulesList(t, configFile, args...)
 			require.Error(t, result.Err)
@@ -483,8 +488,7 @@ func Test_RulesListCommand_stateEndpoint401WithFilter(t *testing.T) {
 // else: the fake keychain store is installed so the failure cannot come from a real-Keychain
 // prompt or timeout, and the error must be the plain exit-1 kind (no auth exit code claimed).
 func Test_RulesListCommand_loadConfigFailure(t *testing.T) {
-	restoreStore := config.SetKeychainStore(testutils.NewFakeKeychainStore())
-	defer restoreStore()
+	t.Cleanup(config.SetKeychainStore(testutils.NewFakeKeychainStore()))
 
 	result := runRulesList(t, "/nonexistent/path/config.yaml")
 	require.Error(t, result.Err)
@@ -532,8 +536,7 @@ func Test_RulesListCommand_degradedStateEndpoint(t *testing.T) {
 		http.StatusOK, provisionedRules,
 		http.StatusInternalServerError, `{"message":"boom"}`)
 
-	configFile, restoreStore := newTestConfig(t, server)
-	defer restoreStore()
+	configFile := newTestConfig(t, server)
 
 	stdout, stderr, err := runRulesListCapturingLogs(t, configFile, "-o", "json")
 	require.NoError(t, err)
@@ -597,8 +600,7 @@ func Test_RulesListCommand_degradedStateEndpointFiltered(t *testing.T) {
 				http.StatusOK, provisionedRules,
 				http.StatusInternalServerError, `{"message":"boom"}`)
 
-			configFile, restoreStore := newTestConfig(t, server)
-			defer restoreStore()
+			configFile := newTestConfig(t, server)
 
 			result := runRulesList(t, configFile, append([]string{"-o", "json"}, testCase.args...)...)
 
@@ -636,8 +638,7 @@ func Test_RulesListCommand_degradedStateEndpointFiltered(t *testing.T) {
 // Test_RulesListCommand_contextFlag exercises the group's persistent --context flag: naming the
 // (only) context explicitly must behave exactly like relying on current-context.
 func Test_RulesListCommand_contextFlag(t *testing.T) {
-	configFile, restoreStore := newRulesFixture(t)
-	defer restoreStore()
+	configFile := newRulesFixture(t)
 
 	result := runRulesList(t, configFile, "--context", "test", "-o", "json")
 	require.NoError(t, result.Err)
@@ -694,15 +695,14 @@ func runContactPointsList(t *testing.T, configFile string, args ...string) testu
 
 // newContactPointsFixture is the happy-path setup: the contact-points endpoint serving
 // contactPointsBody, plus a matching config file.
-func newContactPointsFixture(t *testing.T) (string, func()) {
+func newContactPointsFixture(t *testing.T) string {
 	t.Helper()
 
 	return newTestConfig(t, newContactPointsServer(t, http.StatusOK, contactPointsBody))
 }
 
 func Test_ContactPointsListCommand_tableOutput(t *testing.T) {
-	configFile, restoreStore := newContactPointsFixture(t)
-	defer restoreStore()
+	configFile := newContactPointsFixture(t)
 
 	result := runContactPointsList(t, configFile)
 	require.NoError(t, result.Err)
@@ -730,8 +730,7 @@ func Test_ContactPointsListCommand_tableOutput(t *testing.T) {
 // Test_ContactPointsListCommand_jsonOutput pins that json output carries the whole settings
 // object, secrets included as the server's own "[REDACTED]" placeholder.
 func Test_ContactPointsListCommand_jsonOutput(t *testing.T) {
-	configFile, restoreStore := newContactPointsFixture(t)
-	defer restoreStore()
+	configFile := newContactPointsFixture(t)
 
 	result := runContactPointsList(t, configFile, "-o", "json")
 	require.NoError(t, result.Err)
@@ -752,8 +751,7 @@ func Test_ContactPointsListCommand_jsonOutput(t *testing.T) {
 }
 
 func Test_ContactPointsListCommand_jsonEmptyListIsArray(t *testing.T) {
-	configFile, restoreStore := newTestConfig(t, newContactPointsServer(t, http.StatusOK, `[]`))
-	defer restoreStore()
+	configFile := newTestConfig(t, newContactPointsServer(t, http.StatusOK, `[]`))
 
 	result := runContactPointsList(t, configFile, "-o", "json")
 	require.NoError(t, result.Err)
@@ -767,8 +765,7 @@ func Test_ContactPointsListCommand_jsonEmptyListIsArray(t *testing.T) {
 // names the plan expected. Asserted here so a codec-option change (internal/format's
 // yaml.UseJSONMarshaler / tag fallback) cannot silently rename every key.
 func Test_ContactPointsListCommand_yamlOutput(t *testing.T) {
-	configFile, restoreStore := newContactPointsFixture(t)
-	defer restoreStore()
+	configFile := newContactPointsFixture(t)
 
 	result := runContactPointsList(t, configFile, "-o", "yaml")
 	require.NoError(t, result.Err)
@@ -792,8 +789,7 @@ func Test_ContactPointsListCommand_yamlOutput(t *testing.T) {
 }
 
 func Test_ContactPointsListCommand_unknownOutputFormat(t *testing.T) {
-	configFile, restoreStore := newContactPointsFixture(t)
-	defer restoreStore()
+	configFile := newContactPointsFixture(t)
 
 	result := runContactPointsList(t, configFile, "-o", "toml")
 	require.Error(t, result.Err)
@@ -801,9 +797,8 @@ func Test_ContactPointsListCommand_unknownOutputFormat(t *testing.T) {
 }
 
 func Test_ContactPointsListCommand_apiError500(t *testing.T) {
-	configFile, restoreStore := newTestConfig(t,
+	configFile := newTestConfig(t,
 		newContactPointsServer(t, http.StatusInternalServerError, `{"message":"boom"}`))
-	defer restoreStore()
 
 	result := runContactPointsList(t, configFile)
 	require.Error(t, result.Err)
@@ -815,9 +810,8 @@ func Test_ContactPointsListCommand_apiError500(t *testing.T) {
 // Test_ContactPointsListCommand_apiError401 is the stale-session regression test for the second
 // subcommand: a dead session must render as exit 2 here too.
 func Test_ContactPointsListCommand_apiError401(t *testing.T) {
-	configFile, restoreStore := newTestConfig(t,
+	configFile := newTestConfig(t,
 		newContactPointsServer(t, http.StatusUnauthorized, `{"message":"Unauthorized"}`))
-	defer restoreStore()
 
 	result := runContactPointsList(t, configFile)
 	require.Error(t, result.Err)
@@ -829,8 +823,7 @@ func Test_ContactPointsListCommand_apiError401(t *testing.T) {
 }
 
 func Test_ContactPointsListCommand_loadConfigFailure(t *testing.T) {
-	restoreStore := config.SetKeychainStore(testutils.NewFakeKeychainStore())
-	defer restoreStore()
+	t.Cleanup(config.SetKeychainStore(testutils.NewFakeKeychainStore()))
 
 	result := runContactPointsList(t, "/nonexistent/path/config.yaml")
 	require.Error(t, result.Err)

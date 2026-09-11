@@ -1,8 +1,13 @@
-// Package alerts implements read-only access to Grafana Unified Alerting - alert rule
-// definitions joined with their live evaluation state, plus notification contact points.
+// Package alerts implements Grafana Unified Alerting as code: reading alert rule definitions
+// joined with their live evaluation state and the notification configuration beside them, and
+// writing rule groups, contact points and the notification policy tree back.
 //
 // It holds the domain logic for the `grafanapi alerts` command group; no Cobra types appear
-// here (cmd/grafanapi/alerts is the thin wiring layer).
+// here (cmd/grafanapi/alerts is the thin wiring layer). Reading needs the Viewer role and writing
+// needs Editor; nothing here calls an org-admin endpoint, decrypts a secret or deletes a contact
+// point.
+//
+// # Reading
 //
 // Two data sources are combined:
 //
@@ -30,8 +35,35 @@
 // consumed on its own - by a future non-rules caller and by its own unit tests - without going
 // through the provisioning join.
 //
+// # Writing
+//
+// The write half moves a whole alerting configuration - a Bundle of rule groups, contact points
+// and the notification policy tree - between Grafana and a directory of files, and changes
+// individual rules in place:
+//
+//   - files.go is the on-disk layout and its codecs. A bundle mirrors the write models rather than
+//     Grafana's export format, which the write endpoints reject; read-only fields are stripped on
+//     the way out and both supported file formats produce the same key set.
+//   - pull.go fetches a Bundle, either whole or restricted to named folders or groups, so a push
+//     reads only the objects it is about to write.
+//   - diff.go turns a local and a remote Bundle into an ordered, deterministic plan of
+//     Create/Update/Unchanged changes - what --dry-run prints, and the order push applies.
+//   - push.go applies that plan: contact points, then the policy tree, then the rule groups. A
+//     rule group is written whole, so Grafana replaces it with what the file holds; folders are
+//     never created, and Grafana offers no optimistic concurrency, so the last writer wins.
+//   - ruleops.go pauses, resumes and deletes named rules. Pausing has no endpoint of its own and
+//     goes through the same whole-group write (see SetRulesPaused).
+//   - provenance.go decides the X-Disable-Provenance header every write carries: an object
+//     Grafana has claimed keeps its claim, an unclaimed one stays unclaimed unless the caller
+//     asks otherwise, and an object another provisioner owns is refused rather than overwritten.
+//
+// Secure contact-point settings are never decrypted or printed: they arrive as the server's
+// "[REDACTED]" placeholder, compare as unchanged, and pushing the placeholder back leaves the
+// stored secret alone.
+//
 // Design notes and the verified wire shapes are recorded in
-// docs/plans/completed/20260909-alerts-command.md.
+// docs/plans/completed/20260909-alerts-command.md and
+// docs/plans/completed/20260911-alerts-write.md.
 package alerts
 
 import (
@@ -530,11 +562,30 @@ func stateDependentFilter(folder, state string) string {
 	}
 }
 
+// hasStatus reports whether err carries a *runtime.APIError with the given status code.
+//
+// Both the generated client and the raw-HTTP state call surface a failure as one - the folders
+// client through asAPIError - and it is the same value cmd/grafanapi/fail matches on to pick
+// between the stale-session and permission-denied renderings.
+func hasStatus(err error, status int) bool {
+	var apiErr *runtime.APIError
+
+	return errors.As(err, &apiErr) && apiErr.Code == status
+}
+
+// isForbidden reports whether err carries a 403, which cmd/grafanapi/fail turns into the
+// permission-denied message and exit code 1.
+//
+// A 403 says what this session may not touch, not that the session is over: Grafana's alerting
+// permissions are per folder, so the next object may well be writable. It is therefore recorded
+// against the object - or the folder - it was answered for, and never stops the run by itself.
+func isForbidden(err error) bool {
+	return hasStatus(err, http.StatusForbidden)
+}
+
 // isUnauthorized reports whether err carries a 401 from either the generated client or the
 // raw-HTTP state call. Both surface it as a *runtime.APIError, which is exactly what
 // cmd/grafanapi/fail turns into the stale-session message and exit code 2.
 func isUnauthorized(err error) bool {
-	var apiErr *runtime.APIError
-
-	return errors.As(err, &apiErr) && apiErr.Code == http.StatusUnauthorized
+	return hasStatus(err, http.StatusUnauthorized)
 }

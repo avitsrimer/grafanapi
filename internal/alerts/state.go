@@ -60,7 +60,7 @@ const stateReasonSeparator = " ("
 //   - 200: the body is decoded; a `status` other than "success" is an error.
 //   - 401: rotation (if any) has already been attempted by the transport and failed or was
 //     exhausted, so the session is truly dead. A *runtime.APIError{Code: 401} is returned
-//     unwrapped (never session.ErrUnauthorized) so cmd/grafanapi/fail's convertSessionErrors
+//     unwrapped (never session.ErrUnauthorized) so cmd/grafanapi/fail's convertAuthErrors
 //     renders it as the stale-session message, not the login-rejected one.
 //   - anything else: a bounded snippet of the body is included in a plain error.
 func FetchRuleStates(ctx context.Context, gCtx *config.Context) (RuleStates, error) {

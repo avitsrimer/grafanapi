@@ -16,7 +16,7 @@ import (
 
 // refreshOpAuth is the "op" argument used to build the runtime.APIError that carries a rejected
 // rotation to fail's centralized stale-session rendering (see runSingle/aggregateOutcomes and
-// cmd/grafanapi/fail/convert.go's convertSessionErrors, which recognizes any *runtime.APIError
+// cmd/grafanapi/fail/convert.go's convertAuthErrors, which recognizes any *runtime.APIError
 // with Code == http.StatusUnauthorized regardless of op).
 const refreshOpAuth = "session refresh"
 

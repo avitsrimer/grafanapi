@@ -424,7 +424,7 @@ func TestFetchRuleStates_NoOrgHeaderWhenUnset(t *testing.T) {
 // TestFetchRuleStates_DeadSession401 is the regression test for the 401->runtime.APIError
 // mapping: once rotation itself is exhausted, FetchRuleStates must surface an unwrapped
 // *runtime.APIError{Code: 401} - and in particular not a *url.Error, which
-// fail.convertNetworkErrors would claim first (it runs before convertSessionErrors).
+// fail.convertNetworkErrors would claim first (it runs before convertAuthErrors).
 func TestFetchRuleStates_DeadSession401(t *testing.T) {
 	rotateServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

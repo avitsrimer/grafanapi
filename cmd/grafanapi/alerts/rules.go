@@ -64,11 +64,23 @@ func (opts *rulesListOptions) listRulesOptions() alerts.ListRulesOptions {
 func rulesCmd(configOpts *cmdconfig.Options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rules",
-		Short: "Inspect alert rules",
-		Long:  "Inspect Grafana alert rules: their definitions joined with their live evaluation state.",
+		Short: "Inspect and manage alert rules",
+		Long: `Inspect and manage Grafana alert rules.
+
+` + "`list`" + ` reports each rule's definition joined with its live evaluation state. ` + "`pause`" + `, ` + "`resume`" + ` and
+` + "`delete`" + ` change the named rules in place, addressing them by the UID that listing prints.
+
+Pausing a rule rewrites the whole rule group it lives in, since Grafana has no endpoint for the
+flag alone; the group's other rules are sent back untouched. Rules another provisioner owns are
+refused rather than overwritten, and all three write commands accept --dry-run.
+
+Listing needs the Viewer role; pausing, resuming and deleting need Editor.`,
 	}
 
+	cmd.AddCommand(rulesDeleteCmd(configOpts))
 	cmd.AddCommand(rulesListCmd(configOpts))
+	cmd.AddCommand(rulesPauseCmd(configOpts, true))
+	cmd.AddCommand(rulesPauseCmd(configOpts, false))
 
 	return cmd
 }
