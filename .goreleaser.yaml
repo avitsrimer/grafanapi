@@ -72,9 +72,16 @@ homebrew_casks:
     description: "grafanapi: a session-cookie-authenticated CLI for managing Grafana resources"
     # the binary is unsigned/ad-hoc, so a downloaded cask is Gatekeeper-quarantined;
     # strip the quarantine attribute on install so `grafanapi` runs without a manual xattr call.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/grafanapi"]
-          end
+    #
+    # Emitted through custom_block rather than hooks.post.install: GoReleaser renders that hook as
+    # a `postflight do` block, which Homebrew deprecated in favour of the declarative
+    # `postflight_steps` DSL, and GoReleaser has no knob for the new stanza (still hardcoded in its
+    # cask template as of v2.16). Braces are escaped because custom_block is run through
+    # GoReleaser's own template engine first; Homebrew expands `{{staged_path}}` itself.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "{{ "{{" }}staged_path{{ "}}" }}/grafanapi"]
+        end
+      end
