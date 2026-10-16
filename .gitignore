@@ -11,3 +11,6 @@
 # Integration testing artifacts
 test-dashboard.yaml
 test-*.yaml
+
+# Local working notes
+/.grafanapi-*.md

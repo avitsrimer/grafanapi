@@ -16,6 +16,13 @@ title: Usage
 
     Run ad-hoc PromQL/LogQL/SQL queries against a datasource from the terminal.
 
+-   :material-bell-outline:{ .lg .middle } __[Alerting](./alerting.md)__
+
+    ---
+
+    Inspect alert rules with their live evaluation state, pull and push the whole alerting
+    configuration as code, and pause, resume or delete individual rules.
+
 -   :material-backup-restore:{ .lg .middle } __[Manage resources](./manage-resources.md)__
 
     ---

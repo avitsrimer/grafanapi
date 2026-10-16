@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/go-openapi/runtime"
+	"github.com/grafana/grafanapi/internal/alerts"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/resources"
 	"github.com/grafana/grafanapi/internal/session"
@@ -25,6 +26,17 @@ const staleSessionSuggestion = "Run: grafanapi login update"
 // `login update`, since that is either the very command that just failed (login update) or a
 // command that isn't valid yet for a context that was never successfully authenticated (login).
 const loginRejectedSuggestion = "Verify the session cookie value and try again"
+
+// permissionDeniedSuggestion is shown when Grafana authenticates the user but refuses the request
+// (403): the session is valid, so re-authenticating would not help — the user needs a role with
+// enough permissions, or a context pointing at an instance where they have one.
+//
+// It is deliberately operation-neutral: convertAuthErrors matches every 403 the openapi transport
+// produces, so this text is also what `explore`, `datasources`, `config check` and `login` show.
+// Which role a given operation needs belongs in that command's own help and guide (alerting writes
+// need Editor, for instance), not in a converter that cannot know what was being attempted.
+const permissionDeniedSuggestion = "Check the permissions of your user, and that the current context targets " +
+	"the intended Grafana instance: grafanapi config current-context"
 
 // sessionAuthExitCode is the exit code used for both the "stale session" and "login rejected"
 // cases: any error condition where the user must (re-)authenticate before retrying.
@@ -50,8 +62,9 @@ func ErrorToDetailedError(err error) *DetailedError {
 		convertConfigErrors,    // Config-related
 		convertFSErrors,        // FS-related
 		convertResourcesErrors, // Resources-related
+		convertAlertsErrors,    // Alerting-specific failures (a uid no rule carries)
 		convertNetworkErrors,   // Network-related errors
-		convertSessionErrors,   // Stale/unauthorized Grafana session (openapi 401, session.ErrUnauthorized)
+		convertAuthErrors,      // Grafana auth failures (openapi 401/403, session.ErrUnauthorized)
 		convertAPIErrors,       // API-related errors (k8s dynamic-client StatusError)
 	}
 
@@ -179,20 +192,29 @@ func convertAPIErrors(err error) (*DetailedError, bool) {
 	}, true
 }
 
-// convertSessionErrors handles Grafana session-cookie authentication failures that do not surface
-// as a k8s StatusError: a 401 from the grafana-openapi-client-go transport (e.g. `config check` /
-// grafana.GetVersion) produced during normal use of an already-established context, and a bare
-// session.ErrUnauthorized returned directly by session.VerifyCookie when login/login-update's own
-// cookie-validation prompt is rejected. The former renders as the "stale session" message (exit
-// code sessionAuthExitCode, suggesting `login update`); the latter renders as a distinct
-// "login rejected" message (same exit code) since suggesting `login update` there is either
-// circular (that's the command that just failed) or premature (the context was never successfully
-// authenticated in the first place). A raw k8s 401 is handled by convertAPIErrors instead, since
-// it needs the *k8sapi.StatusError type assertion this function does not perform.
-func convertSessionErrors(err error) (*DetailedError, bool) {
+// convertAuthErrors handles Grafana authentication and authorization failures that do not surface
+// as a k8s StatusError: a 401 or 403 from the grafana-openapi-client-go transport (e.g.
+// `config check` / grafana.GetVersion, or an `alerts push` write) produced during normal use of an
+// already-established context, and a bare session.ErrUnauthorized returned directly by
+// session.VerifyCookie when login/login-update's own cookie-validation prompt is rejected.
+//
+// A 401 renders as the "stale session" message (exit code sessionAuthExitCode, suggesting
+// `login update`); session.ErrUnauthorized renders as a distinct "login rejected" message (same
+// exit code) since suggesting `login update` there is either circular (that's the command that just
+// failed) or premature (the context was never successfully authenticated in the first place). A 403
+// means the opposite of both: the cookie *was* accepted and the user simply lacks the permission,
+// so it renders as a permission-denied error with the default exit code (1) and never suggests
+// re-authenticating. A raw k8s 401/403 is handled by convertAPIErrors instead, since it needs the
+// *k8sapi.StatusError type assertion this function does not perform.
+func convertAuthErrors(err error) (*DetailedError, bool) {
 	apiErr := &runtime.APIError{}
-	if errors.As(err, &apiErr) && apiErr.Code == http.StatusUnauthorized {
-		return staleSessionError(err), true
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case http.StatusUnauthorized:
+			return staleSessionError(err), true
+		case http.StatusForbidden:
+			return permissionDeniedError(err), true
+		}
 	}
 
 	if errors.Is(err, session.ErrUnauthorized) {
@@ -227,6 +249,41 @@ func loginRejectedError(err error) *DetailedError {
 		Suggestions: []string{loginRejectedSuggestion},
 		ExitCode:    &exitCode,
 	}
+}
+
+// permissionDeniedError builds the user-facing DetailedError for a request Grafana authenticated
+// but refused (403). Deliberately no ExitCode: unlike the 401 cases this is not an authentication
+// problem, so it falls back to the generic failure exit code (1) and must not suggest re-running
+// login. Parent is kept even though Grafana's 403 body is frequently an opaque `{}` — for the
+// operations that do carry a message, it is the only place that message is shown.
+func permissionDeniedError(err error) *DetailedError {
+	return &DetailedError{
+		Parent:      err,
+		Summary:     "Grafana denied the request: your user lacks the required permission",
+		Suggestions: []string{permissionDeniedSuggestion},
+	}
+}
+
+// convertAlertsErrors handles the alerting failures that are neither an authentication problem nor
+// a transport one. Today that is a single case: `alerts rules pause|resume|delete` naming a uid no
+// rule carries, which internal/alerts reports as alerts.ErrRuleNotFound wrapped with that uid.
+//
+// It runs before convertAuthErrors, which is unambiguous rather than delicate: a not-found error
+// carries no *runtime.APIError, and the aggregate a rule operation returns wraps its *first*
+// failure - so a run whose first failure is a 401 or a 403 never reaches this converter at all and
+// keeps its own exit code.
+func convertAlertsErrors(err error) (*DetailedError, bool) {
+	if errors.Is(err, alerts.ErrRuleNotFound) {
+		return &DetailedError{
+			Parent:  err,
+			Summary: "Alert rule not found",
+			Suggestions: []string{
+				"Check the UID against the UID column of: grafanapi alerts rules list",
+			},
+		}, true
+	}
+
+	return nil, false
 }
 
 func convertResourcesErrors(err error) (*DetailedError, bool) {

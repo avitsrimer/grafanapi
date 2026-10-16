@@ -8,6 +8,7 @@ import (
 
 	cmdconfig "github.com/grafana/grafanapi/cmd/grafanapi/config"
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
+	"github.com/grafana/grafanapi/cmd/grafanapi/onerror"
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/resources"
 	"github.com/grafana/grafanapi/internal/resources/discovery"
@@ -22,7 +23,7 @@ type validateOpts struct {
 
 	Paths         []string
 	MaxConcurrent int
-	OnError       OnErrorMode
+	OnError       onerror.Mode
 }
 
 func (opts *validateOpts) setup(flags *pflag.FlagSet) {
@@ -33,7 +34,7 @@ func (opts *validateOpts) setup(flags *pflag.FlagSet) {
 
 	flags.StringSliceVarP(&opts.Paths, "path", "p", []string{defaultResourcesPath}, "Paths on disk from which to read the resources.")
 	flags.IntVar(&opts.MaxConcurrent, "max-concurrent", 10, "Maximum number of concurrent operations")
-	bindOnErrorFlag(flags, &opts.OnError)
+	onerror.BindFlag(flags, &opts.OnError)
 }
 
 func (opts *validateOpts) Validate() error {

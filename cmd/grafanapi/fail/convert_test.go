@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-openapi/runtime"
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
+	"github.com/grafana/grafanapi/internal/alerts"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/format"
 	"github.com/grafana/grafanapi/internal/session"
@@ -70,6 +71,105 @@ func TestErrorToDetailedError_LoginRejected(t *testing.T) {
 	require.NotNil(t, detailedErr.ExitCode)
 	assert.Equal(t, 2, *detailedErr.ExitCode)
 	assert.Equal(t, err, detailedErr.Parent)
+}
+
+// TestErrorToDetailedError_PermissionDenied covers the authorization half of convertAuthErrors: an
+// openapi 403 (e.g. a Viewer running `alerts push`) means the session cookie was accepted and the
+// user simply lacks the permission, so it must render its own message, must not suggest
+// re-authenticating, and must keep the default exit code (1) rather than the 401 cases' exit 2.
+//
+// The suggestion is asserted to be operation-neutral: this converter matches every 403 the openapi
+// transport produces - `explore`, `datasources`, `config check`, `login` - so naming the role one
+// particular operation needs would be wrong advice for all the others.
+func TestErrorToDetailedError_PermissionDenied(t *testing.T) {
+	err := &runtime.APIError{OperationName: "postAlertRuleGroup", Code: 403, Response: "{}"}
+
+	detailedErr := fail.ErrorToDetailedError(err)
+
+	require.NotNil(t, detailedErr)
+	assert.Equal(t, "Grafana denied the request: your user lacks the required permission", detailedErr.Summary)
+	assert.NotEqual(t, "Grafana session is stale or unauthorized", detailedErr.Summary)
+	assert.Nil(t, detailedErr.ExitCode, "403 is not an authentication failure: exit code stays the default 1")
+	assert.Equal(t, err, detailedErr.Parent)
+	require.Len(t, detailedErr.Suggestions, 1)
+	assert.Contains(t, detailedErr.Suggestions[0], "config current-context")
+	assert.NotContains(t, detailedErr.Suggestions[0], "login update")
+	assert.NotContains(t, detailedErr.Suggestions[0], "Editor",
+		"every openapi 403 lands here, so the suggestion must not name one operation's role")
+	assert.NotContains(t, detailedErr.Suggestions[0], "Alerting")
+}
+
+// TestErrorToDetailedError_RuleNotFound pins the tidy rendering of a mistyped rule uid: without its
+// own converter arm it falls through to the generic "Unexpected error" heading, which reads as a
+// bug in grafanapi rather than as a typo. It is not an authentication failure, so the exit code
+// stays the default 1.
+func TestErrorToDetailedError_RuleNotFound(t *testing.T) {
+	err := fmt.Errorf("2 rule(s) failed to delete: %w",
+		fmt.Errorf("alerts: rule rule-uid-9 %w", alerts.ErrRuleNotFound))
+
+	detailedErr := fail.ErrorToDetailedError(err)
+
+	require.NotNil(t, detailedErr)
+	assert.Equal(t, "Alert rule not found", detailedErr.Summary)
+	assert.Nil(t, detailedErr.ExitCode, "a uid no rule carries is not an authentication failure")
+	assert.Equal(t, err, detailedErr.Parent)
+	require.Len(t, detailedErr.Suggestions, 1)
+	assert.Contains(t, detailedErr.Suggestions[0], "alerts rules list")
+}
+
+// TestErrorToDetailedError_RuleNotFoundDoesNotOutrankAuth pins the converter ordering that matters:
+// convertAlertsErrors runs before convertAuthErrors, so a 401 or a 403 must still win when it is
+// the error the command actually returned. A rule operation returns the aggregate wrapping its
+// *first* failure, which is exactly the shape asserted here.
+func TestErrorToDetailedError_RuleNotFoundDoesNotOutrankAuth(t *testing.T) {
+	tests := map[string]struct {
+		code    int
+		summary string
+		exit    *int
+	}{
+		"401 stays the stale-session exit 2": {
+			code:    401,
+			summary: "Grafana session is stale or unauthorized",
+			exit:    new(2),
+		},
+		"403 stays the permission-denied exit 1": {
+			code:    403,
+			summary: "Grafana denied the request: your user lacks the required permission",
+		},
+	}
+
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := fmt.Errorf("1 rule(s) failed to delete: %w",
+				&runtime.APIError{OperationName: "deleteAlertRule", Code: testCase.code, Response: "{}"})
+
+			detailedErr := fail.ErrorToDetailedError(err)
+
+			require.NotNil(t, detailedErr)
+			assert.Equal(t, testCase.summary, detailedErr.Summary)
+			assert.Equal(t, testCase.exit, detailedErr.ExitCode)
+		})
+	}
+}
+
+// TestErrorToDetailedError_PermissionDeniedWrappedInURLErrorIsANetworkError pins a known
+// consequence of the converter ordering in ErrorToDetailedError: convertNetworkErrors runs before
+// convertAuthErrors and claims anything wrapping a *url.Error, so a 403 (like a 401) that reaches
+// the renderer inside a *url.Error is reported as a network error. Nothing in grafanapi's
+// authenticated paths currently wraps an openapi APIError that way; this test exists so the caveat
+// stays visible and any future reordering is a deliberate, test-updating decision.
+func TestErrorToDetailedError_PermissionDeniedWrappedInURLErrorIsANetworkError(t *testing.T) {
+	err := &url.Error{
+		Op:  "Post",
+		URL: "https://grafana.example.com/api/v1/provisioning/alert-rules",
+		Err: &runtime.APIError{OperationName: "postAlertRule", Code: 403},
+	}
+
+	detailedErr := fail.ErrorToDetailedError(err)
+
+	require.NotNil(t, detailedErr)
+	assert.Equal(t, "Network error", detailedErr.Summary)
+	assert.Nil(t, detailedErr.ExitCode)
 }
 
 func TestErrorToDetailedError_NonStaleErrorsPassThroughUnchanged(t *testing.T) {
