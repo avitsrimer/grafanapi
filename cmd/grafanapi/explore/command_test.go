@@ -9,9 +9,11 @@ import (
 	"testing"
 	"unicode"
 
+	"github.com/fatih/color"
 	"github.com/goccy/go-yaml"
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/cmd/grafanapi/explore"
+	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/spf13/pflag"
@@ -63,6 +65,17 @@ func newTestConfig(t *testing.T, server *httptest.Server) (string, func()) {
 	restoreStore := config.SetKeychainStore(store)
 
 	return configFile, restoreStore
+}
+
+// setNoColor turns fatih/color off for one test so the renderer's own ESCs do not mask the
+// assertions.
+func setNoColor(t *testing.T) {
+	t.Helper()
+
+	previous := color.NoColor
+	color.NoColor = true
+
+	t.Cleanup(func() { color.NoColor = previous })
 }
 
 // samplePromResponse returns a fresh /api/ds/query success body (a single Prometheus-style
@@ -260,6 +273,44 @@ func Test_ExploreCommand_perRefIDErrorExitsNonZero(t *testing.T) {
 		Command: []string{"prom-uid", "up(", "--config", configFile},
 		Assertions: []testutils.CommandAssertion{
 			testutils.CommandErrorContains("parse error"),
+		},
+	}
+	testCase.Run(t)
+}
+
+func Test_ExploreCommand_perRefIDErrorIsScrubbedWhenRendered(t *testing.T) {
+	setNoColor(t)
+
+	errorResponse := map[string]any{
+		"results": map[string]any{
+			"A": map[string]any{
+				"status": 400,
+				"error":  "parse error \u001b]52;c;aGk=\u0007",
+			},
+		},
+	}
+
+	server := newTestServer(t, "prom-uid", "Prometheus", "prometheus", http.StatusOK, errorResponse)
+	configFile, restoreStore := newTestConfig(t, server)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     explore.Command(),
+		Command: []string{"prom-uid", "up(", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			func(t *testing.T, result testutils.CommandResult) {
+				t.Helper()
+
+				require.Error(t, result.Err)
+				// The domain error stays faithful; only the rendering scrubs.
+				assert.Contains(t, result.Err.Error(), "\x1b]52;c;aGk=\x07")
+
+				rendered := fail.ErrorToDetailedError(result.Err).Error()
+				assert.Contains(t, rendered, "parse error")
+				assert.NotContains(t, rendered, "\x1b")
+				assert.NotContains(t, rendered, "\x07")
+				assert.NotContains(t, rendered, "aGk=")
+			},
 		},
 	}
 	testCase.Run(t)
