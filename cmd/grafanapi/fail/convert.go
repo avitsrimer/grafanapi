@@ -38,6 +38,12 @@ const loginRejectedSuggestion = "Verify the session cookie value and try again"
 const permissionDeniedSuggestion = "Check the permissions of your user, and that the current context targets " +
 	"the intended Grafana instance: grafanapi config current-context"
 
+// neverPasteCookieSuggestion closes every session-binding remedy: `login update` validates the
+// pasted cookie by sending it to the configured server, so pasting one while an unexpected server
+// is configured hands the cookie to that server.
+const neverPasteCookieSuggestion = "Never paste a session cookie while an unexpected server is configured: " +
+	"login update sends it to that server to validate it"
+
 // sessionAuthExitCode is the exit code used for both the "stale session" and "login rejected"
 // cases: any error condition where the user must (re-)authenticate before retrying.
 const sessionAuthExitCode = 2
@@ -59,13 +65,14 @@ func ErrorToDetailedError(err error) *DetailedError {
 
 	// Try to convert the error for common error categories
 	errorConverters := []func(err error) (*DetailedError, bool){
-		convertConfigErrors,    // Config-related
-		convertFSErrors,        // FS-related
-		convertResourcesErrors, // Resources-related
-		convertAlertsErrors,    // Alerting-specific failures (a uid no rule carries)
-		convertNetworkErrors,   // Network-related errors
-		convertAuthErrors,      // Grafana auth failures (openapi 401/403, session.ErrUnauthorized)
-		convertAPIErrors,       // API-related errors (k8s dynamic-client StatusError)
+		convertConfigErrors,         // Config-related
+		convertSessionBindingErrors, // Stored session cookie bound to another server (never sent)
+		convertFSErrors,             // FS-related
+		convertResourcesErrors,      // Resources-related
+		convertAlertsErrors,         // Alerting-specific failures (a uid no rule carries)
+		convertNetworkErrors,        // Network-related errors
+		convertAuthErrors,           // Grafana auth failures (openapi 401/403, session.ErrUnauthorized)
+		convertAPIErrors,            // API-related errors (k8s dynamic-client StatusError)
 	}
 
 	for _, converter := range errorConverters {
@@ -284,6 +291,54 @@ func convertAlertsErrors(err error) (*DetailedError, bool) {
 	}
 
 	return nil, false
+}
+
+// convertSessionBindingErrors renders a stored session cookie that was withheld because it is not
+// bound to the server the context currently targets.
+//
+// The suggestions are ordered on purpose. The user reading this may be standing in a shell an
+// attacker influenced (GRAFANA_SERVER, GRAFANAPI_CONFIG, --config, an .envrc), and `login update`
+// run there sends the freshly pasted cookie to the server that was just refused. So removing the
+// overrides always comes first, a re-bind is only offered as a conditional second step from a clean
+// shell, and the last line says why pasting a cookie into an unexpected server is the real danger.
+//
+// The message carries origins only, never a cookie: *config.SessionBindingError has no such field.
+func convertSessionBindingErrors(err error) (*DetailedError, bool) {
+	bindingErr := &config.SessionBindingError{}
+	if !errors.As(err, &bindingErr) {
+		return nil, false
+	}
+
+	if bindingErr.BoundOrigin == "" {
+		exitCode := sessionAuthExitCode
+
+		return &DetailedError{
+			Parent:  err,
+			Summary: "Session cookie not sent: session is not bound to a server yet",
+			Suggestions: []string{
+				"Run the command again from a shell without GRAFANA_SERVER, GRAFANAPI_CONFIG, " +
+					"XDG_CONFIG_HOME or --config: the stored session is then bound automatically to the " +
+					"server in your own configuration file",
+				"Or, from that clean shell, run grafanapi login update --context " + bindingErr.Context,
+				neverPasteCookieSuggestion,
+			},
+			ExitCode: &exitCode,
+		}, true
+	}
+
+	return &DetailedError{
+		Parent:  err,
+		Summary: "Session cookie not sent: server does not match its login",
+		Suggestions: []string{
+			fmt.Sprintf("If you did not expect grafanapi to target %s, unset GRAFANA_SERVER and GRAFANAPI_CONFIG "+
+				"and drop --config (check for an .envrc or a repo-local configuration) so context %q targets %s again",
+				bindingErr.ServerOrigin, bindingErr.Context, bindingErr.BoundOrigin),
+			fmt.Sprintf("Only if you really moved context %q to %s: from a shell without those overrides, "+
+				"run grafanapi login update --context %s --rebind",
+				bindingErr.Context, bindingErr.ServerOrigin, bindingErr.Context),
+			neverPasteCookieSuggestion,
+		},
+	}, true
 }
 
 func convertResourcesErrors(err error) (*DetailedError, bool) {
