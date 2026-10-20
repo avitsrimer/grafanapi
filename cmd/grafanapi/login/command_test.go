@@ -508,7 +508,7 @@ func Test_LoginUpdateCommand_success(t *testing.T) {
 	configFile := testutils.CreateTempFile(t, initialContents)
 
 	store := &fakeKeychainStore{}
-	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "stale-cookie", server.URL)))
 	restoreStore := login.SetKeychainStore(store)
 	defer restoreStore()
 
@@ -533,9 +533,9 @@ func Test_LoginUpdateCommand_success(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, initialContents, string(written), "login update must not modify the configuration file")
 
-	cookie, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, "fresh-cookie", cookie)
+	cred := decodedCookie(t, store, "default")
+	require.Equal(t, "fresh-cookie", cred.Cookie)
+	require.Equal(t, server.URL, cred.Origin)
 }
 
 func Test_LoginUpdateCommand_explicitContextFlag(t *testing.T) {
@@ -563,11 +563,9 @@ func Test_LoginUpdateCommand_explicitContextFlag(t *testing.T) {
 	}
 	testCase.Run(t)
 
-	cookie, err := store.Get(keychain.Account("staging"))
-	require.NoError(t, err)
-	require.Equal(t, "fresh-cookie", cookie)
+	require.Equal(t, "fresh-cookie", decodedCookie(t, store, "staging").Cookie)
 
-	_, err = store.Get(keychain.Account("default"))
+	_, err := store.Get(keychain.Account("default"))
 	require.ErrorIs(t, err, keychain.ErrNotFound, "only the selected context's keychain item is touched")
 }
 
@@ -624,7 +622,7 @@ func Test_LoginUpdateCommand_validationFailureLeavesKeychainUntouched(t *testing
 	configFile := testutils.CreateTempFile(t, initialContents)
 
 	store := &fakeKeychainStore{}
-	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "stale-cookie", server.URL)))
 	restoreStore := login.SetKeychainStore(store)
 	defer restoreStore()
 
@@ -643,9 +641,7 @@ func Test_LoginUpdateCommand_validationFailureLeavesKeychainUntouched(t *testing
 	}
 	testCase.Run(t)
 
-	cookie, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, "stale-cookie", cookie, "a failed validation must not overwrite the existing keychain item")
+	require.Equal(t, "stale-cookie", decodedCookie(t, store, "default").Cookie, "a failed validation must not overwrite the existing keychain item")
 
 	written, err := os.ReadFile(configFile)
 	require.NoError(t, err)
@@ -879,7 +875,7 @@ func Test_LoginUpdateCommand_keychainSetFailureSurfacesError(t *testing.T) {
 	configFile := testutils.CreateTempFile(t, initialContents)
 
 	store := &fakeKeychainStore{}
-	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "stale-cookie", server.URL)))
 	store.setErr = errors.New("keychain unavailable")
 	restoreStore := login.SetKeychainStore(store)
 	defer restoreStore()
@@ -897,9 +893,7 @@ func Test_LoginUpdateCommand_keychainSetFailureSurfacesError(t *testing.T) {
 	}
 	testCase.Run(t)
 
-	cookie, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, "stale-cookie", cookie, "a failed keychain Set must not leave the stale cookie overwritten with a half-applied value")
+	require.Equal(t, "stale-cookie", decodedCookie(t, store, "default").Cookie, "a failed keychain Set must not leave the stale cookie overwritten with a half-applied value")
 
 	written, err := os.ReadFile(configFile)
 	require.NoError(t, err)
@@ -1029,7 +1023,7 @@ func Test_LoginUpdateCommand_cookieStdinSuccess(t *testing.T) {
 	configFile := testutils.CreateTempFile(t, initialContents)
 
 	store := &fakeKeychainStore{}
-	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "stale-cookie", server.URL)))
 	restoreStore := login.SetKeychainStore(store)
 	defer restoreStore()
 
@@ -1050,9 +1044,7 @@ func Test_LoginUpdateCommand_cookieStdinSuccess(t *testing.T) {
 
 	require.Equal(t, 0, prompter.secretN, "--cookie-stdin must read the cookie from stdin, not the prompter")
 
-	cookie, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, "fresh-cookie", cookie)
+	require.Equal(t, "fresh-cookie", decodedCookie(t, store, "default").Cookie)
 
 	written, err := os.ReadFile(configFile)
 	require.NoError(t, err)
@@ -1085,4 +1077,198 @@ func Test_LoginUpdateCommand_cookieStdinEmptyStdinFails(t *testing.T) {
 
 	_, err := store.Get(keychain.Account("default"))
 	require.ErrorIs(t, err, keychain.ErrNotFound)
+}
+
+// updateRebindFixture is a `login update` run against a context whose configuration targets the
+// "new" server, with the stored item seeded by the test.
+type updateRebindFixture struct {
+	configFile string
+	newServer  *httptest.Server
+	newHits    *int
+	store      *fakeKeychainStore
+	prompter   *fakePrompter
+}
+
+func newUpdateRebindFixture(t *testing.T, seed func(newURL string) (string, bool)) *updateRebindFixture {
+	t.Helper()
+
+	hits := 0
+	newServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(newServer.Close)
+
+	configFile := testutils.CreateTempFile(t,
+		"current-context: default\ncontexts:\n  default:\n    grafana:\n      server: "+newServer.URL+"\n")
+
+	store := &fakeKeychainStore{}
+	if secret, ok := seed(newServer.URL); ok {
+		require.NoError(t, store.Set(keychain.Account("default"), secret))
+	}
+
+	prompter := &fakePrompter{secret: "s3cr3t-cookie-value"}
+	t.Cleanup(login.SetKeychainStore(store))
+	t.Cleanup(login.SetPrompter(prompter))
+
+	return &updateRebindFixture{configFile: configFile, newServer: newServer, newHits: &hits, store: store, prompter: prompter}
+}
+
+func (f *updateRebindFixture) run(t *testing.T, args []string, stdin string, assertions ...testutils.CommandAssertion) string {
+	t.Helper()
+
+	cmd := login.Command()
+	stderr := &strings.Builder{}
+	cmd.SetErr(stderr)
+
+	testCase := testutils.CommandTestCase{
+		Cmd:        cmd,
+		Command:    append([]string{"update", "--config", f.configFile}, args...),
+		Assertions: assertions,
+	}
+	if stdin != "" {
+		testCase.Stdin = strings.NewReader(stdin)
+	}
+
+	testCase.Run(t)
+
+	return stderr.String()
+}
+
+func boundElsewhere(t *testing.T) func(string) (string, bool) {
+	t.Helper()
+
+	return func(string) (string, bool) {
+		return testutils.BoundSecret(t, "old-cookie", "https://grafana.example.com:443"), true
+	}
+}
+
+func Test_LoginUpdateCommand_printsTargetOriginAndBindsOnMatch(t *testing.T) {
+	f := newUpdateRebindFixture(t, func(url string) (string, bool) {
+		return testutils.BoundSecret(t, "old-cookie", url), true
+	})
+
+	stderr := f.run(t, nil, "", testutils.CommandSuccess())
+
+	require.Contains(t, stderr, `Updating the session for context "default" on `+f.newServer.URL)
+	require.NotContains(t, stderr, "s3cr3t-cookie-value")
+	require.Equal(t, 1, f.prompter.secretN)
+
+	cred := decodedCookie(t, f.store, "default")
+	require.Equal(t, "s3cr3t-cookie-value", cred.Cookie)
+	require.Equal(t, f.newServer.URL, cred.Origin)
+}
+
+func Test_LoginUpdateCommand_noStoredItemBinds(t *testing.T) {
+	f := newUpdateRebindFixture(t, func(string) (string, bool) { return "", false })
+
+	f.run(t, nil, "", testutils.CommandSuccess())
+
+	require.Equal(t, f.newServer.URL, decodedCookie(t, f.store, "default").Origin)
+}
+
+func Test_LoginUpdateCommand_refusesToMoveBoundSession(t *testing.T) {
+	for name, useStdin := range map[string]bool{"interactive": false, "cookie-stdin": true} {
+		t.Run(name, func(t *testing.T) {
+			f := newUpdateRebindFixture(t, boundElsewhere(t))
+			before, _ := f.store.Get(keychain.Account("default"))
+
+			args, stdin := []string(nil), ""
+			if useStdin {
+				args, stdin = []string{"--cookie-stdin"}, "s3cr3t-cookie-value\n"
+			}
+
+			var gotErr error
+			f.run(t, args, stdin, func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err })
+
+			require.Error(t, gotErr)
+			require.Contains(t, gotErr.Error(), "https://grafana.example.com:443")
+			require.Contains(t, gotErr.Error(), f.newServer.URL)
+			require.Contains(t, gotErr.Error(), "--rebind")
+			require.NotContains(t, gotErr.Error(), "s3cr3t-cookie-value")
+			require.NotContains(t, gotErr.Error(), "old-cookie")
+
+			require.Equal(t, 0, f.prompter.secretN, "the cookie must not be prompted for")
+			require.Equal(t, 0, *f.newHits, "nothing may reach the new server")
+
+			after, _ := f.store.Get(keychain.Account("default"))
+			require.Equal(t, before, after, "the keychain item must be untouched")
+		})
+	}
+}
+
+func Test_LoginUpdateCommand_rebindMovesBoundSession(t *testing.T) {
+	for name, useStdin := range map[string]bool{"interactive": false, "cookie-stdin": true} {
+		t.Run(name, func(t *testing.T) {
+			f := newUpdateRebindFixture(t, boundElsewhere(t))
+
+			args, stdin := []string{"--rebind"}, ""
+			if useStdin {
+				args, stdin = []string{"--rebind", "--cookie-stdin"}, "s3cr3t-cookie-value\n"
+			}
+
+			stderr := f.run(t, args, stdin, testutils.CommandSuccess())
+
+			require.Contains(t, stderr, `re-binding context "default" from https://grafana.example.com:443 to `+f.newServer.URL)
+			require.NotContains(t, stderr, "s3cr3t-cookie-value")
+			require.Equal(t, 1, *f.newHits, "the verify request goes to the new server")
+
+			cred := decodedCookie(t, f.store, "default")
+			require.Equal(t, "s3cr3t-cookie-value", cred.Cookie)
+			require.Equal(t, f.newServer.URL, cred.Origin)
+		})
+	}
+}
+
+func Test_LoginUpdateCommand_legacyItemUnderExplicitConfig(t *testing.T) {
+	legacy := func(string) (string, bool) { return "legacy-cookie", true }
+
+	t.Run("refused without --rebind", func(t *testing.T) {
+		f := newUpdateRebindFixture(t, legacy)
+
+		var gotErr error
+		f.run(t, nil, "", func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err })
+
+		require.Error(t, gotErr)
+		require.Contains(t, gotErr.Error(), "bound to no server")
+		require.Contains(t, gotErr.Error(), f.newServer.URL)
+		require.NotContains(t, gotErr.Error(), "legacy-cookie")
+		require.Equal(t, 0, f.prompter.secretN)
+		require.Equal(t, 0, *f.newHits)
+
+		raw, err := f.store.Get(keychain.Account("default"))
+		require.NoError(t, err)
+		require.Equal(t, "legacy-cookie", raw)
+	})
+
+	t.Run("bound with --rebind", func(t *testing.T) {
+		f := newUpdateRebindFixture(t, legacy)
+
+		f.run(t, []string{"--rebind"}, "", testutils.CommandSuccess())
+
+		require.Equal(t, f.newServer.URL, decodedCookie(t, f.store, "default").Origin)
+	})
+}
+
+func Test_LoginUpdateCommand_unreadableItemNeedsRebind(t *testing.T) {
+	f := newUpdateRebindFixture(t, func(string) (string, bool) { return `{"v":2,"cookie":"c","origin":"o"}`, true })
+
+	var gotErr error
+	f.run(t, nil, "", func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err })
+
+	require.ErrorContains(t, gotErr, "an unknown server")
+	require.Equal(t, 0, f.prompter.secretN)
+}
+
+func Test_LoginUpdateCommand_keychainReadErrorNeedsRebind(t *testing.T) {
+	f := newUpdateRebindFixture(t, func(string) (string, bool) { return "", false })
+	f.store.getErr = errors.New("keychain locked")
+
+	var gotErr error
+	f.run(t, nil, "", func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err })
+
+	require.ErrorContains(t, gotErr, "--rebind")
+	require.Equal(t, 0, f.prompter.secretN)
+	require.Equal(t, 0, *f.newHits)
 }
