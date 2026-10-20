@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"html/template"
@@ -50,6 +51,7 @@ type Server struct {
 	subpath          string
 	timeouts         timeouts
 	port             int
+	token            string
 }
 
 // timeouts holds the http.Server limits; it is a field so a whitebox test can shrink them.
@@ -65,6 +67,7 @@ func New(config Config, context *config.Context, resources *resources.Resources)
 		config:    config,
 		context:   context,
 		resources: resources,
+		token:     rand.Text(),
 		timeouts: timeouts{
 			readHeader: readHeaderTimeout,
 			read:       readTimeout,
@@ -96,9 +99,10 @@ func (s *Server) Listen(ctx context.Context) (net.Listener, error) {
 	return ln, nil
 }
 
-// URL returns the URL the server can be browsed at. It is only meaningful after Listen.
+// URL returns the URL, including the per-run access token, the server can be browsed at. It is only
+// meaningful after Listen.
 func (s *Server) URL() string {
-	return browseURL(s.config.ListenAddr, s.port, "")
+	return browseURL(s.config.ListenAddr, s.port, s.token)
 }
 
 // Serve serves HTTP on ln until ctx is cancelled, then shuts down gracefully.
@@ -184,7 +188,7 @@ func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 
 	// The guard is the outermost middleware (chi refuses Use after a route), so it wraps every
 	// route - proxy, mocks, local file handlers, websocket - and runs before the request logger.
-	r.Use(newGuard(hosts, logging.FromContext(ctx)).middleware)
+	r.Use(newGuard(hosts, s.token, s.port, logging.FromContext(ctx)).middleware)
 
 	// Log HTTP requests/responses at debug level
 	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{

@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBrowseURL_Token(t *testing.T) {
+	assert.Equal(t, "http://127.0.0.1:8080/?token=abc", browseURL("127.0.0.1", 8080, "abc"))
+	assert.Equal(t, "http://127.0.0.1:8080/?token=a%26b", browseURL("0.0.0.0", 8080, "a&b"))
+}
 
 func TestBrowseURL(t *testing.T) {
 	tests := []struct {
@@ -48,7 +54,9 @@ func TestServe_WebsocketSurvivesServerTimeouts(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.Serve(ctx, ln) }()
 
-	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws://"+ln.Addr().String()+"/livereload", http.Header{})
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws://"+ln.Addr().String()+"/livereload", http.Header{
+		"Cookie": {tokenCookiePrefix + strconv.Itoa(s.port) + "=" + s.token},
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	require.NoError(t, resp.Body.Close())

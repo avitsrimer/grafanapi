@@ -1,25 +1,37 @@
 package server
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/grafana/grafana-app-sdk/logging"
 )
 
-const httpDefaultPort = 80
+const (
+	httpDefaultPort   = 80
+	tokenQueryParam   = "token"
+	tokenCookiePrefix = "grafanapi_serve_"
+)
 
 // guard is the outermost middleware of the server: it rejects requests that do not address this
-// server (DNS rebinding) before any route, proxy or websocket upgrade runs.
+// server (DNS rebinding) or do not carry the per-run access token before any route, proxy or
+// websocket upgrade runs.
 type guard struct {
-	hosts  map[string]struct{}
-	logger logging.Logger
+	hosts      map[string]struct{}
+	token      string
+	cookieName string
+	logger     logging.Logger
 }
 
-// middleware answers 421 Misdirected Request when the Host header does not name this server.
+// middleware enforces, in order: the Host allowlist (421), the access token (401) and, once the
+// token is redeemed, the session cookie. A request carrying a token query parameter never reaches
+// next, whatever the cookie state, so the token is never logged by the request logger nor
+// forwarded to Grafana in a proxied query string.
 func (g *guard) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !g.hostAllowed(r.Host) {
@@ -29,8 +41,61 @@ func (g *guard) middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		if hasTokenParam(r.URL.RawQuery) {
+			g.redeemQueryToken(w, r)
+
+			return
+		}
+
+		if !g.authenticated(r) {
+			g.reject(w, r)
+
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
+}
+
+// redeemQueryToken handles a request that carries the token in its query: a valid token on GET/HEAD
+// is exchanged for a session cookie and a redirect to a fixed, query-less location; anything else
+// is refused. It never calls the next handler.
+func (g *guard) redeemQueryToken(w http.ResponseWriter, r *http.Request) {
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || (r.Method != http.MethodGet && r.Method != http.MethodHead) ||
+		!g.tokenValid(values.Get(tokenQueryParam)) {
+		g.reject(w, r)
+
+		return
+	}
+
+	// No Secure attribute: the server speaks plain http on loopback, where a Secure cookie would be dropped.
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // see above
+		Name:     g.cookieName,
+		Value:    g.token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	// Fixed location: never derived from r.URL, so it cannot become an off-site redirect.
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (g *guard) authenticated(r *http.Request) bool {
+	c, err := r.Cookie(g.cookieName)
+
+	return err == nil && g.tokenValid(c.Value)
+}
+
+func (g *guard) tokenValid(candidate string) bool {
+	return subtle.ConstantTimeCompare([]byte(candidate), []byte(g.token)) == 1
+}
+
+// reject logs method and path only: never the query string, the token or the cookie.
+func (g *guard) reject(w http.ResponseWriter, r *http.Request) {
+	g.logger.Warn("rejected request without a valid access token", "method", r.Method, "path", r.URL.Path)
+	http.Error(w, "grafanapi serve: missing or invalid access token; open the URL printed when the server started", http.StatusUnauthorized)
 }
 
 func (g *guard) hostAllowed(hostport string) bool {
@@ -39,13 +104,31 @@ func (g *guard) hostAllowed(hostport string) bool {
 	return ok
 }
 
-func newGuard(hosts []string, logger logging.Logger) *guard {
+func newGuard(hosts []string, token string, port int, logger logging.Logger) *guard {
 	set := make(map[string]struct{}, len(hosts))
 	for _, h := range hosts {
 		set[strings.ToLower(h)] = struct{}{}
 	}
 
-	return &guard{hosts: set, logger: logger}
+	return &guard{hosts: set, token: token, cookieName: tokenCookiePrefix + strconv.Itoa(port), logger: logger}
+}
+
+// hasTokenParam reports whether the raw query has a token key. It splits on both '&' and ';' and
+// tolerates undecodable keys, so a malformed query cannot smuggle the parameter past the guard.
+func hasTokenParam(rawQuery string) bool {
+	for _, pair := range strings.FieldsFunc(rawQuery, func(c rune) bool { return c == '&' || c == ';' }) {
+		key, _, _ := strings.Cut(pair, "=")
+
+		if unescaped, err := url.QueryUnescape(key); err == nil {
+			key = unescaped
+		}
+
+		if key == tokenQueryParam {
+			return true
+		}
+	}
+
+	return false
 }
 
 // allowedHosts returns the lower-cased Host header values (host:port, plus the bare host when the
