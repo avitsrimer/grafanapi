@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"testing"
@@ -74,4 +76,34 @@ func TestServe_WebsocketSurvivesServerTimeouts(t *testing.T) {
 	_, msg, err := conn.ReadMessage()
 	require.NoError(t, err)
 	assert.Contains(t, string(msg), `"command": "hello"`)
+}
+
+func TestIframeTemplate_LiveReloadTargetsPageHost(t *testing.T) {
+	var out bytes.Buffer
+
+	// The same variables iframeHandler passes; missingkey=error makes a stale key fail the render.
+	err := renderTemplate(&out, "proxy/iframe.html.tmpl", map[string]any{
+		"IframeURL":      "/d/uid/slug",
+		"CurrentContext": &config.Context{Name: "ctx"},
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, out.String(), "host: window.location.hostname")
+	assert.Contains(t, out.String(), "Number(window.location.port) || 80")
+	assert.NotContains(t, out.String(), "{{")
+}
+
+func TestTemplates_UseGrafanapiPaths(t *testing.T) {
+	err := fs.WalkDir(embedFS, "embed/templates", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		contents, err := embedFS.ReadFile(path)
+		require.NoError(t, err)
+		assert.NotContains(t, string(contents), "/grafanactl/", path)
+
+		return nil
+	})
+	require.NoError(t, err)
 }

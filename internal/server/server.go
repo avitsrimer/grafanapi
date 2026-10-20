@@ -207,7 +207,8 @@ func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 
 	// The guard is the outermost middleware (chi refuses Use after a route), so it wraps every
 	// route - proxy, mocks, local file handlers, websocket - and runs before the request logger.
-	r.Use(newGuard(hosts, s.token, s.port, logging.FromContext(ctx)).middleware)
+	g := newGuard(hosts, s.token, s.port, logging.FromContext(ctx))
+	r.Use(g.middleware)
 
 	// Log HTTP requests/responses at debug level
 	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{
@@ -252,7 +253,7 @@ func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 	var upgrader = &websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin:     func(_ *http.Request) bool { return true },
+		CheckOrigin:     g.originAllowed,
 	}
 
 	livereload.Initialize()
@@ -388,7 +389,6 @@ func (s *Server) iframeHandler(w http.ResponseWriter, r *http.Request) {
 	templateVars := map[string]any{
 		"IframeURL":      s.subpath + handler.ProxyURL(name),
 		"CurrentContext": s.context,
-		"Port":           s.config.Port,
 	}
 
 	if err := renderTemplate(w, "proxy/iframe.html.tmpl", templateVars); err != nil {

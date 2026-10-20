@@ -2,16 +2,19 @@ package server_test
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/grafana/grafanapi/internal/config"
@@ -368,4 +371,103 @@ func TestServer_BackendSetCookieIsStripped(t *testing.T) {
 
 	require.Len(t, f.recorded(), 1)
 	assert.Empty(t, resp.header.Values("Set-Cookie"))
+}
+
+func TestServer_WebsocketOrigin(t *testing.T) {
+	f := startProxyFixture(t, "")
+
+	_, port, err := net.SplitHostPort(f.addr)
+	require.NoError(t, err)
+
+	cookie := "grafanapi_serve_" + port + "=" + f.token
+	own := "http://" + f.addr
+
+	tests := []struct {
+		name       string
+		host       string
+		header     http.Header
+		wantStatus int
+	}{
+		{name: "own origin and cookie upgrades", header: http.Header{"Origin": {own}, "Cookie": {cookie}}},
+		{name: "foreign origin is forbidden", header: http.Header{"Origin": {"http://evil.example.com"}, "Cookie": {cookie}}, wantStatus: http.StatusForbidden},
+		{name: "same host other port is forbidden", header: http.Header{"Origin": {"http://127.0.0.1:1"}, "Cookie": {cookie}}, wantStatus: http.StatusForbidden},
+		{name: "no cookie is unauthorized", header: http.Header{"Origin": {own}}, wantStatus: http.StatusUnauthorized},
+		{name: "bad host is misdirected", host: "evil.example.com:" + port, header: http.Header{"Origin": {own}, "Cookie": {cookie}}, wantStatus: http.StatusMisdirectedRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.host != "" {
+				tc.header.Set("Host", tc.host)
+			}
+
+			conn, resp, err := websocket.DefaultDialer.DialContext(t.Context(), "ws://"+f.addr+"/livereload", tc.header)
+
+			if tc.wantStatus != 0 {
+				require.ErrorIs(t, err, websocket.ErrBadHandshake)
+				require.NoError(t, resp.Body.Close())
+				assert.Equal(t, tc.wantStatus, resp.StatusCode)
+
+				return
+			}
+
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+			require.NoError(t, resp.Body.Close())
+
+			require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`{"command":"hello"}`)))
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+
+			_, msg, err := conn.ReadMessage()
+			require.NoError(t, err)
+			assert.Contains(t, string(msg), `"command": "hello"`)
+		})
+	}
+}
+
+func TestServer_IndexLinksResolve(t *testing.T) {
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: "https://grafana.example.com"}}
+	res := resources.NewResources(resources.MustFromObject(map[string]any{
+		"apiVersion": "dashboard.grafana.app/v1",
+		"kind":       "Dashboard",
+		"metadata":   map[string]any{"name": "my-dash"},
+		"spec":       map[string]any{},
+	}, resources.SourceInfo{}))
+
+	s := server.New(server.Config{ListenAddr: "127.0.0.1", NoColor: true}, gCtx, res)
+
+	ln, err := s.Listen(t.Context())
+	require.NoError(t, err)
+
+	go func() { _ = s.Serve(t.Context(), ln) }()
+
+	client := jarClient(t)
+	base := "http://" + ln.Addr().String()
+
+	get := func(target string) (int, string) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+		require.NoError(t, err)
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		return resp.StatusCode, string(body)
+	}
+
+	status, index := get(s.URL())
+	require.Equal(t, http.StatusOK, status)
+
+	link := regexp.MustCompile(`href="(/grafanapi/dashboard\.grafana\.app/[^"]+)"`).FindStringSubmatch(index)
+	require.NotNil(t, link, "index has no preview link: %s", index)
+
+	status, page := get(base + link[1])
+	assert.Equal(t, http.StatusOK, status)
+	assert.Contains(t, page, "window.location.hostname")
+
+	status, _ = get(base + "/grafanapi/assets/style.css")
+	assert.Equal(t, http.StatusOK, status)
 }
