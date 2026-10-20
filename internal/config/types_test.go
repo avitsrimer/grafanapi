@@ -196,6 +196,48 @@ func TestGrafanaConfig_Validate_LiveWindow(t *testing.T) {
 	}
 }
 
+func TestGrafanaConfig_Validate_ServerURL(t *testing.T) {
+	testCases := []struct {
+		name      string
+		server    string
+		expectErr bool
+	}{
+		{name: "https", server: "https://grafana.example.com", expectErr: false},
+		{name: "uppercase scheme", server: "HTTPS://grafana.example.com", expectErr: false},
+		{name: "trailing slash", server: "https://grafana.example.com/", expectErr: false},
+		{name: "http loopback", server: "http://127.0.0.1:3000", expectErr: false},
+		{name: "http localhost", server: "http://localhost:3000", expectErr: false},
+		{name: "http ipv6 loopback", server: "http://[::1]:3000", expectErr: false},
+		{name: "http remote", server: "http://grafana.invalid", expectErr: true},
+		{name: "http remote uppercase scheme", server: "HTTP://grafana.invalid", expectErr: true},
+		{name: "userinfo", server: "https://user:" + "secret@grafana.example.com", expectErr: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := require.New(t)
+
+			// OrgID is set so validation never needs the network: a rejection must come from
+			// the URL check alone, and no dial error may leak into the message.
+			cfg := config.GrafanaConfig{Server: testCase.server, OrgID: 1}
+			err := cfg.Validate("ctx")
+
+			if !testCase.expectErr {
+				req.NoError(err)
+				return
+			}
+
+			var validationErr config.ValidationError
+			req.ErrorAs(err, &validationErr)
+			req.Equal("$.contexts.'ctx'.grafana.server", validationErr.Path)
+			req.NotContains(err.Error(), "dial")
+			req.NotContains(err.Error(), "no such host")
+			req.NotEmpty(validationErr.Suggestions)
+			req.NotContains(err.Error(), "secret")
+		})
+	}
+}
+
 func TestGrafanaConfig_Validate_AllowsDiscoveredStackID(t *testing.T) {
 	req := require.New(t)
 

@@ -27,7 +27,9 @@ Unlike "grafanapi login", "login update" never re-asks for the server: it loads 
 --context-selected) context's server from the configuration file, then reads a new session cookie
 — from an interactive, no-echo prompt, or from stdin with --cookie-stdin — validates it against
 that stored server (GET /api/user), and — only on success — overwrites the cookie in the macOS
-Keychain. The configuration file itself is never modified.`,
+Keychain. The configuration file itself is never modified.
+
+The stored server must use https://; plain http:// is only accepted for localhost.`,
 		Example: "\n\tgrafanapi login update\n\tgrafanapi login update --context staging\n" +
 			"\tpbpaste | grafanapi login update --cookie-stdin",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -83,6 +85,10 @@ func runLoginUpdate(cmd *cobra.Command, opts *UpdateOptions) error {
 	existing := cfg.Contexts[name]
 	if existing == nil || existing.Grafana == nil || existing.Grafana.Server == "" {
 		return fmt.Errorf("login update: context %q is not configured (run: grafanapi login --context %s)", name, name)
+	}
+
+	if err := config.ValidateServerURL(existing.Grafana.Server); err != nil {
+		return fmt.Errorf("login update: %w", err)
 	}
 
 	var cookie string
