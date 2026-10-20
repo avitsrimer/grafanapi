@@ -14,6 +14,7 @@ import (
 	"github.com/grafana/grafanapi/internal/alerts"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -678,4 +679,87 @@ func TestFetchRuleStates_ServerURLPathPrefixPreserved(t *testing.T) {
 	_, err := alerts.FetchRuleStates(t.Context(), gCtx)
 	require.NoError(t, err)
 	assert.Equal(t, "/grafana"+statePath, gotPath)
+}
+
+const stateOKBody = `{"status":"success","data":{"groups":[{"name":"g","file":"F","rules":[
+  {"uid":"u1","type":"alerting","state":"firing","alerts":[{"state":"Alerting"}]}]}]}}`
+
+func TestFetchRuleStates_RefusesOffOriginRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	server := testutils.NewRedirectServer(t, trap.URL+statePath+"?token=s3cret", http.StatusFound)
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}}
+
+	states, err := alerts.FetchRuleStates(t.Context(), gCtx)
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Empty(t, states.ByUID)
+	assert.Zero(t, trap.Requests(), "the foreign host must never be contacted")
+}
+
+func TestFetchRuleStates_RefusesSchemeDowngradeRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+
+	var requests atomic.Int32
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Redirect(w, r, trap.URL+statePath, http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{
+		Server:        server.URL,
+		SessionCookie: "abc123",
+		TLS:           &config.TLS{Insecure: true},
+	}}
+
+	_, err := alerts.FetchRuleStates(t.Context(), gCtx)
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Equal(t, int32(1), requests.Load())
+	assert.Zero(t, trap.Requests())
+}
+
+func TestFetchRuleStates_FollowsSameOriginRedirect(t *testing.T) {
+	for _, relative := range []bool{false, true} {
+		kind := "absolute"
+		if relative {
+			kind = "relative"
+		}
+
+		t.Run(kind, func(t *testing.T) {
+			var (
+				cookies []string
+				origin  string
+			)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				cookies = append(cookies, r.Header.Get("Cookie"))
+
+				if r.URL.Path == statePath {
+					target := "/final/rules"
+					if !relative {
+						target = origin + target
+					}
+
+					w.Header().Set("Location", target)
+					w.WriteHeader(http.StatusFound)
+
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(stateOKBody))
+			}))
+			t.Cleanup(server.Close)
+
+			origin = server.URL
+			gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}}
+
+			states, err := alerts.FetchRuleStates(t.Context(), gCtx)
+			require.NoError(t, err)
+			require.Contains(t, states.ByUID, "u1")
+
+			want := config.CookieHeaderValue("abc123")
+			assert.Equal(t, []string{want, want}, cookies, "the second hop must carry the cookie")
+		})
+	}
 }
