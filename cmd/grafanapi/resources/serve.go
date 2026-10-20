@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os/exec"
 	"runtime"
@@ -35,7 +36,7 @@ type serveOpts struct {
 }
 
 func (opts *serveOpts) setup(flags *pflag.FlagSet) {
-	flags.StringVar(&opts.Address, "address", "0.0.0.0", "Address to bind")
+	flags.StringVar(&opts.Address, "address", "127.0.0.1", "Address to bind (loopback by default; any other address exposes the server, which acts with your Grafana session, to the network)")
 	flags.IntVar(&opts.Port, "port", 8080, "Port on which the server will listen")
 	flags.StringArrayVarP(&opts.WatchPaths, "watch", "w", nil, "Paths to watch for changes")
 	flags.BoolVar(&opts.NoWatch, "no-watch", opts.NoWatch, "Do not watch for changes")
@@ -189,7 +190,7 @@ support for file notifications.
 				return err
 			}
 
-			cmdio.Info(cmd.OutOrStdout(), "Server is listening on %s", resourceServer.URL())
+			reportListening(cmd.OutOrStdout(), cmd.ErrOrStderr(), opts.Address, resourceServer.URL())
 
 			return resourceServer.Serve(cmd.Context(), ln)
 		},
@@ -237,4 +238,12 @@ func executeWatchScript(ctx context.Context, command string) ([]byte, error) {
 	}
 
 	return stdout.Bytes(), nil
+}
+
+func reportListening(stdout io.Writer, stderr io.Writer, address string, url string) {
+	cmdio.Info(stdout, "Server is listening on %s", url)
+
+	if !server.IsLoopbackAddress(address) {
+		cmdio.Warning(stderr, "--address %s is not a loopback address: the server acts with your Grafana session and is reachable from other machines; keep the URL's token secret", address)
+	}
 }
