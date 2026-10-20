@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newReverseProxy builds a ReverseProxy the same way Server.Start wires the "s.proxy" field
+// newReverseProxy builds a ReverseProxy the same way Server.handler wires the "s.proxy" field
 // (internal/server/server.go): Transport goes through GrafanaConfig.WrapWithSession so the proxy
 // carries (and, when a SessionSource is present, rotates) the session cookie exactly like the
 // production reverse proxy.

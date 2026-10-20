@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os/exec"
 	"runtime"
@@ -185,10 +184,14 @@ support for file notifications.
 			}
 			resourceServer := server.New(serverCfg, cfg.GetCurrentContext(), parsedResources)
 
-			logger.Debug(fmt.Sprintf("Listening on %s:%d", opts.Address, opts.Port))
-			cmdio.Info(cmd.OutOrStdout(), "Server will be available on http://localhost:%d/", opts.Port)
+			ln, err := resourceServer.Listen(cmd.Context())
+			if err != nil {
+				return err
+			}
 
-			return resourceServer.Start(cmd.Context())
+			cmdio.Info(cmd.OutOrStdout(), "Server is listening on %s", resourceServer.URL())
+
+			return resourceServer.Serve(cmd.Context(), ln)
 		},
 	}
 

@@ -7,10 +7,13 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -22,6 +25,14 @@ import (
 	"github.com/grafana/grafanapi/internal/resources"
 	"github.com/grafana/grafanapi/internal/server/handlers"
 	"github.com/grafana/grafanapi/internal/server/livereload"
+)
+
+const (
+	readHeaderTimeout = 10 * time.Second
+	readTimeout       = time.Minute
+	writeTimeout      = 5 * time.Minute
+	idleTimeout       = 2 * time.Minute
+	shutdownTimeout   = 5 * time.Second
 )
 
 type Config struct {
@@ -37,6 +48,16 @@ type Server struct {
 	resourceHandlers []handlers.ResourceHandler
 	proxy            *httputil.ReverseProxy
 	subpath          string
+	timeouts         timeouts
+	port             int
+}
+
+// timeouts holds the http.Server limits; it is a field so a whitebox test can shrink them.
+type timeouts struct {
+	readHeader time.Duration
+	read       time.Duration
+	write      time.Duration
+	idle       time.Duration
 }
 
 func New(config Config, context *config.Context, resources *resources.Resources) *Server {
@@ -44,6 +65,12 @@ func New(config Config, context *config.Context, resources *resources.Resources)
 		config:    config,
 		context:   context,
 		resources: resources,
+		timeouts: timeouts{
+			readHeader: readHeaderTimeout,
+			read:       readTimeout,
+			write:      writeTimeout,
+			idle:       idleTimeout,
+		},
 		resourceHandlers: []handlers.ResourceHandler{
 			handlers.NewDashboardProxy(context, resources),
 			handlers.NewFoldersProxy(resources),
@@ -51,20 +78,80 @@ func New(config Config, context *config.Context, resources *resources.Resources)
 	}
 }
 
-func (s *Server) Start(ctx context.Context) error {
+// Listen binds the configured address and records the port actually bound (so port 0 works).
+func (s *Server) Listen(ctx context.Context) (net.Listener, error) {
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", net.JoinHostPort(s.config.ListenAddr, strconv.Itoa(s.config.Port)))
+	if err != nil {
+		return nil, err
+	}
+
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = ln.Close()
+		return nil, fmt.Errorf("unexpected listener address type %T", ln.Addr())
+	}
+
+	s.port = addr.Port
+
+	return ln, nil
+}
+
+// URL returns the URL the server can be browsed at. It is only meaningful after Listen.
+func (s *Server) URL() string {
+	return browseURL(s.config.ListenAddr, s.port, "")
+}
+
+// Serve serves HTTP on ln until ctx is cancelled, then shuts down gracefully.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	h, err := s.handler(ctx)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
+
+	srv := &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: s.timeouts.readHeader,
+		ReadTimeout:       s.timeouts.read,
+		WriteTimeout:      s.timeouts.write,
+		IdleTimeout:       s.timeouts.idle,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		<-ctx.Done()
+
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	err = srv.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) {
+		<-done
+		return nil
+	}
+
+	return err
+}
+
+func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 	assetsFS, err := fs.Sub(embedFS, "embed/assets")
 	if err != nil {
-		return fmt.Errorf("could not create a sub-tree from the embedded assets FS: %w", err)
+		return nil, fmt.Errorf("could not create a sub-tree from the embedded assets FS: %w", err)
 	}
 
 	u, err := url.Parse(s.context.Grafana.Server)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	transport, err := httputils.NewTransport(s.context)
 	if err != nil {
-		return fmt.Errorf("could not build the Grafana proxy transport: %w", err)
+		return nil, fmt.Errorf("could not build the Grafana proxy transport: %w", err)
 	}
 
 	s.subpath = strings.TrimSuffix(u.Path, "/")
@@ -116,14 +203,16 @@ func (s *Server) Start(ctx context.Context) error {
 			case http.MethodPut:
 				r.Put(s.subpath+endpoint.URL, endpoint.Handler)
 			default:
-				return fmt.Errorf("unknown endpoint method %s", endpoint.Method)
+				return nil, fmt.Errorf("unknown endpoint method %s", endpoint.Method)
 			}
 		}
 
 		s.applyStaticProxyConfig(r, handler.StaticEndpoints())
 	}
 
-	// Livereload setup
+	// Livereload setup. HandshakeTimeout must stay zero: gorilla then clears the connection
+	// deadlines on upgrade, which is what lets the server's Read/WriteTimeout coexist with the
+	// long-lived websocket.
 	var upgrader = &websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -142,8 +231,7 @@ func (s *Server) Start(ctx context.Context) error {
 	r.Get("/grafanapi/{group}/{version}/{kind}/{name}", s.iframeHandler)
 	r.Handle("/grafanapi/assets/*", http.StripPrefix("/grafanapi/assets/", http.FileServer(http.FS(assetsFS))))
 
-	//nolint:gosec
-	return http.ListenAndServe(fmt.Sprintf("%s:%d", s.config.ListenAddr, s.config.Port), r)
+	return r, nil
 }
 
 func (s *Server) applyStaticProxyConfig(r chi.Router, config handlers.StaticProxyConfig) {
@@ -271,4 +359,19 @@ func (s *Server) iframeHandler(w http.ResponseWriter, r *http.Request) {
 		httputils.Error(r, w, "Error while executing template", err, http.StatusInternalServerError)
 		return
 	}
+}
+
+// browseURL is the URL a browser should open: wildcard binds are reached through loopback.
+func browseURL(listenAddr string, port int, token string) string {
+	host := listenAddr
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+
+	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/"}
+	if token != "" {
+		u.RawQuery = url.Values{"token": {token}}.Encode()
+	}
+
+	return u.String()
 }
