@@ -18,15 +18,20 @@ package livereload
 import (
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/grafana/grafanapi/internal/resources"
 )
 
+//nolint:gochecknoglobals
+var hubOnce sync.Once
+
 // Initialize starts the Websocket Hub handling live reloads.
 // Original: https://github.com/gohugoio/hugo/blob/89bd025ebfd2c559039826641702941fc35a7fdb/livereload/livereload.go#L107
+// Modified: guarded so callers may call it more than once; the hub runs a single goroutine.
 func Initialize() {
-	go wsHub.run()
+	startOnce(&hubOnce, wsHub.run)
 }
 
 // Handler is a HandlerFunc handling the livereload
@@ -51,4 +56,8 @@ func ReloadResource(r *resources.Resource) {
 	// TODO: use a resource ref in the URL instead of manually building a complex string
 	msg := fmt.Sprintf(`{"command": "reload", "path": "/grafanapi/%s/%s/%s"}`, r.APIVersion(), r.Kind(), r.Name())
 	wsHub.broadcast <- []byte(msg)
+}
+
+func startOnce(once *sync.Once, start func()) {
+	once.Do(func() { go start() })
 }
