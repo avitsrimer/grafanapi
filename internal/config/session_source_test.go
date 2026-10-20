@@ -564,9 +564,9 @@ func TestRotatingRoundTripper_HappyPath(t *testing.T) {
 	src := NewSessionSource(testOldCookie, rotateServer.URL, nil, store, testAccount)
 
 	next := &scriptedTransport{newCookie: testNewCookie}
-	rt := &rotatingRoundTripper{src: src, next: next}
+	rt := &rotatingRoundTripper{server: rotateServer.URL, src: src, next: next}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://target.invalid/resource", nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rotateServer.URL+"/resource", nil)
 	require.NoError(t, err)
 
 	resp, err := rt.RoundTrip(req)
@@ -591,7 +591,7 @@ func TestRotatingRoundTripper_SingleFlight(t *testing.T) {
 	src := NewSessionSource(testOldCookie, rotateServer.URL, nil, store, testAccount)
 
 	next := &scriptedTransport{newCookie: testNewCookie}
-	rt := &rotatingRoundTripper{src: src, next: next}
+	rt := &rotatingRoundTripper{server: rotateServer.URL, src: src, next: next}
 
 	const goroutines = 20
 
@@ -606,7 +606,7 @@ func TestRotatingRoundTripper_SingleFlight(t *testing.T) {
 
 			// assert (not require) here: require calls t.FailNow from a non-test goroutine,
 			// which is unsafe - see https://pkg.go.dev/testing#T.FailNow.
-			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://target.invalid/resource", nil)
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rotateServer.URL+"/resource", nil)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -637,9 +637,9 @@ func TestRotatingRoundTripper_RotateRejected(t *testing.T) {
 	src := NewSessionSource(testOldCookie, rotateServer.URL, nil, store, testAccount)
 
 	next := &scriptedTransport{newCookie: testNewCookie}
-	rt := &rotatingRoundTripper{src: src, next: next}
+	rt := &rotatingRoundTripper{server: rotateServer.URL, src: src, next: next}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://target.invalid/resource", nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rotateServer.URL+"/resource", nil)
 	require.NoError(t, err)
 
 	resp, err := rt.RoundTrip(req)
@@ -666,9 +666,9 @@ func TestRotatingRoundTripper_NonRewindableBody(t *testing.T) {
 	src := NewSessionSource(testOldCookie, rotateServer.URL, nil, store, testAccount)
 
 	next := &scriptedTransport{newCookie: testNewCookie}
-	rt := &rotatingRoundTripper{src: src, next: next}
+	rt := &rotatingRoundTripper{server: rotateServer.URL, src: src, next: next}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://target.invalid/resource",
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, rotateServer.URL+"/resource",
 		opaqueReader{strings.NewReader("payload")})
 	require.NoError(t, err)
 	require.Nil(t, req.GetBody, "precondition: opaqueReader must defeat http.NewRequest's GetBody detection")
@@ -693,9 +693,9 @@ func TestRotatingRoundTripper_GetBodyError(t *testing.T) {
 	src := NewSessionSource(testOldCookie, rotateServer.URL, nil, store, testAccount)
 
 	next := &scriptedTransport{newCookie: testNewCookie}
-	rt := &rotatingRoundTripper{src: src, next: next}
+	rt := &rotatingRoundTripper{server: rotateServer.URL, src: src, next: next}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://target.invalid/resource", strings.NewReader("payload"))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, rotateServer.URL+"/resource", strings.NewReader("payload"))
 	require.NoError(t, err)
 	require.NotNil(t, req.GetBody)
 
@@ -717,12 +717,12 @@ func TestWrapWithSession(t *testing.T) {
 		rotateServer, _ := newRotateServer(t, http.StatusOK)
 		src := NewSessionSource(testOldCookie, rotateServer.URL, nil, newFakeStore(), testAccount)
 
-		cfg := &GrafanaConfig{SessionCookie: "static-cookie", Session: src}
+		cfg := &GrafanaConfig{Server: rotateServer.URL, SessionCookie: "static-cookie", Session: src}
 		next := &recorderRoundTripper{}
 
 		wrapped := cfg.WrapWithSession(next)
 
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://target.invalid/resource", nil)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rotateServer.URL+"/resource", nil)
 		require.NoError(t, err)
 
 		resp, err := wrapped.RoundTrip(req)
@@ -734,12 +734,13 @@ func TestWrapWithSession(t *testing.T) {
 	})
 
 	t.Run("falls back to the static cookie round tripper", func(t *testing.T) {
-		cfg := &GrafanaConfig{SessionCookie: "static-cookie"}
+		rotateServer, _ := newRotateServer(t, http.StatusOK)
+		cfg := &GrafanaConfig{Server: rotateServer.URL, SessionCookie: "static-cookie"}
 		next := &recorderRoundTripper{}
 
 		wrapped := cfg.WrapWithSession(next)
 
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://target.invalid/resource", nil)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rotateServer.URL+"/resource", nil)
 		require.NoError(t, err)
 
 		resp, err := wrapped.RoundTrip(req)
@@ -1050,9 +1051,9 @@ func TestRotatingRoundTripper_NextTransportErrorNoResponse(t *testing.T) {
 
 	wantErr := errors.New("connection refused")
 	next := &erroringTransport{err: wantErr}
-	rt := &rotatingRoundTripper{src: src, next: next}
+	rt := &rotatingRoundTripper{server: rotateServer.URL, src: src, next: next}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://target.invalid/resource", nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rotateServer.URL+"/resource", nil)
 	require.NoError(t, err)
 
 	resp, rerr := rt.RoundTrip(req)

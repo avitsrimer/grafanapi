@@ -171,9 +171,9 @@ func (s *SessionSource) Refresh(ctx context.Context) (string, error) {
 func (cfg GrafanaConfig) WrapWithSession(next http.RoundTripper) http.RoundTripper {
 	switch {
 	case cfg.Session != nil:
-		return &rotatingRoundTripper{src: cfg.Session, next: next}
+		return &rotatingRoundTripper{server: cfg.Server, src: cfg.Session, next: next}
 	case cfg.SessionCookie != "":
-		return &sessionCookieRoundTripper{cookie: cfg.SessionCookie, next: next}
+		return &sessionCookieRoundTripper{server: cfg.Server, cookie: cfg.SessionCookie, next: next}
 	default:
 		return next
 	}
@@ -311,11 +311,17 @@ func (s *SessionSource) rotateClient() (*http.Client, error) {
 // 401 response, attempts a single rotate-and-retry before surfacing the failure. See the
 // RoundTrip doc comment for the exact decision tree.
 type rotatingRoundTripper struct {
-	src  *SessionSource
-	next http.RoundTripper
+	// server is the configured server (cfg.Server in WrapWithSession) every request must target.
+	// It is deliberately not src.server: both come from the same context in production, but a
+	// guard on the request's own transport config keeps the two concerns independent.
+	server string
+	src    *SessionSource
+	next   http.RoundTripper
 }
 
-// RoundTrip injects the current session cookie and delegates to next. If the response is not a
+// RoundTrip injects the current session cookie and delegates to next. A request that leaves the
+// configured server's origin, or targets a cleartext remote server, is refused before anything is
+// sent (and before Current, so it can never trigger a rotation). If the response is not a
 // 401, it is returned unchanged. On a 401:
 //   - it calls src.Rotate, which is a no-op network-wise if another goroutine already rotated
 //     past the generation used for this request;
@@ -327,6 +333,12 @@ type rotatingRoundTripper struct {
 //   - otherwise the request is retried exactly once with the rotated cookie, and whatever that
 //     retry returns (success or another 401) is returned as-is.
 func (rt *rotatingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := checkSessionTarget(req.URL, rt.server); err != nil {
+		closeRequestBody(req)
+
+		return nil, err
+	}
+
 	cookie, gen := rt.src.Current()
 
 	first := req.Clone(req.Context())
@@ -341,6 +353,10 @@ func (rt *rotatingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 
 	newCookie, rerr := rt.src.Rotate(req.Context(), gen)
 	if rerr != nil || !rewindable {
+		if errors.Is(rerr, ErrUnsafeRedirect) {
+			fmt.Fprintln(rt.src.warn, "warning: session rotation refused a redirect away from the configured Grafana server; check the context's server")
+		}
+
 		// Deliberately not propagating rerr: RoundTrip's contract is to return the HTTP
 		// response as-is; the caller-visible outcome of a failed/skipped rotation is the
 		// original 401 response, not a Go error (which centralized fail/convert.go rendering
