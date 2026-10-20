@@ -199,7 +199,10 @@ func TestNewNamespacedRESTConfig_RotatesSessionOn401(t *testing.T) {
 
 	stored, getErr := store.Get("acct")
 	require.NoError(t, getErr)
-	assert.Equal(t, "new-cookie", stored)
+
+	cred, decErr := keychain.DecodeCredential(stored)
+	require.NoError(t, decErr)
+	assert.Equal(t, "new-cookie", cred.Cookie)
 }
 
 // TestNewNamespacedRESTConfig_RotateRejectedSurfacesOriginal401 is the fallback side of Task 3:

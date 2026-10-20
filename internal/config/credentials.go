@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -32,12 +33,16 @@ func ResolveSessionCookie(store keychain.Store) Override {
 // rather than failing: the context may simply not have completed `grafanapi login` yet. Any other
 // store error is returned as-is. The SessionSource is only constructed when a cookie was actually
 // loaded, so unauthenticated contexts and login flows never get one (see session_source.go).
+//
+// The stored item is a keychain credential payload (see keychain.DecodeCredential): a legacy
+// bare-cookie item and a payload bound to an origin both load their cookie. A malformed payload is
+// returned as an error that never carries the raw item.
 func ResolveContextSessionCookie(store keychain.Store, gCtx *Context) error {
 	if gCtx == nil || gCtx.Grafana == nil {
 		return nil
 	}
 
-	cookie, err := store.Get(keychain.Account(gCtx.Name))
+	raw, err := store.Get(keychain.Account(gCtx.Name))
 	if err != nil {
 		if errors.Is(err, keychain.ErrNotFound) {
 			return nil
@@ -45,6 +50,13 @@ func ResolveContextSessionCookie(store keychain.Store, gCtx *Context) error {
 
 		return err
 	}
+
+	cred, err := keychain.DecodeCredential(raw)
+	if err != nil {
+		return fmt.Errorf("session for context %q: %w", gCtx.Name, err)
+	}
+
+	cookie := cred.Cookie
 
 	gCtx.Grafana.SessionCookie = cookie
 	gCtx.Grafana.Session = NewSessionSource(cookie, gCtx.Grafana.Server, gCtx.Grafana.TLS, store, keychain.Account(gCtx.Name))
@@ -69,6 +81,24 @@ func ResolveContextSessionCookie(store keychain.Store, gCtx *Context) error {
 // apply environment overrides (session refresh, login update) pass envOverridesApplied=false.
 func LegacyBindAllowed(explicitConfigFile string, envOverridesApplied bool) bool {
 	return legacyBindAllowed(explicitConfigFile, envOverridesApplied, os.LookupEnv, passwdHome)
+}
+
+// EncodeSessionCredential binds cookie to ServerOrigin(server) and returns the Keychain payload
+// to store for it. It is the one production helper that turns a cookie and a server into a bound
+// item, so login, login update and the rotation re-persist all write the same origin format. The
+// returned error wraps ServerOrigin's and never carries the raw server or the cookie.
+func EncodeSessionCredential(cookie, server string) (string, error) {
+	origin, err := ServerOrigin(server)
+	if err != nil {
+		return "", fmt.Errorf("bind session to server: %w", err)
+	}
+
+	secret, err := keychain.EncodeCredential(keychain.Credential{Cookie: cookie, Origin: origin})
+	if err != nil {
+		return "", fmt.Errorf("bind session to server: %w", err)
+	}
+
+	return secret, nil
 }
 
 func legacyBindAllowed(

@@ -52,6 +52,103 @@ func (f *fakeKeychainStore) ModifiedAt(string) (time.Time, error) {
 	return time.Time{}, keychain.ErrNotFound
 }
 
+func Test_EncodeSessionCredential(t *testing.T) {
+	const cookie = "s3cr3t-cookie-value"
+
+	const server = "https://Grafana.Example.com/sub/"
+
+	secret, err := config.EncodeSessionCredential(cookie, server)
+	require.NoError(t, err)
+
+	wantOrigin, err := config.ServerOrigin(server)
+	require.NoError(t, err)
+
+	cred, err := keychain.DecodeCredential(secret)
+	require.NoError(t, err)
+	require.Equal(t, keychain.Credential{Cookie: cookie, Origin: wantOrigin}, cred)
+}
+
+func Test_EncodeSessionCredential_errors(t *testing.T) {
+	const cookie = "s3cr3t-cookie-value"
+
+	tests := []struct {
+		name   string
+		cookie string
+		server string
+		is     error
+	}{
+		{name: "invalid server", cookie: cookie, server: "bare-host.example", is: config.ErrInvalidServerURL},
+		{name: "empty server", cookie: cookie, server: "", is: config.ErrInvalidServerURL},
+		{name: "empty cookie", cookie: "", server: "https://grafana.example.com"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			secret, err := config.EncodeSessionCredential(tc.cookie, tc.server)
+			require.Error(t, err)
+			require.Empty(t, secret)
+
+			if tc.is != nil {
+				require.ErrorIs(t, err, tc.is)
+			}
+
+			require.NotContains(t, err.Error(), cookie)
+
+			if tc.server != "" {
+				require.NotContains(t, err.Error(), tc.server)
+			}
+		})
+	}
+}
+
+func Test_ResolveSessionCookie_boundPayloadLoadsCookieNotJSON(t *testing.T) {
+	const cookie = "s3cr3t-cookie-value"
+
+	const server = "https://grafana.example.com"
+
+	secret, err := config.EncodeSessionCredential(cookie, server)
+	require.NoError(t, err)
+
+	store := newFakeKeychainStore()
+	store.cookies[keychain.Account("default")] = secret
+
+	cfg := &config.Config{
+		CurrentContext: "default",
+		Contexts: map[string]*config.Context{
+			"default": {Name: "default", Grafana: &config.GrafanaConfig{Server: server}},
+		},
+	}
+
+	require.NoError(t, config.ResolveSessionCookie(store)(cfg))
+
+	require.Equal(t, cookie, cfg.Contexts["default"].Grafana.SessionCookie)
+	require.NotNil(t, cfg.Contexts["default"].Grafana.Session)
+
+	current, _ := cfg.Contexts["default"].Grafana.Session.Current()
+	require.Equal(t, cookie, current)
+}
+
+func Test_ResolveSessionCookie_malformedPayloadErrorsWithoutRawValue(t *testing.T) {
+	const raw = `{"v":1,"cookie":"s3cr3t-cookie-value","origin":"https://grafana.example.com:443","extra":true}`
+
+	store := newFakeKeychainStore()
+	store.cookies[keychain.Account("default")] = raw
+
+	cfg := &config.Config{
+		CurrentContext: "default",
+		Contexts: map[string]*config.Context{
+			"default": {Name: "default", Grafana: &config.GrafanaConfig{Server: "https://grafana.example.com"}},
+		},
+	}
+
+	err := config.ResolveSessionCookie(store)(cfg)
+	require.ErrorIs(t, err, keychain.ErrMalformedCredential)
+	require.Contains(t, err.Error(), `"default"`)
+	require.NotContains(t, err.Error(), "s3cr3t-cookie-value")
+	require.Empty(t, cfg.Contexts["default"].Grafana.SessionCookie)
+	require.Nil(t, cfg.Contexts["default"].Grafana.Session)
+}
+
 func Test_ResolveSessionCookie_populatesCurrentContext(t *testing.T) {
 	store := newFakeKeychainStore()
 	store.cookies[keychain.Account("default")] = "cookie-value"
