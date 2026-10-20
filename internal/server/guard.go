@@ -28,8 +28,8 @@ type guard struct {
 	logger     logging.Logger
 }
 
-// middleware enforces, in order: the Host allowlist (421), the access token (401) and, once the
-// token is redeemed, the session cookie. A request carrying a token query parameter never reaches
+// middleware enforces, in order: the Host allowlist (421), the access token (401), the session
+// cookie and finally the Origin policy (403). A request carrying a token query parameter never reaches
 // next, whatever the cookie state, so the token is never logged by the request logger nor
 // forwarded to Grafana in a proxied query string.
 func (g *guard) middleware(next http.Handler) http.Handler {
@@ -49,6 +49,13 @@ func (g *guard) middleware(next http.Handler) http.Handler {
 
 		if !g.authenticated(r) {
 			g.reject(w, r)
+
+			return
+		}
+
+		if !g.originAllowed(r) {
+			g.logger.Warn("rejected cross-origin request", "origin", r.Header.Get("Origin"), "method", r.Method, "path", r.URL.Path)
+			http.Error(w, "grafanapi serve: cross-origin request rejected", http.StatusForbidden)
 
 			return
 		}
@@ -80,6 +87,22 @@ func (g *guard) redeemQueryToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Fixed location: never derived from r.URL, so it cannot become an off-site redirect.
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// originAllowed reports whether the request's Origin, when present, is this server's own. A request
+// without Origin (non-browser clients) passes this step; "null" and unparseable values do not.
+func (g *guard) originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	o, err := url.Parse(origin)
+	if err != nil || o.Scheme != "http" {
+		return false
+	}
+
+	return g.hostAllowed(o.Host)
 }
 
 func (g *guard) authenticated(r *http.Request) bool {

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -209,4 +210,162 @@ func TestServer_RejectsMissingToken(t *testing.T) {
 	require.ErrorIs(t, err, websocket.ErrBadHandshake)
 	require.NoError(t, wsResp.Body.Close())
 	assert.Equal(t, http.StatusUnauthorized, wsResp.StatusCode)
+}
+
+type recordedRequest struct {
+	origin     string
+	hasOrigin  bool
+	cookie     string
+	hasCookie  bool
+	requestURI string
+}
+
+type postResult struct {
+	status int
+	header http.Header
+}
+
+type proxyFixture struct {
+	addr     string
+	backend  string
+	token    string
+	mu       *sync.Mutex
+	requests *[]recordedRequest
+}
+
+func startProxyFixture(t *testing.T, sessionCookie string) *proxyFixture {
+	t.Helper()
+
+	var (
+		mu       sync.Mutex
+		requests []recordedRequest
+	)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, recordedRequest{
+			origin:     r.Header.Get("Origin"),
+			hasOrigin:  len(r.Header.Values("Origin")) > 0,
+			cookie:     r.Header.Get("Cookie"),
+			hasCookie:  len(r.Header.Values("Cookie")) > 0,
+			requestURI: r.RequestURI,
+		})
+		mu.Unlock()
+
+		w.Header().Add("Set-Cookie", "backend_cookie=x; Path=/")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(backend.Close)
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: backend.URL, SessionCookie: sessionCookie}}
+	s := server.New(server.Config{ListenAddr: "127.0.0.1", NoColor: true}, gCtx, resources.NewResources())
+
+	ln, err := s.Listen(t.Context())
+	require.NoError(t, err)
+
+	go func() { _ = s.Serve(t.Context(), ln) }()
+
+	u, err := url.Parse(s.URL())
+	require.NoError(t, err)
+
+	return &proxyFixture{addr: ln.Addr().String(), backend: backend.URL, token: u.Query().Get("token"), mu: &mu, requests: &requests}
+}
+
+func (f *proxyFixture) recorded() []recordedRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]recordedRequest(nil), *f.requests...)
+}
+
+// post sends a POST /api/ds/query with the serve cookie plus extra, and an optional Origin.
+func (f *proxyFixture) post(t *testing.T, origin, extraCookies string) postResult {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+f.addr+"/api/ds/query", nil)
+	require.NoError(t, err)
+
+	_, port, err := net.SplitHostPort(f.addr)
+	require.NoError(t, err)
+
+	cookie := "grafanapi_serve_" + port + "=" + f.token
+	if extraCookies != "" {
+		cookie += "; " + extraCookies
+	}
+
+	req.Header.Set("Cookie", cookie)
+
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	return postResult{status: resp.StatusCode, header: resp.Header}
+}
+
+func TestServer_ProxyRewritesVettedOrigin(t *testing.T) {
+	f := startProxyFixture(t, "")
+
+	resp := f.post(t, "http://"+f.addr, "")
+	require.Equal(t, http.StatusOK, resp.status)
+
+	got := f.recorded()
+	require.Len(t, got, 1)
+	assert.True(t, got[0].hasOrigin)
+	assert.Equal(t, f.backend, got[0].origin)
+}
+
+func TestServer_ProxySendsNoOriginWhenNoneArrived(t *testing.T) {
+	f := startProxyFixture(t, "")
+
+	resp := f.post(t, "", "")
+	require.Equal(t, http.StatusOK, resp.status)
+
+	got := f.recorded()
+	require.Len(t, got, 1)
+	assert.False(t, got[0].hasOrigin)
+}
+
+func TestServer_RejectsForeignOrigin(t *testing.T) {
+	f := startProxyFixture(t, "")
+
+	resp := f.post(t, "http://evil.example.com", "")
+
+	assert.Equal(t, http.StatusForbidden, resp.status)
+	assert.Empty(t, f.recorded())
+	assert.Empty(t, resp.header.Get("Access-Control-Allow-Origin"))
+}
+
+func TestServer_BrowserCookieNeverReachesBackend(t *testing.T) {
+	t.Run("no session configured", func(t *testing.T) {
+		f := startProxyFixture(t, "")
+
+		f.post(t, "", "other=1")
+
+		got := f.recorded()
+		require.Len(t, got, 1)
+		assert.False(t, got[0].hasCookie, got[0].cookie)
+	})
+
+	t.Run("session configured", func(t *testing.T) {
+		f := startProxyFixture(t, "fixture-session")
+
+		f.post(t, "", "other=1")
+
+		got := f.recorded()
+		require.Len(t, got, 1)
+		assert.Equal(t, "grafana_session=fixture-session", got[0].cookie)
+	})
+}
+
+func TestServer_BackendSetCookieIsStripped(t *testing.T) {
+	f := startProxyFixture(t, "")
+
+	resp := f.post(t, "", "")
+
+	require.Len(t, f.recorded(), 1)
+	assert.Empty(t, resp.header.Values("Set-Cookie"))
 }

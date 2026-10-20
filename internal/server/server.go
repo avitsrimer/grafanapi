@@ -163,6 +163,7 @@ func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 	}
 
 	s.subpath = strings.TrimSuffix(u.Path, "/")
+	grafanaOrigin := u.Scheme + "://" + u.Host // before Rewrite clears u.Path
 	s.proxy = &httputil.ReverseProxy{
 		// WrapWithSession injects the session cookie and rotates it on a 401 (see
 		// internal/config/session_source.go). It wraps Transport, which runs AFTER Rewrite below,
@@ -174,8 +175,26 @@ func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 			u.Path = "" // to ensure possible sub-paths won't be added twice.
 			r.SetURL(u)
 
-			r.Out.Header.Del("Origin")
+			// The browser jar holds the serve token; it must never reach Grafana, and
+			// WrapWithSession only supplies a Cookie when the context has a session.
+			r.Out.Header.Del("Cookie")
+
+			// The guard has already vetted any Origin as this server's own, which is the real CSRF
+			// control: Grafana sees only the proxy (SetURL sends Grafana's Host), so the browser's
+			// Origin could never match it. Forward Grafana's own origin instead of deleting the
+			// header, so Grafana's check still runs; no Origin in, none out.
+			if r.In.Header.Get("Origin") != "" {
+				r.Out.Header.Set("Origin", grafanaOrigin)
+			}
+
 			r.Out.Header.Set("User-Agent", httputils.UserAgent)
+		},
+		// Cookies are scoped by host, not port: a Grafana cookie stored for this host would be sent
+		// to every other local service. The preview authenticates through the transport, not the jar.
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Del("Set-Cookie")
+
+			return nil
 		},
 	}
 

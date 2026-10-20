@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/grafana/grafana-app-sdk/logging"
@@ -252,5 +253,101 @@ func TestGuardMiddleware_RejectionLogOmitsToken(t *testing.T) {
 		assert.NotContains(t, line, testToken)
 		assert.NotContains(t, line, "guess-value")
 		assert.NotContains(t, line, "token=")
+	}
+}
+
+func serveGuardedOrigin(t *testing.T, g *guard, method, origin string, cookie bool) (*httptest.ResponseRecorder, bool) {
+	t.Helper()
+
+	called := false
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+	req := httptest.NewRequestWithContext(t.Context(), method, "/api/ds/query", nil)
+	req.Host = "127.0.0.1:8080"
+
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+
+	if cookie {
+		req.Header.Set("Cookie", g.cookieName+"="+testToken)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	return rec, called
+}
+
+func TestGuardMiddleware_Origin(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string
+		want   int
+	}{
+		{name: "no origin", origin: "", want: http.StatusOK},
+		{name: "ipv4 loopback", origin: "http://127.0.0.1:8080", want: http.StatusOK},
+		{name: "localhost", origin: "http://localhost:8080", want: http.StatusOK},
+		{name: "ipv6 loopback", origin: "http://[::1]:8080", want: http.StatusOK},
+		{name: "mixed case", origin: "http://LocalHost:8080", want: http.StatusOK},
+		{name: "foreign host", origin: "http://evil.example.com", want: http.StatusForbidden},
+		{name: "foreign host same port", origin: "http://evil.example.com:8080", want: http.StatusForbidden},
+		{name: "same-site other port", origin: "http://localhost:3000", want: http.StatusForbidden},
+		{name: "https", origin: "https://127.0.0.1:8080", want: http.StatusForbidden},
+		{name: "null", origin: "null", want: http.StatusForbidden},
+		{name: "unparseable", origin: "http://[::1", want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, called := serveGuardedOrigin(t, testGuard(), http.MethodPost, tt.origin, true)
+
+			assert.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, tt.want == http.StatusOK, called)
+			assertNoCORSHeaders(t, rec)
+		})
+	}
+}
+
+func TestGuardMiddleware_OriginOnPort80(t *testing.T) {
+	g := newGuard([]string{"localhost:80", "localhost"}, testToken, 80, &logging.NoOpLogger{})
+
+	called := false
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", nil)
+	req.Host = "localhost"
+	req.Header.Set("Origin", "http://localhost")
+	req.Header.Set("Cookie", g.cookieName+"="+testToken)
+
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	assert.True(t, called)
+}
+
+func TestGuardMiddleware_PreflightWithoutCookieIsUnauthorized(t *testing.T) {
+	rec, called := serveGuardedOrigin(t, testGuard(), http.MethodOptions, "http://evil.example.com", false)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, called)
+	assertNoCORSHeaders(t, rec)
+}
+
+func TestGuardMiddleware_OriginRejectionIsLogged(t *testing.T) {
+	logger := &recordingLogger{}
+	g := newGuard([]string{"127.0.0.1:8080"}, testToken, 8080, logger)
+
+	serveGuardedOrigin(t, g, http.MethodPost, "http://evil.example.com", true)
+
+	require.Len(t, logger.lines, 1)
+	assert.Contains(t, logger.lines[0], "http://evil.example.com")
+	assert.NotContains(t, logger.lines[0], testToken)
+}
+
+func assertNoCORSHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+
+	for name := range rec.Header() {
+		assert.False(t, strings.HasPrefix(strings.ToLower(name), "access-control-"), name)
 	}
 }
