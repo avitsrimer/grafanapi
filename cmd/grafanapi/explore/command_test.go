@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
+	"unicode"
 
+	"github.com/goccy/go-yaml"
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/cmd/grafanapi/explore"
 	"github.com/grafana/grafanapi/internal/keychain"
@@ -292,4 +296,184 @@ func Test_ExploreCommand_datasourceNotFound(t *testing.T) {
 		},
 	}
 	testCase.Run(t)
+}
+
+// loadHostileResponse reads the shared hostile /api/ds/query fixture and returns it both as the
+// body to script and as the decoded string column the output is compared against.
+func loadHostileResponse(t *testing.T) (map[string]any, []string) {
+	t.Helper()
+
+	raw, err := os.ReadFile("../../../internal/explore/testdata/hostile_frame.json")
+	require.NoError(t, err)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+
+	return body, hostileColumn(t, body)
+}
+
+// hostileColumn extracts the "string" column of the fixture's single frame from a decoded
+// response, whichever codec produced it.
+func hostileColumn(t *testing.T, body map[string]any) []string {
+	t.Helper()
+
+	columns, ok := hostileData(t, body)["values"].([]any)
+	require.True(t, ok)
+	require.Len(t, columns, 2)
+
+	cells, ok := columns[1].([]any)
+	require.True(t, ok)
+
+	out := make([]string, len(cells))
+	for i, cell := range cells {
+		out[i], ok = cell.(string)
+		require.True(t, ok)
+	}
+
+	return out
+}
+
+// hostileData returns the "data" object of the fixture's single frame.
+func hostileData(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+
+	results, ok := body["results"].(map[string]any)
+	require.True(t, ok)
+
+	result, ok := results["A\x1b[2J"].(map[string]any)
+	require.True(t, ok, "refID key must round-trip raw")
+
+	frames, ok := result["frames"].([]any)
+	require.True(t, ok)
+	require.Len(t, frames, 1)
+
+	data, ok := frames[0].(map[string]any)["data"].(map[string]any)
+	require.True(t, ok)
+
+	return data
+}
+
+// withoutYAMLLossyRows drops the rows the vendored YAML encoder cannot round-trip, so the yaml
+// golden check covers everything else byte for byte. goccy/go-yaml drops a raw tab, emits a
+// carriage return as a block scalar it cannot read back, and returns U+009D as U+FFFD, in every
+// case on the encode path this change does not touch. The json check keeps all of them.
+func withoutYAMLLossyRows(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+
+	data := hostileData(t, body)
+	columns, ok := data["values"].([]any)
+	require.True(t, ok)
+
+	keep := func(cell any) bool {
+		text, isString := cell.(string)
+
+		return !isString || !strings.ContainsAny(text, "\t\r\u009d")
+	}
+
+	kept := make([][]any, len(columns))
+	text, ok := columns[1].([]any)
+	require.True(t, ok)
+
+	for row := range text {
+		if !keep(text[row]) {
+			continue
+		}
+
+		for col := range columns {
+			column, ok := columns[col].([]any)
+			require.True(t, ok)
+
+			kept[col] = append(kept[col], column[row])
+		}
+	}
+
+	out := make([]any, len(kept))
+	for i := range kept {
+		out[i] = kept[i]
+	}
+
+	data["values"] = out
+
+	return body
+}
+
+func Test_ExploreCommand_tableOutputStripsTerminalControl(t *testing.T) {
+	body, _ := loadHostileResponse(t)
+	server := newTestServer(t, "prom-uid", "Prometheus", "prometheus", http.StatusOK, body)
+	configFile, restoreStore := newTestConfig(t, server)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     explore.Command(),
+		Command: []string{"prom-uid", "up", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			func(t *testing.T, result testutils.CommandResult) {
+				t.Helper()
+
+				for _, r := range result.Stdout {
+					if r == '\n' {
+						continue
+					}
+
+					assert.False(t, unicode.IsControl(r) || unicode.Is(unicode.Cf, r), "unsafe rune %U", r)
+				}
+
+				assert.NotContains(t, result.Stdout, "aGk=")
+				assert.Len(t, strings.Split(strings.TrimSuffix(result.Stdout, "\n"), "\n"), 12)
+			},
+		},
+	}
+	testCase.Run(t)
+}
+
+func cloneJSON(t *testing.T, in map[string]any) map[string]any {
+	t.Helper()
+
+	raw, err := json.Marshal(in)
+	require.NoError(t, err)
+
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(raw, &out))
+
+	return out
+}
+
+func Test_ExploreCommand_machineFormatsKeepRawValues(t *testing.T) {
+	body, want := loadHostileResponse(t)
+
+	for _, format := range []string{"json", "yaml"} {
+		t.Run(format, func(t *testing.T) {
+			scripted, wantCells := body, want
+			if format == "yaml" {
+				scripted = withoutYAMLLossyRows(t, cloneJSON(t, body))
+				wantCells = hostileColumn(t, scripted)
+			}
+
+			server := newTestServer(t, "prom-uid", "Prometheus", "prometheus", http.StatusOK, scripted)
+			configFile, restoreStore := newTestConfig(t, server)
+			defer restoreStore()
+
+			var gotOutput string
+			testCase := testutils.CommandTestCase{
+				Cmd:     explore.Command(),
+				Command: []string{"prom-uid", "up", "--config", configFile, "-o", format},
+				Assertions: []testutils.CommandAssertion{
+					testutils.CommandSuccess(),
+					func(_ *testing.T, result testutils.CommandResult) { gotOutput = result.Stdout },
+				},
+			}
+			testCase.Run(t)
+
+			var decoded map[string]any
+			if format == "json" {
+				require.NoError(t, json.Unmarshal([]byte(gotOutput), &decoded))
+				assert.Contains(t, gotOutput, `\u001b]52;c;`)
+			} else {
+				require.NoError(t, yaml.Unmarshal([]byte(gotOutput), &decoded))
+			}
+
+			assert.Equal(t, wantCells, hostileColumn(t, decoded))
+		})
+	}
 }
