@@ -104,7 +104,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
    - `resources delete`: Delete resources from Grafana
    - `resources edit`: Edit resources interactively
    - `resources validate`: Validate resource manifests
-   - `resources serve`: Serve resources locally with live reload
+   - `resources serve`: Serve resources locally with live reload (binds 127.0.0.1 by default; the
+     printed URL carries a per-run access token)
 
 4. **explore**: Run a single ad-hoc query against a Grafana datasource (mirrors Grafana's Explore UI)
    - `explore DATASOURCE QUERY`: resolve a datasource (UID, then name), map the query string onto
@@ -700,6 +701,34 @@ mode.
   `httputil.ReverseProxy` and `server/grafana/requests.go`'s dashboard-proxy client both wrap their
   `Transport` (built from `httputils.NewTransport`) with `(GrafanaConfig).WrapWithSession`, so a
   `401` from Grafana triggers the same rotate-and-retry as the k8s/openapi paths
+- `guard.go`: the **outermost** middleware (registered before `middleware.RequestLogger`, so a
+  `?token=` query is never logged; `reject` logs method and path only). Order: Host allowlist
+  (`421`) -> a present `?token` is redeemed or rejected **even when a valid cookie is already
+  held** (GET/HEAD with the right token -> cookie + `303` to a fixed `/`, never derived from
+  `r.URL`; anything else `401`; `next` is never called, so the token cannot reach a handler or the
+  proxy) -> cookie (`401`) -> Origin (`403`). `allowedHosts(listenHost, port, ifaceAddrs)` builds
+  the Host set (a wildcard bind allows the non-link-local interface IPs present **at startup**
+  only, so a changed IP gives `421` until restart)
+- Token/cookie design: `rand.Text()` per run (128-bit, `Server.token`), compared in constant time.
+  Cookie `grafanapi_serve_<port>`, `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Max-Age` (a
+  browser-session cookie), no `Secure` (plain http on loopback would drop it), plus
+  `Referrer-Policy: no-referrer` on the redirect. Cookies are scoped by host, not port, so other
+  servers on the same host receive it; the Origin check keeps their *pages* out, but the cookie is
+  not protection against a hostile local server
+- Proxy Origin rule: the guard has already vetted any `Origin` as this server's own, so the
+  `ReverseProxy.Rewrite` replaces it with **Grafana's own origin** (no Origin in -> none out)
+  instead of deleting it, because `SetURL` sends Grafana's Host and the browser's Origin could never
+  match it. Rewrite also drops the browser `Cookie` (it holds the serve token; session cookie
+  injection is the transport's job) and `ModifyResponse` strips `Set-Cookie`. Grafana's CSRF
+  behaviour on the rewritten Origin is reasoned, not verified against a live instance
+- Lifecycle: `Listen(ctx)` (a `net.ListenConfig`, resolves the real port, e.g. for `:0`) ->
+  `URL()` (tokenized, uses the bound port) -> `Serve(ctx, ln)` (shuts down on ctx cancel,
+  returns nil); `handler(ctx)` is unexported. The `http.Server` carries `ReadHeaderTimeout`,
+  `ReadTimeout`, `WriteTimeout` and `IdleTimeout`. The websocket survives them because gorilla
+  clears the connection deadlines on upgrade when `Upgrader.HandshakeTimeout == 0` - **keep it 0**.
+  The upgrader's `CheckOrigin` is `guard.originAllowed`
+- `livereload.Initialize` is guarded by a `sync.Once`: it used to start a new global hub per call,
+  and `connections` is mutated by that hub's `run()` loop
 
 **internal/grafana/** - Grafana API client
 - Wraps grafana-openapi-client-go
@@ -1011,7 +1040,10 @@ Wraps k8s.io/client-go's dynamic client for Grafana:
 
 ```
 1. Start HTTP server (Chi router)
-   - Reverse proxy to Grafana
+   - Listen on --address (default 127.0.0.1), print the tokenized URL
+   - Guard middleware first: Host allowlist (421) -> ?token redeem/reject -> cookie (401) ->
+     Origin (403); only then the request logger and the routes
+   - Reverse proxy to Grafana (vetted Origin rewritten to Grafana's, no browser Cookie)
    - Custom handlers for dashboards/folders
    - WebSocket for live reload
 
@@ -1364,6 +1396,15 @@ The codebase is designed for extension:
 - Option to disable (insecure-skip-verify) for dev/test
 - Custom CA certificates supported
 - Client certificate authentication supported
+
+**Local serve server**:
+- `resources serve` binds `127.0.0.1` by default; a non-loopback `--address` prints a warning,
+  because the server acts with the user's Grafana session
+- Every request passes `internal/server/guard.go`: Host allowlist (DNS rebinding, `421`), a per-run
+  access token redeemed once into an `HttpOnly` `SameSite=Strict` cookie (`401`), and a same-origin
+  Origin check (`403`; also applied to the live-reload websocket upgrade)
+- The proxy never forwards the browser's `Cookie` and strips Grafana's `Set-Cookie`
+- The token cookie is host-scoped, not port-scoped: it reaches other servers on the same host
 
 **Resource Management**:
 - Manager metadata prevents accidental overwrites
