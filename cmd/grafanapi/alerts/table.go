@@ -4,13 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"text/tabwriter"
-	"unicode"
 
 	"github.com/grafana/grafana-openapi-client-go/models"
 	"github.com/grafana/grafanapi/internal/alerts"
 	"github.com/grafana/grafanapi/internal/format"
+	"github.com/grafana/grafanapi/internal/termsafe"
 )
 
 // tableFormat is the name of this group's default output format, shared by every subcommand so
@@ -96,23 +95,11 @@ func (c *contactPointsTableCodec) Decode(io.Reader, any) error {
 // cell renders one table cell, replacing every control and format character with a space.
 //
 // A folder title, rule name or contact-point name is arbitrary user input, and a tab or newline
-// inside one is exactly what the tabwriter reads as a column or row terminator: a single such
-// character would shift the rest of the row into the wrong columns, or split one rule across two
-// lines, silently corrupting output that scripts grep and cut. Substituting a space keeps the
-// value readable and the row intact; the json/yaml codecs still carry the untouched value.
-//
-// Unicode's format category (Cf) is mapped for the same reason even though those runes are not
-// control characters: it holds the bidirectional overrides (U+202E and friends), which a terminal
-// honours by re-ordering the *rest of the line* on screen - so one of them in a rule title makes
-// the row's remaining columns unreadable without changing a single byte of the layout.
+// inside one is read by the tabwriter as a column or row terminator, while a bidirectional
+// override makes a terminal re-order the rest of the line. See termsafe.Runes for the rule; the
+// json/yaml codecs still carry the untouched value.
 func cell(value string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return ' '
-		}
-
-		return r
-	}, value)
+	return termsafe.Runes(value)
 }
 
 // contactPointType is a nil-safe accessor for the generated model's *string Type, which is a
