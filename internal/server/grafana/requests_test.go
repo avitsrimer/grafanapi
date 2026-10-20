@@ -3,6 +3,7 @@ package grafana_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -214,4 +215,64 @@ func TestAuthenticateAndProxyHandler_RotateRejectedSurfacesOriginal401(t *testin
 
 	_, getErr := store.Get(account)
 	assert.ErrorIs(t, getErr, keychain.ErrNotFound, "keychain must not be written when rotation is rejected")
+}
+
+func TestAuthenticateAndProxyHandler_RefusesCrossOriginRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	backend := testutils.NewRedirectServer(t, trap.URL+"/cb?token=s3cret", http.StatusFound)
+
+	cfg := &config.Context{Grafana: &config.GrafanaConfig{Server: backend.URL, SessionCookie: "abc123"}}
+	handler := grafana.AuthenticateAndProxyHandler(cfg)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/dashboards", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, "Internal Server Error", strings.TrimSpace(rec.Body.String()))
+	assert.NotContains(t, rec.Body.String(), "s3cret")
+	assert.Zero(t, trap.Requests(), "the redirect target must never be contacted")
+}
+
+func TestAuthenticateAndProxyHandler_RedirectToLoginOnOtherOriginStillRendersAuthenticationError(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	backend := testutils.NewRedirectServer(t, trap.URL+"/login", http.StatusFound)
+
+	cfg := &config.Context{Grafana: &config.GrafanaConfig{Server: backend.URL, SessionCookie: "abc123"}}
+	handler := grafana.AuthenticateAndProxyHandler(cfg)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/dashboards", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Authentication error")
+	assert.Zero(t, trap.Requests(), "no request is sent for a login redirect")
+}
+
+func TestAuthenticateAndProxyHandler_SameOriginRedirectKeepsCookie(t *testing.T) {
+	var cookies []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookies = append(cookies, r.Header.Get("Cookie"))
+		if r.URL.Path == "/redirected" {
+			_, _ = w.Write([]byte("final destination"))
+			return
+		}
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	t.Cleanup(backend.Close)
+
+	cfg := &config.Context{Grafana: &config.GrafanaConfig{Server: backend.URL, SessionCookie: "abc123"}}
+	handler := grafana.AuthenticateAndProxyHandler(cfg)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/dashboards", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "final destination", rec.Body.String())
+	assert.Equal(t, []string{"grafana_session=abc123", "grafana_session=abc123"}, cookies)
 }
