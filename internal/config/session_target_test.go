@@ -8,10 +8,12 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -213,4 +215,78 @@ func TestRotatingRoundTripper_ServerDiffersFromSourceServer(t *testing.T) {
 
 	_, err = rt.RoundTrip(other) //nolint:bodyclose // refused, no response
 	require.ErrorIs(t, err, ErrUnsafeRedirect)
+}
+
+func TestSessionSource_Rotate_RefusesOffOriginRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	rotateServer := testutils.NewRedirectServer(t, trap.URL+"/rotated?token=s3cret", http.StatusFound)
+	store := newFakeStore()
+	src := NewSessionSource(testOldCookie, rotateServer.URL, nil, store, testAccount)
+
+	_, err := src.Rotate(t.Context(), 0)
+
+	require.ErrorIs(t, err, ErrUnsafeRedirect)
+	assert.Zero(t, trap.Requests(), "the redirect target must never be contacted")
+	assert.Zero(t, store.calls(), "keychain must not be written on a refused rotation")
+	assert.NotContains(t, err.Error(), testOldCookie)
+}
+
+func TestRotatingRoundTripper_RefusedRotateRedirectReturnsOriginal401AndWarnsOnce(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	rotateServer := testutils.NewRedirectServer(t, trap.URL+"/rotated", http.StatusFound)
+	store := newFakeStore()
+
+	var warnBuf bytes.Buffer
+	src := NewSessionSource(testOldCookie, rotateServer.URL, nil, store, testAccount)
+	src.warn = &warnBuf
+
+	// The API request targets rt.server, which is not dialled: next is scripted.
+	const apiServer = "http://127.0.0.1:1"
+
+	next := &scriptedTransport{newCookie: testNewCookie}
+	rt := &rotatingRoundTripper{server: apiServer, src: src, next: next}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, apiServer+"/resource", nil)
+	require.NoError(t, err)
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "the original 401 surfaces unchanged")
+	assert.Equal(t, 1, next.callCount(), "no retry after a refused rotation")
+	assert.Zero(t, trap.Requests())
+	assert.Zero(t, store.calls())
+
+	assert.Equal(t, 1, strings.Count(warnBuf.String(), "\n"), "exactly one warn line")
+	assert.Contains(t, warnBuf.String(), "refused a redirect away from the configured Grafana server")
+	assert.NotContains(t, warnBuf.String(), testOldCookie)
+}
+
+func TestSessionSource_Rotate_FollowsSameOriginRedirect(t *testing.T) {
+	var hops []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hops = append(hops, r.Method+" "+r.URL.Path)
+		assert.Equal(t, CookieHeaderValue(testOldCookie), r.Header.Get("Cookie"))
+
+		if r.URL.Path == "/api/user/auth-tokens/rotate" {
+			http.Redirect(w, r, "/api/user/auth-tokens/rotate-final", http.StatusTemporaryRedirect)
+
+			return
+		}
+
+		w.Header().Add("Set-Cookie", "grafana_session="+testNewCookie)
+	}))
+	t.Cleanup(server.Close)
+
+	store := newFakeStore()
+	src := NewSessionSource(testOldCookie, server.URL, nil, store, testAccount)
+
+	newCookie, err := src.Rotate(t.Context(), 0)
+
+	require.NoError(t, err)
+	assert.Equal(t, testNewCookie, newCookie)
+	assert.Equal(t, []string{"POST /api/user/auth-tokens/rotate", "POST /api/user/auth-tokens/rotate-final"}, hops)
+	assert.Equal(t, 1, store.calls())
 }

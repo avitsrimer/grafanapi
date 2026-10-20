@@ -259,7 +259,9 @@ func (s *SessionSource) doRotate(ctx context.Context, cookie string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("session rotation: building request: %w", err)
 	}
-	req.Header.Set("Cookie", CookieHeaderValue(cookie))
+	if err := SetSessionCookie(req, s.server, cookie); err != nil {
+		return "", fmt.Errorf("session rotation: %w", err)
+	}
 
 	client, err := s.rotateClient()
 	if err != nil {
@@ -284,7 +286,8 @@ func (s *SessionSource) doRotate(ctx context.Context, cookie string) (string, er
 
 // rotateClient builds the dedicated HTTP client used for the rotate request: TLS-aware, bounded
 // timeout, and never the rotating transport (no recursion) nor any request-dumping/logging
-// round-tripper (the cookie must never be logged). A malformed CAData/CertData/KeyData in s.tls is
+// round-tripper (the cookie must never be logged). It refuses any redirect that leaves the server's
+// origin. A malformed CAData/CertData/KeyData in s.tls is
 // reported as an error rather than silently degrading to a client that trusts only the system pool
 // or carries no client certificate (see TLS.ToStdTLSConfig).
 func (s *SessionSource) rotateClient() (*http.Client, error) {
@@ -302,8 +305,9 @@ func (s *SessionSource) rotateClient() (*http.Client, error) {
 	}
 
 	return &http.Client{
-		Timeout:   rotateTimeout,
-		Transport: transport,
+		Timeout:       rotateTimeout,
+		Transport:     transport,
+		CheckRedirect: SameOriginRedirects(s.server),
 	}, nil
 }
 

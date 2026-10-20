@@ -34,7 +34,9 @@ func DiscoverStackID(ctx context.Context, cfg GrafanaConfig) (int64, error) {
 	}
 
 	if cfg.SessionCookie != "" {
-		req.Header.Set("Cookie", CookieHeaderValue(cfg.SessionCookie))
+		if err := SetSessionCookie(req, cfg.Server, cfg.SessionCookie); err != nil {
+			return 0, err
+		}
 	}
 
 	resp, err := client.Do(req)
@@ -103,7 +105,8 @@ func newBootdataHTTPClient(cfg GrafanaConfig) (*http.Client, error) {
 	}
 
 	return &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: transport,
+		Timeout:       5 * time.Second,
+		Transport:     transport,
+		CheckRedirect: SameOriginRedirects(cfg.Server),
 	}, nil
 }

@@ -555,6 +555,7 @@ func TestSessionSource_RotateClient_NoLoggingRoundTripper(t *testing.T) {
 	_, ok := client.Transport.(*http.Transport)
 	assert.True(t, ok, "rotate client transport must be a plain *http.Transport")
 	assert.Equal(t, rotateTimeout, client.Timeout)
+	assert.NotNil(t, client.CheckRedirect, "rotate client must refuse off-origin redirects")
 }
 
 func TestRotatingRoundTripper_HappyPath(t *testing.T) {
