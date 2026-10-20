@@ -2,6 +2,9 @@ package config
 
 import (
 	"errors"
+	"os"
+	"os/user"
+	"path/filepath"
 
 	"github.com/grafana/grafanapi/internal/keychain"
 )
@@ -47,4 +50,70 @@ func ResolveContextSessionCookie(store keychain.Store, gCtx *Context) error {
 	gCtx.Grafana.Session = NewSessionSource(cookie, gCtx.Grafana.Server, gCtx.Grafana.TLS, store, keychain.Account(gCtx.Name))
 
 	return nil
+}
+
+// LegacyBindAllowed reports whether a legacy (origin-less) Keychain item may be bound to the
+// context's effective server on first use. It is true only when that server provably comes from
+// the user's own configuration file: no --config (explicitConfigFile), and none of the inputs that
+// choose the file or the server are set — GRAFANAPI_CONFIG, XDG_CONFIG_HOME, XDG_CONFIG_DIRS and,
+// when envOverridesApplied, GRAFANA_SERVER — and $HOME is the passwd home directory.
+//
+// adrg/xdg resolves the file as the first directory that exists or can be created among
+// $XDG_CONFIG_HOME (absolute values only), ~/Library/Application Support and $XDG_CONFIG_DIRS, and
+// on darwin the second always exists, so --config, GRAFANAPI_CONFIG, XDG_CONFIG_HOME and $HOME are
+// the only inputs that move it; XDG_CONFIG_DIRS is checked as belt and braces. os/user.Current
+// reads the passwd entry, not $HOME.
+//
+// GRAFANA_SERVER counts by presence, a deliberately conservative choice: caarlos0/env skips an
+// empty value (env.go:499), so an empty one would not override the server. Callers that never
+// apply environment overrides (session refresh, login update) pass envOverridesApplied=false.
+func LegacyBindAllowed(explicitConfigFile string, envOverridesApplied bool) bool {
+	return legacyBindAllowed(explicitConfigFile, envOverridesApplied, os.LookupEnv, passwdHome)
+}
+
+func legacyBindAllowed(
+	explicitConfigFile string,
+	envOverridesApplied bool,
+	lookupEnv func(string) (string, bool),
+	passwdHomeDir func() (string, error),
+) bool {
+	if explicitConfigFile != "" {
+		return false
+	}
+
+	nonEmpty := func(name string) bool {
+		v, ok := lookupEnv(name)
+		return ok && v != ""
+	}
+
+	if nonEmpty(ConfigFileEnvVar) || nonEmpty("XDG_CONFIG_HOME") || nonEmpty("XDG_CONFIG_DIRS") {
+		return false
+	}
+
+	if envOverridesApplied {
+		if _, set := lookupEnv("GRAFANA_SERVER"); set {
+			return false
+		}
+	}
+
+	home, ok := lookupEnv("HOME")
+	if !ok || home == "" {
+		return false
+	}
+
+	pwHome, err := passwdHomeDir()
+	if err != nil || pwHome == "" {
+		return false
+	}
+
+	return filepath.Clean(home) == filepath.Clean(pwHome)
+}
+
+func passwdHome() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+
+	return u.HomeDir, nil
 }

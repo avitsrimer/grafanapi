@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -171,4 +172,49 @@ func Test_ResolveContextSessionCookie_storeErrorLeavesSessionNil(t *testing.T) {
 
 	require.Empty(t, gCtx.Grafana.SessionCookie)
 	require.Nil(t, gCtx.Grafana.Session)
+}
+
+func TestSessionBindingError(t *testing.T) {
+	const cookie = "s3cr3t-cookie-value"
+
+	bound, err := config.ServerOrigin("https://grafana.example.com")
+	require.NoError(t, err)
+
+	target, err := config.ServerOrigin("https://evil.example")
+	require.NoError(t, err)
+
+	t.Run("mismatch", func(t *testing.T) {
+		var err error = &config.SessionBindingError{Context: "dev", BoundOrigin: bound, ServerOrigin: target}
+
+		require.ErrorIs(t, err, config.ErrSessionOriginMismatch)
+		require.NotErrorIs(t, err, config.ErrSessionUnbound)
+		require.Contains(t, err.Error(), `"dev"`)
+		require.Contains(t, err.Error(), bound)
+		require.Contains(t, err.Error(), target)
+		require.NotContains(t, err.Error(), cookie)
+	})
+
+	t.Run("unbound", func(t *testing.T) {
+		var err error = &config.SessionBindingError{Context: "dev", ServerOrigin: target}
+
+		require.ErrorIs(t, err, config.ErrSessionUnbound)
+		require.NotErrorIs(t, err, config.ErrSessionOriginMismatch)
+		require.Contains(t, err.Error(), `"dev"`)
+		require.Contains(t, err.Error(), target)
+		require.NotContains(t, err.Error(), bound)
+
+		for _, override := range []string{"--config", "GRAFANAPI_CONFIG", "GRAFANA_SERVER", "XDG_CONFIG_*", "$HOME"} {
+			require.Contains(t, err.Error(), override)
+		}
+
+		require.NotContains(t, err.Error(), cookie)
+	})
+
+	t.Run("wrapped", func(t *testing.T) {
+		wrapped := fmt.Errorf("load: %w", &config.SessionBindingError{Context: "dev", BoundOrigin: bound, ServerOrigin: target})
+
+		var be *config.SessionBindingError
+		require.ErrorAs(t, wrapped, &be)
+		require.ErrorIs(t, wrapped, config.ErrSessionOriginMismatch)
+	})
 }
