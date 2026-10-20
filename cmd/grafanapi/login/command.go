@@ -64,7 +64,8 @@ The cookie is validated against the target server (GET /api/user) before anythin
 It is never accepted as a command-line flag value or environment variable: it is read either from
 an interactive, no-echo prompt, or — with --cookie-stdin — from stdin, for scripting and CI. On
 success, the context (server, org-id/stack-id, TLS) is written to the configuration file and the
-cookie itself is stored in the macOS Keychain, never in the plaintext configuration file.`,
+cookie itself is stored in the macOS Keychain, never in the plaintext configuration file.
+The stored session is bound to the server's origin (scheme, host, port) and is only ever sent there.`,
 		Example: "\n\tgrafanapi login --server https://grafana.example.com\n" +
 			"\tpbpaste | grafanapi login --server https://grafana.example.com --cookie-stdin",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -251,7 +252,15 @@ func runLogin(cmd *cobra.Command, opts *Options) error {
 	// already had one, delete the just-created entry if it didn't, or — if we couldn't even tell
 	// whether a prior cookie existed — leave the item untouched rather than risk destroying a
 	// working credential we simply failed to read.
-	if err := keychainStore.Set(keychain.Account(name), cookie); err != nil {
+	// The item is the bound credential (cookie + server origin), so the cookie can only ever be
+	// loaded for, and sent to, the server it was issued for. priorCookie stays the raw prior item,
+	// so a rollback restores it byte-for-byte, bound or legacy.
+	secret, err := config.EncodeSessionCredential(cookie, server)
+	if err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+
+	if err := keychainStore.Set(keychain.Account(name), secret); err != nil {
 		return fmt.Errorf("login: storing session cookie in keychain: %w", err)
 	}
 

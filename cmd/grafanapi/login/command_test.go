@@ -98,6 +98,21 @@ func (f *fakePrompter) PromptSecret(string) (string, error) {
 	return f.secret, nil
 }
 
+// decodedCookie returns the cookie inside the credential login stored for the context, failing the
+// test when the item is missing, legacy (unbound) or malformed.
+func decodedCookie(t *testing.T, store *fakeKeychainStore, contextName string) keychain.Credential {
+	t.Helper()
+
+	raw, err := store.Get(keychain.Account(contextName))
+	require.NoError(t, err)
+
+	cred, err := keychain.DecodeCredential(raw)
+	require.NoError(t, err)
+	require.False(t, cred.Legacy(), "login must store a bound credential, not a bare cookie")
+
+	return cred
+}
+
 func newTestUserServer(t *testing.T, status int) *httptest.Server {
 	t.Helper()
 
@@ -149,9 +164,9 @@ func Test_LoginCommand_success(t *testing.T) {
 	require.Contains(t, string(written), "current-context: default")
 	require.NotContains(t, string(written), "the-cookie")
 
-	cookie, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, "the-cookie", cookie)
+	cred := decodedCookie(t, store, "default")
+	require.Equal(t, "the-cookie", cred.Cookie)
+	require.Equal(t, server.URL, cred.Origin, "login must bind the cookie to the server origin")
 }
 
 func Test_LoginCommand_serverFlagSkipsPrompt(t *testing.T) {
@@ -792,7 +807,8 @@ func Test_LoginCommand_configWriteFailureRestoresPriorKeychainItemOnRelogin(t *t
 	require.NoError(t, os.Chmod(configFile, 0o400))
 
 	store := &fakeKeychainStore{}
-	require.NoError(t, store.Set(keychain.Account("default"), "prior-valid-cookie"))
+	priorRaw := testutils.BoundSecret(t, "prior-valid-cookie", server.URL)
+	require.NoError(t, store.Set(keychain.Account("default"), priorRaw))
 	restoreStore := login.SetKeychainStore(store)
 	defer restoreStore()
 
@@ -809,10 +825,10 @@ func Test_LoginCommand_configWriteFailureRestoresPriorKeychainItemOnRelogin(t *t
 	}
 	testCase.Run(t)
 
-	cookie, err := store.Get(keychain.Account("default"))
+	raw, err := store.Get(keychain.Account("default"))
 	require.NoError(t, err)
-	require.Equal(t, "prior-valid-cookie", cookie,
-		"a failed config write during re-login must restore the prior cookie instead of deleting it")
+	require.Equal(t, priorRaw, raw,
+		"a failed config write during re-login must restore the prior raw payload byte-for-byte instead of deleting it")
 }
 
 // Test_LoginCommand_configWriteFailureLeavesItemOnTransientGetError covers the narrow case where
@@ -852,9 +868,7 @@ func Test_LoginCommand_configWriteFailureLeavesItemOnTransientGetError(t *testin
 	// getErr only affects the "check for a prior cookie" read; Set still writes for real, so the
 	// new cookie must still be there afterwards -- the rollback must not have deleted it.
 	store.getErr = nil
-	cookie, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, "new-cookie", cookie,
+	require.Equal(t, "new-cookie", decodedCookie(t, store, "default").Cookie,
 		"a config write failure must not delete the keychain item when login couldn't tell whether a prior cookie existed")
 }
 
@@ -951,9 +965,8 @@ func Test_LoginCommand_cookieStdinSuccess(t *testing.T) {
 	require.Equal(t, 0, prompter.lineN, "--server was given, so the server prompt must not be shown")
 	require.Equal(t, 0, prompter.secretN, "--cookie-stdin must read the cookie from stdin, not the prompter")
 
-	cookie, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, "the-cookie", cookie, "trailing whitespace/newline from stdin must be trimmed")
+	require.Equal(t, "the-cookie", decodedCookie(t, store, "default").Cookie,
+		"trailing whitespace/newline from stdin must be trimmed")
 }
 
 func Test_LoginCommand_cookieStdinEmptyStdinFails(t *testing.T) {
