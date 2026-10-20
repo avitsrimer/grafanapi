@@ -3,8 +3,11 @@ package server_test
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/grafana/grafanapi/internal/config"
@@ -68,4 +71,36 @@ func TestServer_ServeReturnsNilAfterContextCancel(t *testing.T) {
 	case <-t.Context().Done():
 		t.Fatal("test context ended before Serve returned")
 	}
+}
+
+func TestServer_RejectsForeignHost(t *testing.T) {
+	var backendHits atomic.Int32
+
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		backendHits.Add(1)
+	}))
+	t.Cleanup(backend.Close)
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: backend.URL}}
+	s := server.New(server.Config{ListenAddr: "127.0.0.1", NoColor: true}, gCtx, resources.NewResources())
+
+	ln, err := s.Listen(t.Context())
+	require.NoError(t, err)
+
+	go func() { _ = s.Serve(t.Context(), ln) }()
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+ln.Addr().String()+"/api/ds/query", nil)
+	require.NoError(t, err)
+
+	req.Host = "evil.example.com:" + port
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusMisdirectedRequest, resp.StatusCode)
+	assert.Zero(t, backendHits.Load())
 }

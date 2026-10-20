@@ -139,6 +139,10 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handler(ctx context.Context) (http.Handler, error) {
+	if s.port == 0 {
+		return nil, errors.New("server is not listening: call Listen first")
+	}
+
 	assetsFS, err := fs.Sub(embedFS, "embed/assets")
 	if err != nil {
 		return nil, fmt.Errorf("could not create a sub-tree from the embedded assets FS: %w", err)
@@ -171,7 +175,16 @@ func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 		},
 	}
 
+	hosts, err := allowedHosts(s.config.ListenAddr, s.port, net.InterfaceAddrs)
+	if err != nil {
+		return nil, err
+	}
+
 	r := chi.NewRouter()
+
+	// The guard is the outermost middleware (chi refuses Use after a route), so it wraps every
+	// route - proxy, mocks, local file handlers, websocket - and runs before the request logger.
+	r.Use(newGuard(hosts, logging.FromContext(ctx)).middleware)
 
 	// Log HTTP requests/responses at debug level
 	r.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{
