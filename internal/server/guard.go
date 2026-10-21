@@ -79,7 +79,7 @@ func (g *guard) redeemQueryToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// No Secure attribute: the server speaks plain http on loopback, where a Secure cookie would be dropped.
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // see above
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec,nolintlint // G124 (newer gosec only): no Secure attribute, see above
 		Name:     g.cookieName,
 		Value:    g.token,
 		Path:     "/",
