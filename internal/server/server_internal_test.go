@@ -29,6 +29,8 @@ func TestBrowseURL(t *testing.T) {
 		{name: "empty is wildcard", listenAddr: "", want: "http://127.0.0.1:8080/"},
 		{name: "ipv4 wildcard", listenAddr: "0.0.0.0", want: "http://127.0.0.1:8080/"},
 		{name: "ipv6 wildcard", listenAddr: "::", want: "http://127.0.0.1:8080/"},
+		{name: "ipv6 wildcard long form", listenAddr: "::0", want: "http://127.0.0.1:8080/"},
+		{name: "ipv6 wildcard expanded", listenAddr: "0:0:0:0:0:0:0:0", want: "http://127.0.0.1:8080/"},
 		{name: "ipv4 loopback", listenAddr: "127.0.0.1", want: "http://127.0.0.1:8080/"},
 		{name: "ipv6 loopback", listenAddr: "::1", want: "http://[::1]:8080/"},
 	}

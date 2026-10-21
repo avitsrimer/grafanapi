@@ -400,7 +400,7 @@ func (s *Server) iframeHandler(w http.ResponseWriter, r *http.Request) {
 // browseURL is the URL a browser should open: wildcard binds are reached through loopback.
 func browseURL(listenAddr string, port int, token string) string {
 	host := listenAddr
-	if host == "" || host == "0.0.0.0" || host == "::" {
+	if isWildcard(host) {
 		host = "127.0.0.1"
 	}
 
