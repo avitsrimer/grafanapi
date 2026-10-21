@@ -516,3 +516,165 @@ func Test_SortedContextNames(t *testing.T) {
 
 	assert.Equal(t, []string{"alpha", "mid", "zeta"}, sortedContextNames(cfg))
 }
+
+// attackCookie is a distinctive session cookie value, so a NotContains assertion on it means
+// something: the stored session must never reach the rotate server of a mismatched context, nor
+// any error or output line.
+const attackCookie = "s3cr3t-cookie-value"
+
+// Test_RefreshCmd_Single_MismatchedOriginSendsNothing is the keep-alive form of the exfiltration:
+// the stored session is bound to the home origin but the configuration (a --config file, as a
+// hostile repo-local one would be) now points the context at another server. The rotate request
+// carries the cookie, so it must never be made.
+func Test_RefreshCmd_Single_MismatchedOriginSendsNothing(t *testing.T) {
+	home, homeCalls := newRotateServer(t, http.StatusOK)
+	evil, evilCalls := newRotateServer(t, http.StatusOK)
+
+	store := testutils.NewFakeKeychainStore()
+	bound := testutils.BoundSecret(t, attackCookie, home.URL)
+	require.NoError(t, store.Set(keychain.Account("default"), bound))
+	t.Cleanup(SetKeychainStore(store))
+
+	var result testutils.CommandResult
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     Command(),
+		Command: []string{"refresh", "--config", singleContextConfig(t, evil.URL)},
+		Assertions: []testutils.CommandAssertion{
+			func(_ *testing.T, res testutils.CommandResult) { result = res },
+		},
+	}
+	testCase.Run(t)
+
+	require.ErrorIs(t, result.Err, config.ErrSessionOriginMismatch)
+	assert.Contains(t, result.Err.Error(), home.URL)
+	assert.Contains(t, result.Err.Error(), evil.URL)
+	assert.NotContains(t, result.Err.Error(), attackCookie)
+	assert.NotContains(t, result.Stdout, attackCookie)
+
+	assert.Zero(t, atomic.LoadInt32(evilCalls), "the mismatched server must receive no request")
+	assert.Zero(t, atomic.LoadInt32(homeCalls), "nothing is rotated at all")
+
+	raw, ok := store.RawValue(keychain.Account("default"))
+	require.True(t, ok)
+	assert.Equal(t, bound, raw, "the stored item must be left untouched")
+}
+
+// Test_RefreshCmd_Single_LegacyItemUnderConfigFlagIsNotBound covers a legacy (origin-less) item:
+// with --config the server is not provably the user's own, so refresh must fail closed instead of
+// binding the cookie to whatever that file names.
+func Test_RefreshCmd_Single_LegacyItemUnderConfigFlagIsNotBound(t *testing.T) {
+	evil, evilCalls := newRotateServer(t, http.StatusOK)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("default"), attackCookie))
+	t.Cleanup(SetKeychainStore(store))
+
+	var result testutils.CommandResult
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     Command(),
+		Command: []string{"refresh", "--config", singleContextConfig(t, evil.URL)},
+		Assertions: []testutils.CommandAssertion{
+			func(_ *testing.T, res testutils.CommandResult) { result = res },
+		},
+	}
+	testCase.Run(t)
+
+	require.ErrorIs(t, result.Err, config.ErrSessionUnbound)
+	assert.Contains(t, result.Err.Error(), evil.URL)
+	assert.NotContains(t, result.Err.Error(), attackCookie)
+	assert.NotContains(t, result.Stdout, attackCookie)
+	assert.Zero(t, atomic.LoadInt32(evilCalls))
+
+	raw, ok := store.RawValue(keychain.Account("default"))
+	require.True(t, ok)
+	assert.Equal(t, attackCookie, raw, "a refused legacy item must not be re-written as bound")
+}
+
+// Test_RefreshCmd_Single_BoundRotationKeepsOrigin pins the happy path: a bound session whose
+// origin matches rotates, and the rotated cookie is persisted under the same origin.
+func Test_RefreshCmd_Single_BoundRotationKeepsOrigin(t *testing.T) {
+	server, calls := newRotateServer(t, http.StatusOK)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, attackCookie, server.URL)))
+	t.Cleanup(SetKeychainStore(store))
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     Command(),
+		Command: []string{"refresh", "--config", singleContextConfig(t, server.URL)},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			func(t *testing.T, res testutils.CommandResult) {
+				t.Helper()
+				assert.NotContains(t, res.Stdout, attackCookie)
+				assert.NotContains(t, res.Stdout, "new-cookie")
+			},
+		},
+	}
+	testCase.Run(t)
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(calls))
+
+	raw, ok := store.RawValue(keychain.Account("default"))
+	require.True(t, ok)
+
+	cred, err := keychain.DecodeCredential(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "new-cookie", cred.Cookie)
+	assert.Equal(t, server.URL, cred.Origin)
+}
+
+// Test_RefreshCmd_Due_MismatchedContextIsReportedNotRotated is the scheduler shape: one due
+// context is bound elsewhere, one is fine. The good one is refreshed, the bad one is reported as
+// an error and its server sees nothing.
+func Test_RefreshCmd_Due_MismatchedContextIsReportedNotRotated(t *testing.T) {
+	good, goodCalls := newRotateServer(t, http.StatusOK)
+	home, _ := newRotateServer(t, http.StatusOK)
+	evil, evilCalls := newRotateServer(t, http.StatusOK)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("good"), testutils.BoundSecret(t, "good-cookie", good.URL)))
+	store.SetModified(keychain.Account("good"), time.Now().Add(-24*time.Hour))
+	bound := testutils.BoundSecret(t, attackCookie, home.URL)
+	require.NoError(t, store.Set(keychain.Account("moved"), bound))
+	store.SetModified(keychain.Account("moved"), time.Now().Add(-24*time.Hour))
+	t.Cleanup(SetKeychainStore(store))
+
+	configFile := testutils.CreateTempFile(t, fmt.Sprintf(`current-context: good
+contexts:
+  good:
+    grafana:
+      server: %s
+      live-window: 12h
+  moved:
+    grafana:
+      server: %s
+      live-window: 12h
+`, good.URL, evil.URL))
+
+	var result testutils.CommandResult
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     Command(),
+		Command: []string{"refresh", "--due", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			func(_ *testing.T, res testutils.CommandResult) { result = res },
+		},
+	}
+	testCase.Run(t)
+
+	require.ErrorIs(t, result.Err, config.ErrSessionOriginMismatch)
+	assert.Contains(t, result.Stdout, "refreshed session for context good")
+	assert.Contains(t, result.Stdout, "context moved")
+	assert.NotContains(t, result.Stdout, attackCookie)
+	assert.NotContains(t, result.Err.Error(), attackCookie)
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(goodCalls))
+	assert.Zero(t, atomic.LoadInt32(evilCalls), "the mismatched context's server must receive no request")
+
+	raw, ok := store.RawValue(keychain.Account("moved"))
+	require.True(t, ok)
+	assert.Equal(t, bound, raw)
+}
