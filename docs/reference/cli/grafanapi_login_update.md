@@ -12,6 +12,8 @@ Unlike "grafanapi login", "login update" never re-asks for the server: it loads 
 that stored server (GET /api/user), and — only on success — overwrites the cookie in the macOS
 Keychain. The configuration file itself is never modified.
 
+The stored server must use https://; plain http:// is only accepted for localhost.
+
 ```
 grafanapi login update [flags]
 ```

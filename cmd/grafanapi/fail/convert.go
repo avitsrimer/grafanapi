@@ -59,13 +59,14 @@ func ErrorToDetailedError(err error) *DetailedError {
 
 	// Try to convert the error for common error categories
 	errorConverters := []func(err error) (*DetailedError, bool){
-		convertConfigErrors,    // Config-related
-		convertFSErrors,        // FS-related
-		convertResourcesErrors, // Resources-related
-		convertAlertsErrors,    // Alerting-specific failures (a uid no rule carries)
-		convertNetworkErrors,   // Network-related errors
-		convertAuthErrors,      // Grafana auth failures (openapi 401/403, session.ErrUnauthorized)
-		convertAPIErrors,       // API-related errors (k8s dynamic-client StatusError)
+		convertConfigErrors,       // Config-related
+		convertFSErrors,           // FS-related
+		convertResourcesErrors,    // Resources-related
+		convertAlertsErrors,       // Alerting-specific failures (a uid no rule carries)
+		convertServerPolicyErrors, // Refused redirects and unusable server URLs (before network: a *url.Error wraps them)
+		convertNetworkErrors,      // Network-related errors
+		convertAuthErrors,         // Grafana auth failures (openapi 401/403, session.ErrUnauthorized)
+		convertAPIErrors,          // API-related errors (k8s dynamic-client StatusError)
 	}
 
 	for _, converter := range errorConverters {
@@ -279,6 +280,43 @@ func convertAlertsErrors(err error) (*DetailedError, bool) {
 			Summary: "Alert rule not found",
 			Suggestions: []string{
 				"Check the UID against the UID column of: grafanapi alerts rules list",
+			},
+		}, true
+	}
+
+	return nil, false
+}
+
+// convertServerPolicyErrors renders the two refusals of the server-origin policy: a request or
+// redirect that leaves the configured Grafana origin, and a server URL that may not carry the
+// session cookie. It must run before convertNetworkErrors, because net/http wraps a refusal in a
+// *url.Error that would otherwise be claimed as a generic network error.
+//
+// Parent is the typed error found by errors.As, never err itself: the outer *url.Error carries the
+// raw redirect target, path and query included, while the typed error holds origins only. Neither
+// case sets an ExitCode - a policy refusal is not an authentication problem (exit 2).
+func convertServerPolicyErrors(err error) (*DetailedError, bool) {
+	redirectErr := &config.UnsafeRedirectError{}
+	if errors.As(err, &redirectErr) {
+		return &DetailedError{
+			Parent:  redirectErr,
+			Summary: "Refused a redirect away from the configured Grafana server",
+			Suggestions: []string{
+				"Set the context's server to the exact URL Grafana serves (scheme, host, port and sub-path, " +
+					"Grafana's root_url): grafanapi config set contexts.<name>.grafana.server <url>",
+				"Check the configured server: grafanapi config view",
+			},
+		}, true
+	}
+
+	serverErr := &config.ServerURLError{}
+	if errors.As(err, &serverErr) {
+		return &DetailedError{
+			Parent:  serverErr,
+			Summary: "Invalid Grafana server URL",
+			Suggestions: []string{
+				"Use the https:// address of your Grafana server, e.g. https://grafana.example.com",
+				"Plain http:// is only accepted for a Grafana running on this machine (localhost, 127.0.0.1, ::1)",
 			},
 		}, true
 	}

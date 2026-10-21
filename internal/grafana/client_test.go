@@ -155,3 +155,21 @@ func TestGetVersion_RotateRejectedSurfacesOriginal401(t *testing.T) {
 	_, ok := store.Value(account)
 	assert.False(t, ok)
 }
+
+func TestGetVersion_RefusesCrossOriginRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	server := testutils.NewRedirectServer(t, trap.URL+"/api/health?token=s3cret", http.StatusFound)
+
+	gCtx := &config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			SessionCookie: "abc123",
+		},
+	}
+
+	_, err := grafana.GetVersion(gCtx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Equal(t, 0, trap.Requests(), "the redirect target must never be contacted")
+	assert.Empty(t, trap.LastCookie())
+}

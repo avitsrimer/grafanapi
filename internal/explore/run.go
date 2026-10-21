@@ -79,7 +79,11 @@ func Run(ctx context.Context, gCtx *config.Context, body any) (*QueryResponse, e
 		return nil, fmt.Errorf("explore: %w", err)
 	}
 
-	client := &http.Client{Timeout: queryTimeout, Transport: gCtx.Grafana.WrapWithSession(transport)}
+	client := &http.Client{
+		Timeout:       queryTimeout,
+		Transport:     gCtx.Grafana.WrapWithSession(transport),
+		CheckRedirect: config.SameOriginRedirects(gCtx.Grafana.Server),
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

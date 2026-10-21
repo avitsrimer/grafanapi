@@ -16,6 +16,7 @@ import (
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/explore"
 	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -342,4 +343,169 @@ func TestRun_ServerURLPathPrefixPreserved(t *testing.T) {
 	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
 	require.NoError(t, err)
 	assert.Equal(t, "/grafana/api/ds/query", gotPath)
+}
+
+const exploreOKBody = `{"results":{"A":{"status":200,"frames":[]}}}`
+
+func TestRun_RefusesOffOriginRedirect(t *testing.T) {
+	for _, code := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			trap := testutils.NewCookieTrap(t)
+			server := testutils.NewRedirectServer(t, trap.URL+"/api/ds/query?token=s3cret", code)
+			gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}}
+
+			resp, err := explore.Run(t.Context(), gCtx, testQueryBody())
+			require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+			assert.Nil(t, resp)
+			assert.Zero(t, trap.Requests(), "the foreign host must never be contacted")
+			assert.Empty(t, trap.LastBody(), "a 307 must not replay the query body to the foreign host")
+		})
+	}
+}
+
+func TestRun_RefusesSchemeDowngradeRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+
+	var requests atomic.Int32
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Redirect(w, r, trap.URL+"/api/ds/query", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(server.Close)
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{
+		Server:        server.URL,
+		SessionCookie: "abc123",
+		TLS:           &config.TLS{Insecure: true},
+	}}
+
+	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Equal(t, int32(1), requests.Load())
+	assert.Zero(t, trap.Requests())
+}
+
+func TestRun_FollowsSameOriginRedirect(t *testing.T) {
+	for _, relative := range []bool{false, true} {
+		kind := "absolute"
+		if relative {
+			kind = "relative"
+		}
+
+		t.Run(kind, func(t *testing.T) {
+			var (
+				cookies []string
+				origin  string
+			)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				cookies = append(cookies, r.Header.Get("Cookie"))
+
+				if r.URL.Path == "/api/ds/query" {
+					target := "/final/query"
+					if !relative {
+						target = origin + target
+					}
+
+					w.Header().Set("Location", target)
+					w.WriteHeader(http.StatusFound)
+
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(exploreOKBody))
+			}))
+			t.Cleanup(server.Close)
+
+			origin = server.URL
+			gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}}
+
+			resp, err := explore.Run(t.Context(), gCtx, testQueryBody())
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+
+			want := config.CookieHeaderValue("abc123")
+			assert.Equal(t, []string{want, want}, cookies, "the second hop must carry the cookie")
+		})
+	}
+}
+
+func TestRun_SameOrigin307ReplaysBodyWithCookie(t *testing.T) {
+	var (
+		bodies  []string
+		cookies []string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+
+		bodies = append(bodies, string(body))
+		cookies = append(cookies, r.Header.Get("Cookie"))
+
+		if r.URL.Path == "/api/ds/query" {
+			http.Redirect(w, r, "/final/query", http.StatusTemporaryRedirect)
+
+			return
+		}
+
+		assert.Equal(t, http.MethodPost, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(exploreOKBody))
+	}))
+	t.Cleanup(server.Close)
+
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}}
+
+	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
+	require.NoError(t, err)
+
+	require.Len(t, bodies, 2)
+	assert.NotEmpty(t, bodies[0])
+	assert.Equal(t, bodies[0], bodies[1], "a 307 must replay the identical body")
+
+	want := config.CookieHeaderValue("abc123")
+	assert.Equal(t, []string{want, want}, cookies)
+}
+
+// TestRun_RotateRetryAnsweredByOffOriginRedirect pins the interplay: the retry that follows a
+// successful rotation is answered by a redirect to another host, which must still be refused, so
+// the freshly rotated cookie never leaves the server origin.
+func TestRun_RotateRetryAnsweredByOffOriginRedirect(t *testing.T) {
+	const newCookie = "new-cookie"
+
+	rotateServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{
+			Name: config.SessionCookieName, Value: newCookie,
+			Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		})
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(rotateServer.Close)
+
+	trap := testutils.NewCookieTrap(t)
+
+	var hits atomic.Int32
+
+	queryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+
+			return
+		}
+
+		http.Redirect(w, r, trap.URL+"/api/ds/query", http.StatusFound)
+	}))
+	t.Cleanup(queryServer.Close)
+
+	src := config.NewSessionSource("old-cookie", rotateServer.URL, nil, nopStore{}, "acct")
+	gCtx := &config.Context{Grafana: &config.GrafanaConfig{Server: queryServer.URL, Session: src}}
+
+	_, err := explore.Run(t.Context(), gCtx, testQueryBody())
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Equal(t, int32(2), hits.Load())
+	assert.Zero(t, trap.Requests())
+	assert.Empty(t, trap.LastCookie())
 }

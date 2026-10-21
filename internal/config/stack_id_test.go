@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/grafana/grafanapi/internal/config"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -146,4 +147,77 @@ func TestDiscoverStackID_MalformedTLSConfigSurfacesError(t *testing.T) {
 	_, err := config.DiscoverStackID(t.Context(), cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ca-data")
+}
+
+func TestDiscoverStackID_RefusesOffOriginRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	server := testutils.NewRedirectServer(t, trap.URL+"/bootdata", http.StatusFound)
+
+	cfg := config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}
+
+	_, err := config.DiscoverStackID(t.Context(), cfg)
+
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Zero(t, trap.Requests(), "the redirect target must never be contacted")
+}
+
+func TestDiscoverStackID_RefusesSchemeDowngradeRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+
+	var hits int
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+
+		http.Redirect(w, r, trap.URL+"/bootdata", http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.GrafanaConfig{
+		Server:        server.URL,
+		SessionCookie: "abc123",
+		TLS:           &config.TLS{Insecure: true},
+	}
+
+	_, err := config.DiscoverStackID(t.Context(), cfg)
+
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Zero(t, trap.Requests(), "the cleartext target must never be contacted")
+	assert.Equal(t, 1, hits)
+}
+
+func TestDiscoverStackID_FollowsSameOriginRelativeRedirect(t *testing.T) {
+	var cookies []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookies = append(cookies, r.Header.Get("Cookie"))
+
+		if r.URL.Path == "/bootdata" {
+			http.Redirect(w, r, "/final/bootdata", http.StatusFound)
+
+			return
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"settings": map[string]any{"namespace": "stacks-12345"},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := config.GrafanaConfig{Server: server.URL, SessionCookie: "abc123"}
+
+	stackID, err := config.DiscoverStackID(t.Context(), cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(12345), stackID)
+	assert.Equal(t, []string{"grafana_session=abc123", "grafana_session=abc123"}, cookies)
+}
+
+func TestDiscoverStackID_RefusesCleartextRemoteServerWithCookie(t *testing.T) {
+	cfg := config.GrafanaConfig{Server: "http://grafana.example.invalid", SessionCookie: "abc123"}
+
+	_, err := config.DiscoverStackID(t.Context(), cfg)
+
+	require.ErrorIs(t, err, config.ErrInvalidServerURL)
+	assert.NotContains(t, err.Error(), "abc123")
 }

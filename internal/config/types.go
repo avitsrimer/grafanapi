@@ -77,7 +77,9 @@ func (context *Context) ToRESTConfig(ctx context.Context) NamespacedRESTConfig {
 
 type GrafanaConfig struct {
 	// Server is the address of the Grafana server (https://hostname:port/path).
-	// Required.
+	// Required. It must use https://; plain http:// is only accepted for a Grafana running on
+	// this machine (localhost, any 127.x.x.x address, or ::1). Internationalised host names must be
+	// given in punycode (xn--...).
 	Server string `env:"GRAFANA_SERVER" json:"server,omitempty" yaml:"server,omitempty"`
 
 	// OrgID specifies the organization targeted by this config.
@@ -185,6 +187,18 @@ func (grafana GrafanaConfig) Validate(contextName string) error {
 			Message: "server is required",
 			Suggestions: []string{
 				"Set the address of the Grafana server to connect to",
+			},
+		}
+	}
+
+	// Checked before validateNamespace, which sends the session cookie to the server.
+	if err := ValidateServerURL(grafana.Server); err != nil {
+		return ValidationError{
+			Path:    fmt.Sprintf("$.contexts.'%s'.grafana.server", contextName),
+			Message: err.Error(),
+			Suggestions: []string{
+				"Use the https:// address of your Grafana server, e.g. https://grafana.example.com",
+				"Plain http:// is only accepted for a Grafana running on this machine (localhost, 127.0.0.1, ::1)",
 			},
 		}
 	}

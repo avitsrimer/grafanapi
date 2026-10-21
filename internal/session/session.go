@@ -34,6 +34,8 @@ const verifyTimeout = 10 * time.Second
 //
 // The verification request is issued over the TLS-aware httputils.NewTransport directly, with no
 // debug-logging round-tripper wrapped around it, so the session cookie is never written to logs.
+// The cookie is only attached to a request for the configured server's origin, and a redirect that
+// leaves that origin is refused with config.ErrUnsafeRedirect before it is sent.
 func VerifyCookie(ctx context.Context, gCtx *config.Context) error {
 	if gCtx == nil || gCtx.Grafana == nil {
 		return errors.New("session: no grafana context configured")
@@ -48,14 +50,20 @@ func VerifyCookie(ctx context.Context, gCtx *config.Context) error {
 	if err != nil {
 		return fmt.Errorf("session: building request: %w", err)
 	}
-	req.Header.Set("Cookie", config.CookieHeaderValue(gCtx.Grafana.SessionCookie))
+	if err := config.SetSessionCookie(req, gCtx.Grafana.Server, gCtx.Grafana.SessionCookie); err != nil {
+		return fmt.Errorf("session: %w", err)
+	}
 
 	transport, err := httputils.NewTransport(gCtx)
 	if err != nil {
 		return fmt.Errorf("session: %w", err)
 	}
 
-	client := &http.Client{Timeout: verifyTimeout, Transport: transport}
+	client := &http.Client{
+		Timeout:       verifyTimeout,
+		Transport:     transport,
+		CheckRedirect: config.SameOriginRedirects(gCtx.Grafana.Server),
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -80,7 +88,7 @@ func VerifyCookie(ctx context.Context, gCtx *config.Context) error {
 //
 // Like VerifyCookie, the request is issued over the TLS-aware httputils.NewTransport directly,
 // with no debug-logging round-tripper wrapped around it, so the session cookie is never written
-// to logs.
+// to logs. The same origin policy applies: off-origin redirects are refused.
 func CurrentOrgID(ctx context.Context, gCtx *config.Context) (int64, error) {
 	if gCtx == nil || gCtx.Grafana == nil {
 		return 0, errors.New("session: no grafana context configured")
@@ -95,14 +103,20 @@ func CurrentOrgID(ctx context.Context, gCtx *config.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("session: building request: %w", err)
 	}
-	req.Header.Set("Cookie", config.CookieHeaderValue(gCtx.Grafana.SessionCookie))
+	if err := config.SetSessionCookie(req, gCtx.Grafana.Server, gCtx.Grafana.SessionCookie); err != nil {
+		return 0, fmt.Errorf("session: %w", err)
+	}
 
 	transport, err := httputils.NewTransport(gCtx)
 	if err != nil {
 		return 0, fmt.Errorf("session: %w", err)
 	}
 
-	client := &http.Client{Timeout: verifyTimeout, Transport: transport}
+	client := &http.Client{
+		Timeout:       verifyTimeout,
+		Transport:     transport,
+		CheckRedirect: config.SameOriginRedirects(gCtx.Grafana.Server),
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

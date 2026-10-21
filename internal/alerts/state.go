@@ -88,7 +88,11 @@ func FetchRuleStates(ctx context.Context, gCtx *config.Context) (RuleStates, err
 		return RuleStates{}, fmt.Errorf("alerts: %w", err)
 	}
 
-	client := &http.Client{Timeout: stateTimeout, Transport: gCtx.Grafana.WrapWithSession(transport)}
+	client := &http.Client{
+		Timeout:       stateTimeout,
+		Transport:     gCtx.Grafana.WrapWithSession(transport),
+		CheckRedirect: config.SameOriginRedirects(gCtx.Grafana.Server),
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
