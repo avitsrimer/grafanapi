@@ -855,6 +855,47 @@ func TestWriteRuleGroups_RefusesTheOtherFormat(t *testing.T) {
 	}
 }
 
+// TestWriteRuleGroups_RefusesAFolderThatIsNotADirectory pins the fail-closed rule: a symlinked folder
+// directory must not let a write past the sibling and other-extension refusals.
+func TestWriteRuleGroups_RefusesAFolderThatIsNotADirectory(t *testing.T) {
+	edited := remoteRuleGroup()
+	edited.Rules[1].IsPaused = !edited.Rules[1].IsPaused
+
+	tests := []struct {
+		name string
+		seed func(t *testing.T, real string)
+	}{
+		{"a sibling differs from Grafana", func(t *testing.T, real string) {
+			seedRuleGroup(t, real, format.YAML, edited)
+		}},
+		{"the group is held in the other format", func(t *testing.T, real string) {
+			seedRuleGroup(t, real, format.JSON, remoteRuleGroup())
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			real, dir := t.TempDir(), t.TempDir()
+			tc.seed(t, real)
+
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, "rules"), 0o750))
+			require.NoError(t, os.Symlink(filepath.Join(real, "rules", "folder-uid-1"), filepath.Join(dir, "rules", "folder-uid-1")))
+
+			before := snapshotDir(t, real)
+
+			err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
+				Format:    format.YAML,
+				RuleUIDs:  []string{"rule-uid-1"},
+				Overwrite: true,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "symlink or not a directory")
+			assert.Contains(t, err.Error(), filepath.Join(dir, "rules", "folder-uid-1"))
+			assert.Equal(t, before, snapshotDir(t, real), "nothing is written through the link")
+		})
+	}
+}
+
 // TestWriteRuleGroups_RefusesADifferentGroupWithTheSameFileName is the data-loss case on APFS: the
 // write would replace the file of a group that is not the one being pulled.
 func TestWriteRuleGroups_RefusesADifferentGroupWithTheSameFileName(t *testing.T) {

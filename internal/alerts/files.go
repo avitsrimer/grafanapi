@@ -704,6 +704,10 @@ func readPolicyFile(dir string) (*models.Route, error) {
 // directory and with a base name equal to the group's, both compared folded (see foldFileName)
 // because the filesystem holds `Alpha.yaml` and `alpha.yaml` as one entry. A missing rules/
 // directory or folder directory means no files; any other read failure is an error.
+//
+// An entry named like the group's folder that is not a plain directory - a symlink above all, which
+// os.ReadDir reports with IsDir() false - is refused rather than skipped: the write would go through
+// it and land where none of the checks looked, and ReadBundle does not read such a folder either.
 func ruleGroupFiles(dir string, group *models.AlertRuleGroup) ([]string, error) {
 	rulesDir := filepath.Join(dir, rulesDirName)
 
@@ -722,8 +726,15 @@ func ruleGroupFiles(dir string, group *models.AlertRuleGroup) ([]string, error) 
 	var paths []string
 
 	for _, folder := range folders {
-		if !folder.IsDir() || foldFileName(folder.Name()) != wantFolder {
+		if foldFileName(folder.Name()) != wantFolder {
 			continue
+		}
+
+		if !folder.IsDir() {
+			return nil, fmt.Errorf(
+				"alerts: write bundle: %s is a symlink or not a directory; refusing to write rule group %s through it",
+				filepath.Join(rulesDir, folder.Name()), groupID(group),
+			)
 		}
 
 		folderDir := filepath.Join(rulesDir, folder.Name())
