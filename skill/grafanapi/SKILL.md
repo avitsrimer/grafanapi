@@ -246,9 +246,9 @@ file, `alerts push --rule-uid UID --dry-run`, then (after the user reviews the p
   Grafana at push time; edits to them in the file are ignored (a stderr warning counts them). It
   never creates a rule, refuses a rule moved to another group, and an unknown or not-in-bundle UID
   stops it before any write.
-- **`pull --rule-uid` replaces the group's file** with Grafana's version (unpushed edits to any
-  rule in it are lost) and refuses when other rules in the file differ, unless `--overwrite`. It
-  fetches no contact points or policies and removes no file.
+- **`pull --rule-uid` replaces the group's file** with Grafana's version: unpushed edits to the
+  named rule are lost, but if OTHER rules in the file differ from Grafana it refuses, unless
+  `--overwrite`. It fetches no contact points or policies and removes no file.
 - The group is still rewritten whole and the last writer wins: another person's concurrent edit to
   any rule of that group can be lost.
 
