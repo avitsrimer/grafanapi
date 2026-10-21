@@ -1086,14 +1086,19 @@ func TestRotatingRoundTripper_NextTransportErrorNoResponse(t *testing.T) {
 }
 
 func TestSessionSource_Rotate_PersistsBoundOrigin(t *testing.T) {
-	rotateServer, _ := newRotateServer(t, http.StatusOK)
+	// The server lives under a sub-path: the bound origin must be derived from it without the path.
+	var gotPath atomic.Value
+
+	rotateServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath.Store(r.URL.Path)
+
+		http.SetCookie(w, &http.Cookie{Name: SessionCookieName, Value: testNewCookie, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(rotateServer.Close)
 
 	store := newFakeStore()
 	src := NewSessionSource(testOldCookie, rotateServer.URL+"/sub", nil, store, testAccount)
-
-	// The rotate server only answers /api/user/auth-tokens/rotate, so rotate against the bare URL
-	// while keeping the sub-path form in the origin derivation above.
-	src.server = rotateServer.URL
 
 	_, err := src.Rotate(t.Context(), 0)
 	require.NoError(t, err)
@@ -1103,6 +1108,7 @@ func TestSessionSource_Rotate_PersistsBoundOrigin(t *testing.T) {
 
 	cred, err := keychain.DecodeCredential(raw)
 	require.NoError(t, err)
+	assert.Equal(t, "/sub/api/user/auth-tokens/rotate", gotPath.Load())
 	assert.Equal(t, testNewCookie, cred.Cookie)
 	assert.Equal(t, rotateServer.URL, cred.Origin)
 }
