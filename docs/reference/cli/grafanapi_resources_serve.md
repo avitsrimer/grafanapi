@@ -16,9 +16,10 @@ when previewing dashboards).
 Security: the server listens on 127.0.0.1 by default and prints a URL carrying
 a per-run access token. Open that URL once: the token is exchanged for a
 session cookie and changes on every run. Requests with a foreign Host header
-are rejected (421), requests without the token (401) or from another origin
-(403) too. A non-loopback --address prints a warning: the server acts with your
-Grafana session and becomes reachable from other machines.
+are rejected (421), requests without the token (401) or that a browser marks
+as coming from another origin or site (403) too. A non-loopback --address
+prints a warning: the server acts with your Grafana session and becomes
+reachable from other machines.
 
 Note on NFS/SMB and watch mode: fsnotify requires support from underlying
 OS to work. The current NFS and SMB protocols does not provide network level

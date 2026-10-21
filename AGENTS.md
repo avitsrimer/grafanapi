@@ -706,15 +706,18 @@ mode.
   (`421`) -> a present `?token` is redeemed or rejected **even when a valid cookie is already
   held** (GET/HEAD with the right token -> cookie + `303` to a fixed `/`, never derived from
   `r.URL`; anything else `401`; `next` is never called, so the token cannot reach a handler or the
-  proxy) -> cookie (`401`) -> Origin (`403`). `allowedHosts(listenHost, port, ifaceAddrs)` builds
+  proxy) -> cookie (`401`) -> Origin and `Sec-Fetch-Site` (`403`). `allowedHosts(listenHost, port, ifaceAddrs)` builds
   the Host set (a wildcard bind allows the non-link-local interface IPs present **at startup**
   only, so a changed IP gives `421` until restart)
 - Token/cookie design: `rand.Text()` per run (128-bit, `Server.token`), compared in constant time.
   Cookie `grafanapi_serve_<port>`, `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Max-Age` (a
   browser-session cookie), no `Secure` (plain http on loopback would drop it), plus
   `Referrer-Policy: no-referrer` on the redirect. Cookies are scoped by host, not port, so other
-  servers on the same host receive it; the Origin check keeps their *pages* out, but the cookie is
-  not protection against a hostile local server
+  servers on the same host receive it; two checks keep their *pages* out (a request with an `Origin`
+  must carry this server's own; a `Sec-Fetch-Site` that is present must be `same-origin` or
+  `none`, which also covers the no-`Origin` subresource GETs a same-site page on another local
+  port can send), but the cookie is not protection against a hostile local server. A request with
+  neither header is a non-browser client and passes
 - Proxy Origin rule: the guard has already vetted any `Origin` as this server's own, so the
   `ReverseProxy.Rewrite` replaces it with **Grafana's own origin** (no Origin in -> none out)
   instead of deleting it, because `SetURL` sends Grafana's Host and the browser's Origin could never
@@ -724,8 +727,9 @@ mode.
 - Lifecycle: `Listen(ctx)` (a `net.ListenConfig`, resolves the real port, e.g. for `:0`) ->
   `URL()` (tokenized, uses the bound port) -> `Serve(ctx, ln)` (shuts down on ctx cancel,
   returns nil); `handler(ctx)` is unexported. The `http.Server` carries `ReadHeaderTimeout`,
-  `ReadTimeout`, `WriteTimeout` and `IdleTimeout`. The websocket survives them because gorilla
-  clears the connection deadlines on upgrade when `Upgrader.HandshakeTimeout == 0` - **keep it 0**.
+  `ReadTimeout`, `WriteTimeout` and `IdleTimeout`. The websocket survives them because
+  `net/http`'s `Hijack` clears the connection deadlines (gorilla clears them again when
+  `HandshakeTimeout` is 0); `TestServe_WebsocketSurvivesServerTimeouts` pins the behaviour.
   The upgrader's `CheckOrigin` is `guard.originAllowed`
 - `livereload.Initialize` is guarded by a `sync.Once`: it used to start a new global hub per call,
   and `connections` is mutated by that hub's `run()` loop
@@ -1042,7 +1046,7 @@ Wraps k8s.io/client-go's dynamic client for Grafana:
 1. Start HTTP server (Chi router)
    - Listen on --address (default 127.0.0.1), print the tokenized URL
    - Guard middleware first: Host allowlist (421) -> ?token redeem/reject -> cookie (401) ->
-     Origin (403); only then the request logger and the routes
+     Origin / Sec-Fetch-Site (403); only then the request logger and the routes
    - Reverse proxy to Grafana (vetted Origin rewritten to Grafana's, no browser Cookie)
    - Custom handlers for dashboards/folders
    - WebSocket for live reload
@@ -1402,7 +1406,7 @@ The codebase is designed for extension:
   because the server acts with the user's Grafana session
 - Every request passes `internal/server/guard.go`: Host allowlist (DNS rebinding, `421`), a per-run
   access token redeemed once into an `HttpOnly` `SameSite=Strict` cookie (`401`), and a same-origin
-  Origin check (`403`; also applied to the live-reload websocket upgrade)
+  check on `Origin` and `Sec-Fetch-Site` (`403`; also applied to the live-reload websocket upgrade)
 - The proxy never forwards the browser's `Cookie` and strips Grafana's `Set-Cookie`
 - The token cookie is host-scoped, not port-scoped: it reaches other servers on the same host
 
