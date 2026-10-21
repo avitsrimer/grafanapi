@@ -368,9 +368,10 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   (`grafana.ClientFromContext`)
 - `query.go`: `QueryFieldForType`/`BuildQuery` — datasource-type → request-field mapping
   (`expr`/`rawSql`/`target`/`query`), `--param`/`--interval`/`--instant` handling
-- `run.go`: `Run` — raw `POST /api/ds/query` (client `CheckRedirect: config.SameOriginRedirects`) over `httputils.NewTransport` wrapped with
-  `GrafanaConfig.WrapWithSession` (so a `401` rotates-and-retries like every other authenticated
-  path), decode, and per-`refId` error surfacing
+- `run.go`: `Run` — raw `POST /api/ds/query` (client `CheckRedirect: config.SameOriginRedirects`)
+  over `httputils.NewTransport` wrapped with `GrafanaConfig.WrapWithSession` (so a `401`
+  rotates-and-retries like every other authenticated path), decode, and per-`refId` error
+  surfacing
 - `render.go`: `RenderTable` — `text/tabwriter` rendering for the default `table` output format.
   Cells, headers, frame names and refIDs go through `termsafe.Cell` **before** `truncate`, which
   measures runes (so a dropped sequence cannot make a cell look longer than it renders)
@@ -414,9 +415,9 @@ mode.
   rather than `null`. Optional output fields (`updated`, `lastEvaluation`) are `*time.Time` with
   `omitempty`, so a rule the server reported no timestamp for has no key rather than
   `0001-01-01T00:00:00Z`
-- `state.go` (client `CheckRedirect: config.SameOriginRedirects`): local wire structs for the `{status,data}` envelope of
-  `GET /api/prometheus/grafana/api/v1/rules` plus `RuleState`, `RuleStates` and `FetchRuleStates` —
-  raw HTTP over
+- `state.go` (client `CheckRedirect: config.SameOriginRedirects`): local wire structs for the
+  `{status,data}` envelope of `GET /api/prometheus/grafana/api/v1/rules` plus `RuleState`,
+  `RuleStates` and `FetchRuleStates` — raw HTTP over
   `httputils.NewTransport` wrapped with `GrafanaConfig.WrapWithSession` (rotate-on-401), bounded
   `stateTimeout`/`maxErrorBodySnippet`, `401` returned as an **unwrapped**
   `runtime.NewAPIError(..., 401)`. `FetchRuleStates` returns `RuleStates` — **two** maps, not just
@@ -1423,8 +1424,9 @@ The codebase is designed for extension:
   in `Validate`, `login`/`login update`, and again on every cookied request)
 - The session cookie is bound to the server origin: `SetSessionCookie` and the round-trippers refuse
   any request off that origin
-- Redirects off the server origin are refused on every client (`config.SameOriginRedirects`), never
-  followed
+- Redirects off the server origin are refused on every client we build
+  (`config.SameOriginRedirects`), never followed; the one exception is a cookieless openapi
+  request (Common Gotchas, item 8)
 - Custom CA certificates supported
 - Client certificate authentication supported
 
@@ -1470,7 +1472,14 @@ The codebase is designed for extension:
    endpoint shows as a **stale session (exit 2) plus a warning line**; check `server` before
    re-logging in. Refusals render **origins only**: `convertServerPolicyErrors` sets `Parent` to the
    typed error and drops the `*url.Error`, which carries the full Location, path and query. It must
-   stay ahead of `convertNetworkErrors` in the converter chain.
+   stay ahead of `convertNetworkErrors` in the converter chain. Two accepted limits qualify the
+   statements that every `http.Client` we build uses `SameOriginRedirects` and that refusals render
+   origins only. (a) A **cookieless** openapi request still follows a cross-origin redirect:
+   `WrapWithSession` returns the transport unchanged when there is no cookie, so no round-tripper
+   guards it, and go-openapi uses Go's default `CheckRedirect`; nothing secret is sent, since there
+   is no cookie. (b) Per-group k8s discovery failures stringify their inner errors (plan-review
+   #12, accepted), so `errors.As` cannot reach the typed refusal and such a redirect can render
+   with the generic message and the `*url.Error` text, Location query included.
 
 ### Future Architecture Directions
 
@@ -1623,10 +1632,10 @@ Based on TODO comments in code:
       operation label and a way to hand back the raw non-2xx body)
     - *Fix*: Extract when the planned read-only `grafanapi api PATH` passthrough group lands — that
       group adds a fifth call site and is the natural home for the shared seam. Deliberately
-      deferred (YAGNI) until then. The shared seam must carry `CheckRedirect:
-      config.SameOriginRedirects` (and the session-wrapped transport), or the fifth call site silently
-      follows redirects: extracting it for a single new caller would leave a one-user
-      helper next to three unmigrated copies
+      deferred (YAGNI) until then: extracting it for a single new caller would leave a one-user
+      helper next to three unmigrated copies. The shared seam must carry `CheckRedirect:
+      config.SameOriginRedirects` (and the session-wrapped transport), or the fifth call site
+      silently follows redirects
 
 14. **Alerting Write Limits (`alerts pull`/`push`, `alerts rules pause|resume|delete`)**
     - *Current*: five accepted limits, all documented in the alerting guide and the command help
