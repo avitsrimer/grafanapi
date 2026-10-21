@@ -238,6 +238,22 @@ func TestGrafanaConfig_Validate_ServerURL(t *testing.T) {
 	}
 }
 
+func TestGrafanaConfig_Validate_ServerURLBeforeNamespace(t *testing.T) {
+	req := require.New(t)
+
+	// With no org-id and no stack-id, validateNamespace would try to discover the stack ID
+	// (sending the cookie to the server). The server URL check has to reject first, so the
+	// error is the server one and not the namespace one.
+	cfg := config.GrafanaConfig{Server: "http://grafana.invalid", SessionCookie: "c"}
+	err := cfg.Validate("ctx")
+
+	var validationErr config.ValidationError
+	req.ErrorAs(err, &validationErr)
+	req.Equal("$.contexts.'ctx'.grafana.server", validationErr.Path)
+	req.NotContains(err.Error(), "org-id")
+	req.NotContains(err.Error(), "dial")
+}
+
 func TestGrafanaConfig_Validate_AllowsDiscoveredStackID(t *testing.T) {
 	req := require.New(t)
 
