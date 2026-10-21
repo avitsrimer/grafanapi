@@ -41,7 +41,8 @@ server-side (a credential embedded in a URL or a custom header is not).
 
 The configuration is also managed as code: ` + "`alerts pull`" + ` writes it to a directory of files and
 ` + "`alerts push`" + ` sends it back. Individual rules are changed in place with
-` + "`alerts rules pause`" + `, ` + "`resume`" + ` and ` + "`delete`" + `.
+` + "`alerts rules pause`" + `, ` + "`resume`" + ` and ` + "`delete`" + `, and edited one at a time with
+` + "`alerts rules get`" + `, ` + "`alerts pull --rule-uid`" + ` and ` + "`alerts push --rule-uid`" + `.
 
 A rule group is the unit of every rule write: pushing or pausing rewrites the whole group, so a
 rule missing from a pushed group file is deleted from it. Objects another provisioner owns (file

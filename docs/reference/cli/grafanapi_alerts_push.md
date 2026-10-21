@@ -26,6 +26,16 @@ it back keeps the stored secret, while replacing it sets a new one. A contact po
 is the exception - there is no stored secret to keep - and is refused until the file carries the
 real value, which is what pushing a bundle into a different instance runs into.
 
+With --rule-uid, only the named rules are pushed, each exactly as the file holds it, every field:
+a change made in Grafana to that rule since your pull is reverted, and the "~" line does not say
+which fields changed, so run `alerts pull --rule-uid` immediately before editing. The group's other
+rules, its interval and their order are taken from Grafana at push time; edits to them in the file
+are not pushed (a warning says how many were ignored). The bundle's contact points and policies
+are ignored, but the whole bundle is still read and validated. A rule must already exist: this
+cannot create one, and a uid that is unknown to Grafana or absent from the bundle stops the push
+before anything is written, whatever --on-error says. Moving a rule between groups needs a
+whole-group push (without --rule-uid).
+
 Grafana has no optimistic concurrency here: the last writer wins. Pushing needs the Editor role.
 
 ```
@@ -41,20 +51,23 @@ grafanapi alerts push [flags]
 	grafanapi alerts push
 
 	grafanapi alerts push -p ./alerting --on-error abort
+
+	grafanapi alerts push --rule-uid rule-uid-1 --dry-run
 ```
 
 ### Options
 
 ```
-      --dry-run              If set, the push is planned and printed, without creating or updating anything in Grafana
-  -h, --help                 help for push
-      --max-concurrent int   Maximum number of concurrent operations (default 10)
-      --on-error string      How to handle errors while processing items:
-                               ignore — continue processing all items and exit 0
-                               fail   — continue processing all items and exit 1 if any failed (default)
-                               abort  — stop on the first error and exit 1 (default "fail")
-  -p, --path string          Path on disk from which the alerting bundle will be read (default "./alerting")
-      --ui-editable          If set, objects this push CREATES are left editable in the Grafana UI. It has no effect on an update, which always mirrors the provenance the object already carries
+      --dry-run                If set, the push is planned and printed, without creating or updating anything in Grafana
+  -h, --help                   help for push
+      --max-concurrent int     Maximum number of concurrent operations (default 10)
+      --on-error string        How to handle errors while processing items:
+                                 ignore — continue processing all items and exit 0
+                                 fail   — continue processing all items and exit 1 if any failed (default)
+                                 abort  — stop on the first error and exit 1 (default "fail")
+  -p, --path string            Path on disk from which the alerting bundle will be read (default "./alerting")
+      --rule-uid stringArray   Only push this rule, matched against its UID (repeatable). The rule is sent exactly as the file holds it; its group is written with every other rule exactly as Grafana currently holds it; the rest of the bundle is ignored
+      --ui-editable            If set, objects this push CREATES are left editable in the Grafana UI. It has no effect on an update, which always mirrors the provenance the object already carries
 ```
 
 ### Options inherited from parent commands

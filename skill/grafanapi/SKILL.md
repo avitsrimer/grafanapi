@@ -139,11 +139,14 @@ Reading needs Viewer, writing needs Editor. No command here performs an org-admi
 # read
 grafanapi alerts rules list [--folder UID|PATH|LAST-SEGMENT] [--state STATE] [-o table|json|yaml]
 grafanapi alerts contact-points list [-o table|json|yaml]
+grafanapi alerts rules get UID [-o yaml|json]    # one rule in full: queries and thresholds
 
 # write (see §5.1 — always --dry-run first)
 grafanapi alerts pull [-p ./alerting] [--folder-uid UID]... [-o yaml|json]
 grafanapi alerts push [-p ./alerting] [--dry-run] [--ui-editable] [--on-error ignore|fail|abort]
 grafanapi alerts rules pause|resume|delete UID [UID...] [--dry-run]
+grafanapi alerts pull --rule-uid UID... [--overwrite] [-p ./alerting]   # one rule's group file only
+grafanapi alerts push --rule-uid UID... [--dry-run] [-p ./alerting]     # push only the named rules
 ```
 
 `rules list` joins rule **definitions** (provisioning API) with **live evaluation state**
@@ -231,6 +234,23 @@ alerting/rules/<folder UID>/<group title>.yaml   # one models.AlertRuleGroup per
 alerting/contact-points.yaml                     # list
 alerting/policies.yaml                           # notification policy tree
 ```
+
+Edit one rule: `alerts rules get UID` to read it, `alerts pull --rule-uid UID`, edit the group
+file, `alerts push --rule-uid UID --dry-run`, then (after the user reviews the plan) without
+`--dry-run`. What to tell the user:
+
+- **Re-pull right before editing.** The named rule is sent exactly as the file holds it, every
+  field, so a change made in Grafana since the pull is reverted and the `~` line does not say which
+  fields changed.
+- **Only the named rule is pushed.** The group's other rules, interval and order are taken from
+  Grafana at push time; edits to them in the file are ignored (a stderr warning counts them). It
+  never creates a rule, refuses a rule moved to another group, and an unknown or not-in-bundle UID
+  stops it before any write.
+- **`pull --rule-uid` replaces the group's file** with Grafana's version (unpushed edits to any
+  rule in it are lost) and refuses when other rules in the file differ, unless `--overwrite`. It
+  fetches no contact points or policies and removes no file.
+- The group is still rewritten whole and the last writer wins: another person's concurrent edit to
+  any rule of that group can be lost.
 
 What to tell the user, and what to check before pushing:
 
