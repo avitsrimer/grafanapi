@@ -428,6 +428,11 @@ func TestErrorToDetailedError_ServerPolicyErrors(t *testing.T) {
 			err:         fmt.Errorf("explore: query request: %w", serverErr),
 			wantSummary: "Invalid Grafana server URL",
 		},
+		{
+			name:        "server URL refused while resolving a session binding",
+			err:         fmt.Errorf("session for context %q: %w; the session cookie was not sent", "default", serverErr),
+			wantSummary: "Invalid Grafana server URL",
+		},
 	}
 
 	for _, tc := range tests {
