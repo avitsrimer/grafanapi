@@ -847,8 +847,8 @@ mode.
   closed
 - **Why the origin lives in the payload.** The attacker the binding defends against controls the
   config file and the environment, so the config file cannot hold it; an attribute
-  (`kSecAttrComment`/`kSecAttrLabel`) would need cgo changes and a new `Store` method in all seven
-  implementations; the payload sits in the same ACL-guarded `kSecValueData` blob as the cookie and one
+  (`kSecAttrComment`/`kSecAttrLabel`) would need cgo changes and a new `Store` method in every
+  implementation; the payload sits in the same ACL-guarded `kSecValueData` blob as the cookie and one
   `SecItemUpdate` writes both, so there is no torn state. `Store` therefore **stays opaque**
   (`Set(account, string)`/`Get`), and `config check` reads the origin from the `Get` it already does,
   so it adds no prompt. The one-time cost: the first bind `Set` bumps `kSecAttrModificationDate`,

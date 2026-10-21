@@ -148,8 +148,10 @@ in your configuration file and prints one line on stderr, for example
 In any other case nothing is sent and the command fails with "Session cookie
 not sent: session is not bound to a server yet" (exit code **2**). Run the
 command again from a shell without those overrides, or run
-`grafanapi login update --context <name>` from one. Under `--config` or
-`GRAFANAPI_CONFIG`, `login update` also needs `--rebind` for an unbound session.
+`grafanapi login update --context <name>` from one. Whenever the configuration
+does not provably come from your own file (`--config`, `GRAFANAPI_CONFIG`,
+`XDG_CONFIG_HOME`, `XDG_CONFIG_DIRS`, or a `$HOME` that is not your account's home),
+`login update` also needs `--rebind` for an unbound session.
 
 `grafanapi config check` prints a `Session binding:` line for every context:
 `bound to <origin>`, `bound to <origin> (migrated from an unbound session)`,
