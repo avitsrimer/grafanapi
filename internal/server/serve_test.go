@@ -342,6 +342,46 @@ func TestServer_RejectsForeignOrigin(t *testing.T) {
 	assert.Empty(t, resp.header.Get("Access-Control-Allow-Origin"))
 }
 
+func TestServer_SecFetchSite(t *testing.T) {
+	tests := []struct {
+		name        string
+		site        string
+		wantStatus  int
+		wantProxied int
+	}{
+		{name: "absent", site: "", wantStatus: http.StatusOK, wantProxied: 1},
+		{name: "same-origin", site: "same-origin", wantStatus: http.StatusOK, wantProxied: 1},
+		{name: "none", site: "none", wantStatus: http.StatusOK, wantProxied: 1},
+		{name: "same-site", site: "same-site", wantStatus: http.StatusForbidden},
+		{name: "cross-site", site: "cross-site", wantStatus: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := startProxyFixture(t, "")
+			_, port, err := net.SplitHostPort(f.addr)
+			require.NoError(t, err)
+
+			// A no-cors subresource GET from a same-site page on another local port carries the cookie
+			// and no Origin.
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+f.addr+"/public/img/x.png", nil)
+			require.NoError(t, err)
+			req.Header.Set("Cookie", "grafanapi_serve_"+port+"="+f.token)
+
+			if tt.site != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.site)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+
+			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Len(t, f.recorded(), tt.wantProxied)
+		})
+	}
+}
+
 func TestServer_BrowserCookieNeverReachesBackend(t *testing.T) {
 	t.Run("no session configured", func(t *testing.T) {
 		f := startProxyFixture(t, "")

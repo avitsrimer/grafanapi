@@ -29,7 +29,7 @@ type guard struct {
 }
 
 // middleware enforces, in order: the Host allowlist (421), the access token (401), the session
-// cookie and finally the Origin policy (403). A request carrying a token query parameter never reaches
+// cookie and finally the Origin / Sec-Fetch-Site policy (403). A request carrying a token query parameter never reaches
 // next, whatever the cookie state, so the token is never logged by the request logger nor
 // forwarded to Grafana in a proxied query string.
 func (g *guard) middleware(next http.Handler) http.Handler {
@@ -54,7 +54,9 @@ func (g *guard) middleware(next http.Handler) http.Handler {
 		}
 
 		if !g.originAllowed(r) {
-			g.logger.Warn("rejected cross-origin request", "origin", r.Header.Get("Origin"), "method", r.Method, "path", r.URL.Path)
+			g.logger.Warn("rejected cross-origin request",
+				"origin", r.Header.Get("Origin"), "sec_fetch_site", r.Header.Get("Sec-Fetch-Site"),
+				"method", r.Method, "path", r.URL.Path)
 			http.Error(w, "grafanapi serve: cross-origin request rejected", http.StatusForbidden)
 
 			return
@@ -89,9 +91,16 @@ func (g *guard) redeemQueryToken(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// originAllowed reports whether the request's Origin, when present, is this server's own. A request
-// without Origin (non-browser clients) passes this step; "null" and unparseable values do not.
+// originAllowed reports whether the request's Origin and Sec-Fetch-Site, when present, say it comes from
+// this server's own pages. A request with neither header (non-browser clients) passes this step; "null"
+// and unparseable Origins do not. Sec-Fetch-Site covers the browser requests that carry no Origin, such
+// as a same-site page on another local port loading a subresource with the cookie attached: browsers
+// always send it, and anything other than "same-origin" or "none" (user-initiated) is refused.
 func (g *guard) originAllowed(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		return false
+	}
+
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true

@@ -344,6 +344,87 @@ func TestGuardMiddleware_OriginRejectionIsLogged(t *testing.T) {
 	assert.NotContains(t, logger.lines[0], testToken)
 }
 
+func TestGuardMiddleware_SecFetchSite(t *testing.T) {
+	tests := []struct {
+		name   string
+		site   string
+		origin string
+		want   int
+	}{
+		{name: "absent", site: "", want: http.StatusOK},
+		{name: "same-origin", site: "same-origin", want: http.StatusOK},
+		{name: "none", site: "none", want: http.StatusOK},
+		{name: "same-site", site: "same-site", want: http.StatusForbidden},
+		{name: "cross-site", site: "cross-site", want: http.StatusForbidden},
+		{name: "unknown value", site: "bogus", want: http.StatusForbidden},
+		{name: "same-origin with allowed origin", site: "same-origin", origin: "http://127.0.0.1:8080", want: http.StatusOK},
+		{name: "same-origin with foreign origin", site: "same-origin", origin: "http://evil.example.com", want: http.StatusForbidden},
+		{name: "cross-site with allowed origin", site: "cross-site", origin: "http://127.0.0.1:8080", want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := testGuard()
+			called := false
+			h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/ds/query", nil)
+			req.Host = "127.0.0.1:8080"
+			req.Header.Set("Cookie", g.cookieName+"="+testToken)
+
+			if tt.site != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.site)
+			}
+
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, tt.want == http.StatusOK, called)
+			assertNoCORSHeaders(t, rec)
+
+			if tt.want == http.StatusForbidden {
+				assert.Contains(t, rec.Body.String(), "cross-origin request rejected")
+			}
+		})
+	}
+}
+
+func TestGuardMiddleware_SecFetchSiteWithoutCookieIsUnauthorized(t *testing.T) {
+	g := testGuard()
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("next must not be called") }))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestGuardMiddleware_SecFetchSiteRejectionIsLogged(t *testing.T) {
+	logger := &recordingLogger{}
+	g := newGuard([]string{"127.0.0.1:8080"}, testToken, 8080, logger)
+
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/ds/query", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Cookie", g.cookieName+"="+testToken)
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	require.Len(t, logger.lines, 1)
+	assert.Contains(t, logger.lines[0], "same-site")
+	assert.NotContains(t, logger.lines[0], testToken)
+}
+
 func assertNoCORSHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 
