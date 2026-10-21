@@ -59,6 +59,43 @@ it calls `GET /api/org` and persists the returned ID, printing "Detected
 organization id N". If that call also fails, `login` defaults to org-id `1`
 and prints a warning; pass `--org-id` explicitly to override either behavior.
 
+### Server URL requirements
+
+The session cookie only ever travels to the server you configured, so grafanapi
+is strict about that URL:
+
+* **`https://` is required.** Plain `http://` is accepted only for a Grafana
+  running on your own machine: `localhost`, `127.0.0.1` and `::1`. `localhost`
+  is trusted by name, without a DNS lookup. Anything else is rejected,
+  including `http://0.0.0.0`, Docker service names such as
+  `http://grafana:3000` and `host.docker.internal`. For a local container,
+  publish the port and use `http://localhost:<port>`.
+* **No credentials in the URL.** `https://user:password@host` is rejected; use
+  `grafanapi login` instead.
+* **Internationalised domain names must be written in punycode** (`xn--...`),
+  for example `https://xn--bcher-kva.example` rather than
+  `https://bücher.example`.
+* **Set `server` to the URL Grafana really serves, including any sub-path.**
+  grafanapi never follows a redirect to another origin (scheme, host or port)
+  and never sends the session cookie anywhere but the configured origin. If
+  your Grafana sits behind a proxy that redirects, for example from `http://`
+  to `https://` or to a canonical host name, the command fails with "Refused a
+  redirect away from the configured Grafana server". Fix it by setting the
+  server to the final URL:
+
+  ```shell
+  grafanapi config set contexts.<name>.grafana.server https://grafana.example.com
+  ```
+
+  A refused redirect while the session is being rotated shows up as a stale
+  session (exit code 2) plus a warning line; check `server` before logging in
+  again.
+
+!!! warning
+    `insecure-skip-verify` is still accepted, but it turns off certificate
+    verification: an active attacker on the network path can then read the
+    session cookie. Never use it for a remote production host.
+
 ### Automatic session rotation
 
 Grafana session cookies stop authenticating ordinary API calls after a

@@ -307,6 +307,27 @@ grafanapi follows the Cobra command pattern with eight main command groups:
 - Environment variable overrides for non-secret fields (GRAFANA_SERVER, GRAFANA_ORG_ID, GRAFANA_STACK_ID)
 - Automatic Stack ID discovery for Grafana Cloud
 - TLS configuration support
+- `server_url.go`: the server-URL and redirect policy every cookie-carrying path shares.
+  `ValidateServerURL` accepts `https://`, or `http://` only on a loopback host (`localhost` by name,
+  `127.0.0.0/8`, `::1`; `0.0.0.0`, Docker service names and `host.docker.internal` are refused),
+  with no userinfo; a path is allowed. `ServerOrigin` only **normalises** (no policy) to
+  `<scheme>://<host>:<port>` — host lower-cased with one trailing dot dropped, port **always
+  explicit** (443/80 by default), non-ASCII hosts refused (an IDN must be configured in punycode, so
+  no `idna` dependency and no later conversion that could change a stored value). That string is
+  persisted by the Keychain origin binding and must never change. Failures are `*ServerURLError`
+  (wraps `ErrInvalidServerURL`, fixed `Reason`, never echoes the input) and `*UnsafeRedirectError`
+  (wraps `ErrUnsafeRedirect`, `From`/`To` are **origins only**, never a path or query).
+  `SetSessionCookie(req, server, cookie)` is the one place outside the rotating round-tripper that
+  writes the `Cookie` header, and only for a validated server and a same-origin request;
+  `SameOriginRedirects(server)` is the `CheckRedirect` every `http.Client` we build uses (refuses any
+  hop off the origin, stops after 10). Refuse by default, never strip-and-follow: a followed hop
+  would have to decide what to do with a credential, and refusing keeps that decision out of the
+  tool. Per path: the k8s and openapi clients carry no `CheckRedirect` of their own and rely on the
+  origin-bound round-tripper (`WrapWithSession`), which re-checks every request, redirect hops
+  included; the rotating round-tripper guards on its **own** `server` from `cfg.Server`, not on
+  `src.server`, so the two concerns stay independent; the raw-HTTP clients (`session`, `explore`,
+  `alerts`, rotate, bootdata) use `CheckRedirect: SameOriginRedirects`; the `serve` dashboard proxy
+  composes it with its own redirect handling.
 - `session_source.go`: `SessionSource` — a shared, mutable session cookie holder (mutex +
   generation counter) built once per context at credential-resolution time when a cookie is
   loaded from the Keychain. `Rotate()` POSTs `/api/user/auth-tokens/rotate` with the current
@@ -318,7 +339,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   e.g. tests), or the underlying transport unchanged (no cookie). On a truly-dead session (rotate
   itself gets `401`/`403`), the original `401` is returned unchanged so the existing
   `cmd/grafanapi/fail` stale-session rendering fires — rotation is purely a transparent retry
-  layer in front of that path. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
+  layer in front of that path. The cookie is attached only to the server origin: an off-origin
+  request is refused before `Current()`, so it can never trigger a rotation. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
   **not** wired into rotation (pre-auth, single non-retryable probe, fails soft already).
   `Refresh(ctx) (string, error)` (added for `session refresh`) is a 3-line force-now wrapper —
   `Current()` → `Rotate(ctx, gen)` — that reuses `Rotate`'s single-flight join instead of
@@ -339,7 +361,7 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   (`grafana.ClientFromContext`)
 - `query.go`: `QueryFieldForType`/`BuildQuery` — datasource-type → request-field mapping
   (`expr`/`rawSql`/`target`/`query`), `--param`/`--interval`/`--instant` handling
-- `run.go`: `Run` — raw `POST /api/ds/query` over `httputils.NewTransport` wrapped with
+- `run.go`: `Run` — raw `POST /api/ds/query` (client `CheckRedirect: config.SameOriginRedirects`) over `httputils.NewTransport` wrapped with
   `GrafanaConfig.WrapWithSession` (so a `401` rotates-and-retries like every other authenticated
   path), decode, and per-`refId` error surfacing
 - `render.go`: `RenderTable` — `text/tabwriter` rendering for the default `table` output format
@@ -383,7 +405,7 @@ mode.
   rather than `null`. Optional output fields (`updated`, `lastEvaluation`) are `*time.Time` with
   `omitempty`, so a rule the server reported no timestamp for has no key rather than
   `0001-01-01T00:00:00Z`
-- `state.go`: local wire structs for the `{status,data}` envelope of
+- `state.go` (client `CheckRedirect: config.SameOriginRedirects`): local wire structs for the `{status,data}` envelope of
   `GET /api/prometheus/grafana/api/v1/rules` plus `RuleState`, `RuleStates` and `FetchRuleStates` —
   raw HTTP over
   `httputils.NewTransport` wrapped with `GrafanaConfig.WrapWithSession` (rotate-on-401), bounded
@@ -696,6 +718,8 @@ mode.
 - File watching with fsnotify
 - Dashboard and folder preview handlers
 - Script execution for generated resources
+- The dashboard-proxy client's `CheckRedirect` composes `config.SameOriginRedirects` with its own handling, and
+  a refused hop is logged as the origin-only typed error.
 - Cookie injection and rotate-on-401 are transport-level here too: `server.go`'s
   `httputil.ReverseProxy` and `server/grafana/requests.go`'s dashboard-proxy client both wrap their
   `Transport` (built from `httputils.NewTransport`) with `(GrafanaConfig).WrapWithSession`, so a
@@ -752,7 +776,7 @@ generation is stdlib `text/template`, inspection is stdlib `encoding/xml` token 
   narrower derived range)
 
 **internal/session/** - Session cookie verification and stale-session errors
-- `VerifyCookie`: validates a cookie via `GET /api/user`
+- `VerifyCookie`: validates a cookie via `GET /api/user` (client uses `CheckRedirect: config.SameOriginRedirects`)
 - `ErrUnauthorized`: sentinel returned by `VerifyCookie` on a 401; recognized centrally by
   `cmd/grafanapi/fail.convertAuthErrors`
 - Only used by `login`/`login update` (which always paste a fresh cookie and validate it
@@ -1361,7 +1385,14 @@ The codebase is designed for extension:
 
 **Network Security**:
 - TLS verification enabled by default
-- Option to disable (insecure-skip-verify) for dev/test
+- Option to disable (insecure-skip-verify) for dev/test; still accepted, but an active attacker can
+  then read the session cookie, so never for a remote production host
+- Server URL must be `https://`, or `http://` on loopback only (`config.ValidateServerURL`, enforced
+  in `Validate`, `login`/`login update`, and again on every cookied request)
+- The session cookie is bound to the server origin: `SetSessionCookie` and the round-trippers refuse
+  any request off that origin
+- Redirects off the server origin are refused on every client (`config.SameOriginRedirects`), never
+  followed
 - Custom CA certificates supported
 - Client certificate authentication supported
 
@@ -1400,6 +1431,14 @@ The codebase is designed for extension:
    caveats carry over from 401: `convertNetworkErrors` runs first and swallows anything wrapped in
    a `*url.Error`, and a typed generated response (the folders client) must be converted with
    `internal/alerts.asAPIError` or `errors.As` misses it entirely.
+
+8. **A Redirect Off the Server Origin Is an Error, Not a Hop**: a proxy that redirects http→https or
+   to a canonical host now fails with "Refused a redirect away from the configured Grafana server";
+   the fix is `server` set to the final URL (scheme, host, port, sub-path). A redirect on the rotate
+   endpoint shows as a **stale session (exit 2) plus a warning line**; check `server` before
+   re-logging in. Refusals render **origins only**: `convertServerPolicyErrors` sets `Parent` to the
+   typed error and drops the `*url.Error`, which carries the full Location, path and query. It must
+   stay ahead of `convertNetworkErrors` in the converter chain.
 
 ### Future Architecture Directions
 
@@ -1552,7 +1591,9 @@ Based on TODO comments in code:
       operation label and a way to hand back the raw non-2xx body)
     - *Fix*: Extract when the planned read-only `grafanapi api PATH` passthrough group lands — that
       group adds a fifth call site and is the natural home for the shared seam. Deliberately
-      deferred (YAGNI) until then: extracting it for a single new caller would leave a one-user
+      deferred (YAGNI) until then. The shared seam must carry `CheckRedirect:
+      config.SameOriginRedirects` (and the session-wrapped transport), or the fifth call site silently
+      follows redirects: extracting it for a single new caller would leave a one-user
       helper next to three unmigrated copies
 
 14. **Alerting Write Limits (`alerts pull`/`push`, `alerts rules pause|resume|delete`)**

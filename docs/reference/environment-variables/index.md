@@ -9,7 +9,9 @@ See StackID for Grafana Cloud instances.
 ## `GRAFANA_SERVER`
 
 Server is the address of the Grafana server (https://hostname:port/path).
-Required.
+Required. It must use https://; plain http:// is only accepted for a Grafana running on
+this machine (localhost, 127.0.0.1 or ::1). Internationalised host names must be given in
+punycode (xn--...).
 
 ## `GRAFANA_STACK_ID`
 
