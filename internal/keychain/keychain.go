@@ -10,6 +10,9 @@
 // binary that created the item, so that same binary reads it back silently, while a rebuilt
 // binary (different ad-hoc cdhash) triggers the standard "Allow / Always Allow" prompt. There is
 // no credential-agent daemon — every call goes straight to the Keychain.
+//
+// The secret is a versioned payload carrying the cookie and the origin string the caller bound it
+// to (see EncodeCredential and DecodeCredential).
 package keychain
 
 import (

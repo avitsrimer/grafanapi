@@ -119,3 +119,21 @@ func TestDarwinStore_ModifiedAt_NeverSetAccount(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, keychain.ErrNotFound)
 }
+
+func TestDarwinStore_CredentialPayloadRoundTrip(t *testing.T) {
+	store := keychain.NewStore()
+	account := testAccount(t)
+
+	want := keychain.Credential{Cookie: "co\"ok\\ie-\u00e9\u0436", Origin: "https://grafana.example.com:443"}
+	payload, err := keychain.EncodeCredential(want)
+	require.NoError(t, err)
+	require.NoError(t, store.Set(account, payload))
+
+	got, err := store.Get(account)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+
+	decoded, err := keychain.DecodeCredential(got)
+	require.NoError(t, err)
+	require.Equal(t, want, decoded)
+}

@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,6 +89,23 @@ func (f *fakeStore) ModifiedAt(string) (time.Time, error) {
 // value returns the secret stored under testAccount, the fixed account name every test in this
 // file uses.
 func (f *fakeStore) value() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	v, ok := f.values[testAccount]
+	if !ok {
+		return v, ok
+	}
+
+	if cred, err := keychain.DecodeCredential(v); err == nil {
+		return cred.Cookie, true
+	}
+
+	return v, ok
+}
+
+// rawValue returns the undecoded payload stored under testAccount.
+func (f *fakeStore) rawValue() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -337,6 +355,7 @@ func TestSessionSource_Rotate_KeychainPersistFailure(t *testing.T) {
 	src := &SessionSource{
 		cookie:  testOldCookie,
 		server:  server.URL,
+		origin:  server.URL,
 		store:   store,
 		account: testAccount,
 		warn:    &warnBuf,
@@ -502,6 +521,7 @@ func TestSessionSource_Rotate_PersistPanicDoesNotCrash(t *testing.T) {
 	src := &SessionSource{
 		cookie:  testOldCookie,
 		server:  server.URL,
+		origin:  server.URL,
 		store:   store,
 		account: testAccount,
 		warn:    &warnBuf,
@@ -1065,4 +1085,81 @@ func TestRotatingRoundTripper_NextTransportErrorNoResponse(t *testing.T) {
 	assert.Nil(t, resp)
 	require.ErrorIs(t, rerr, wantErr)
 	assert.Equal(t, int32(0), rotateCalls.Load(), "no rotation should be attempted when the underlying transport itself fails")
+}
+
+func TestSessionSource_Rotate_PersistsBoundOrigin(t *testing.T) {
+	// The server lives under a sub-path: the bound origin must be derived from it without the path.
+	var gotPath atomic.Value
+
+	rotateServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath.Store(r.URL.Path)
+
+		http.SetCookie(w, &http.Cookie{Name: SessionCookieName, Value: testNewCookie, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(rotateServer.Close)
+
+	store := newFakeStore()
+	src := NewSessionSource(testOldCookie, rotateServer.URL+"/sub", nil, store, testAccount)
+
+	_, err := src.Rotate(t.Context(), 0)
+	require.NoError(t, err)
+
+	raw, ok := store.rawValue()
+	require.True(t, ok)
+
+	cred, err := keychain.DecodeCredential(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "/sub/api/user/auth-tokens/rotate", gotPath.Load())
+	assert.Equal(t, testNewCookie, cred.Cookie)
+	assert.Equal(t, rotateServer.URL, cred.Origin)
+}
+
+func TestSessionSource_Rotate_NeverRebinds(t *testing.T) {
+	var calls atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		http.SetCookie(w, &http.Cookie{Name: SessionCookieName, Value: "rotated-" + strconv.Itoa(int(n)), Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	store := newFakeStore()
+	src := NewSessionSource(testOldCookie, server.URL, nil, store, testAccount)
+
+	_, err := src.Rotate(t.Context(), 0)
+	require.NoError(t, err)
+
+	_, gen := src.Current()
+	_, err = src.Rotate(t.Context(), gen)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load())
+
+	raw, ok := store.rawValue()
+	require.True(t, ok)
+
+	cred, err := keychain.DecodeCredential(raw)
+	require.NoError(t, err)
+	assert.Equal(t, server.URL, cred.Origin)
+	assert.Equal(t, 2, store.calls())
+}
+
+func TestSessionSource_Persist_UnparseableServerSkipsWrite(t *testing.T) {
+	const cookie = "s3cr3t-cookie-value"
+
+	store := newFakeStore()
+
+	var warnBuf bytes.Buffer
+
+	src := NewSessionSource("old", "grafana.example.com", nil, store, testAccount)
+	src.warn = &warnBuf
+
+	require.Empty(t, src.origin)
+
+	src.persist(cookie)
+
+	assert.Equal(t, 0, store.calls(), "an unbound item must never be written")
+	assert.Contains(t, warnBuf.String(), "failed to persist rotated Grafana session")
+	assert.NotContains(t, warnBuf.String(), cookie)
 }

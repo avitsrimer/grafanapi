@@ -84,8 +84,12 @@ make clean
 grafanapi follows the Cobra command pattern with eight main command groups:
 
 1. **login**: Authenticate to a Grafana instance using a session cookie
-   - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry
-   - `login update`: Refresh a stale cookie for an existing context (server not re-prompted)
+   - `login`: Prompt for server + session cookie, validate, persist context + Keychain entry (the
+     entry binds the cookie to the server's origin)
+   - `login update`: Refresh a stale cookie for an existing context (server not re-prompted). Before
+     prompting it refuses to move the session to another origin, or to bind an unbound legacy one
+     under a configuration that is not the user's own, unless `--rebind` is given (the pasted cookie
+     is sent to the target server to validate it, so a redirected configuration must not get that far)
 
 2. **config**: Manage configuration contexts for connecting to Grafana instances
    - `config set`: Set configuration values
@@ -94,7 +98,9 @@ grafanapi follows the Cobra command pattern with eight main command groups:
    - `config list-contexts`: List all configured contexts
    - `config current-context`: Show the current context
    - `config view`: View the current configuration
-   - `config check`: Validate the configuration
+   - `config check`: Validate the configuration; prints a `Session binding:` line per context
+     (`bound to <origin>`, `… (migrated from an unbound session)`, `no stored session`, or the
+     binding error followed by its suggestions)
 
 3. **resources**: Manipulate Grafana resources (dashboards, folders, etc.)
    - `resources get`: Get resources from Grafana
@@ -354,6 +360,46 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   `Current()` → `Rotate(ctx, gen)` — that reuses `Rotate`'s single-flight join instead of
   duplicating `doRotate`/`persist`; it lives in `internal/config` (not `internal/session`) to avoid
   an import cycle, so only the `session` **command** package needs both packages.
+- `credentials.go`: session binding, the one place a stored cookie becomes a usable credential.
+  `ResolveContextSessionCookie(store, gCtx, ResolveOptions{AllowLegacyBind, Notice}) (SessionBinding,
+  error)` is the **single choke point** (`ResolveSessionCookie` is its Override for the current
+  context; `config check` and `session refresh` call it per context): every transport sends a cookie
+  only when `SessionCookie`/`Session` is set, so refusing to set them closes every path at once, with
+  no transport edit. Steps: `store.Get` (`ErrNotFound` → `BindingNone`) → `keychain.DecodeCredential`
+  (a malformed payload never echoes the item) → empty server loads nothing and is no error →
+  `ServerOrigin` error loads nothing and wraps `*ServerURLError` → a bound item whose origin is not
+  **exactly** `ServerOrigin(server)` is a `*SessionBindingError` (mismatch) → a legacy item is refused
+  as unbound unless `AllowLegacyBind`, which binds it on the spot (best-effort `Set`, one stderr notice
+  via `Notice`, never the cookie) → only then `SessionCookie`/`Session = NewSessionSource(...)`. On any
+  error nothing is populated. `EncodeSessionCredential(cookie, server)` is the one helper that
+  normalises with `ServerOrigin` and calls `keychain.EncodeCredential`, shared by `login`,
+  `login update` and rotation. `LegacyBindAllowed(explicitConfigFile, envOverridesApplied)` is the
+  trust predicate for the legacy bind: true only with no `--config`, no non-empty `GRAFANAPI_CONFIG`,
+  `XDG_CONFIG_HOME` or `XDG_CONFIG_DIRS`, `$HOME` equal to the passwd home (`os/user`), and, when
+  `envOverridesApplied`, `GRAFANA_SERVER` **not set at all** (presence counts even if empty). Those are
+  every input that chooses the config file on darwin, so the file is provably the user's own.
+  `session refresh` and `login update` never apply `GRAFANA_SERVER`, so they pass
+  `envOverridesApplied=false`; `LoadConfig` and `config check` pass true. Each command package holds a
+  `legacyBindAllowed` seam with `SetLegacyBindAllowed` (see Testing Patterns)
+- `errors.go`: `SessionBindingError{Context, BoundOrigin, ServerOrigin}` carries origins only, never a
+  cookie. `Unwrap` gives `ErrSessionUnbound` when `BoundOrigin == ""` (a legacy item refused), else
+  `ErrSessionOriginMismatch`. `cmd/grafanapi/fail.convertSessionBindingErrors` renders it: mismatch is
+  exit **1**, unbound is `sessionAuthExitCode` (**2**). The suggestions are **ordered on purpose**:
+  remove the overrides first, `login update --rebind` only as a conditional second step from a clean
+  shell, and a last line against pasting a cookie while an unexpected server is configured — the user
+  reading it may be in the shell an attacker influenced, and `login update` there would send a fresh
+  cookie to the refused server
+- **Resolution runs before `Validate`.** The Override in `Options.LoadConfig` precedes the validator,
+  so resolution must not hide its diagnostics: an empty server returns no error (`Validate` says
+  "server is required"), a `ServerOrigin` failure wraps `ErrInvalidServerURL` so redirects'
+  `convertServerPolicyErrors` renders it, and a cleartext remote server passes `ServerOrigin` and is
+  rejected by `Validate` before any request. `ResolveSessionCookie` runs after the env Override, so the
+  comparison always sees the **effective** server (`GRAFANA_SERVER`, `--config` and `GRAFANAPI_CONFIG`
+  included), which is the point
+- `SessionSource` keeps an unexported `origin` computed in `NewSessionSource` as
+  `ServerOrigin(server)` (signature unchanged: many tests in other packages call it). `persist`
+  re-encodes `keychain.Credential{Cookie, s.origin}`, so a rotation writes back the **same** binding; an
+  empty origin (unparseable server) warns and skips the write rather than store an unbound item
 - `types.go`: `GrafanaConfig.LiveWindow` (`yaml:"live-window,omitempty"`, no env tag) is an optional,
   persisted `string` opting a context into scheduled keep-alive — presence, not a boolean, signals
   opt-in; a `ParsedLiveWindow()` helper centralizes `time.ParseDuration` + bounds-check `[1m, 6d]`
@@ -788,6 +834,26 @@ mode.
 - `Store` interface (`Set`/`Get`/`Delete`/`ModifiedAt`) keyed by `"grafanapi:<context-name>"`
 - Darwin-only cgo implementation against `Security.framework` (package build tag `darwin`);
   grafanapi does not build on any other platform
+- `credential.go` is **codec only**: `Credential{Cookie, Origin}`, `EncodeCredential`,
+  `DecodeCredential`, `CredentialVersion`, the sentinels `ErrMalformedCredential`/
+  `ErrUnsupportedCredential` and the legacy rule. The Keychain secret is the versioned JSON
+  `{"v":1,"cookie":"…","origin":"…"}`; a value that does not start with `{` is a legacy bare cookie
+  (`Legacy()` true). Decoding is strict (unknown fields, a missing/non-positive version, an empty
+  cookie or origin, invalid UTF-8 and trailing data are malformed; a newer version is unsupported) and
+  the JSON error is never wrapped, so no part of the item reaches a message. There is **no origin
+  normaliser here**: `internal/config` imports this package, so it cannot call `config.ServerOrigin`,
+  and **`config.ServerOrigin` in `server_url.go` is the one normaliser** — callers normalise before
+  encoding and before comparing; a stored origin that is not canonical simply never matches and fails
+  closed
+- **Why the origin lives in the payload.** The attacker the binding defends against controls the
+  config file and the environment, so the config file cannot hold it; an attribute
+  (`kSecAttrComment`/`kSecAttrLabel`) would need cgo changes and a new `Store` method in every
+  implementation; the payload sits in the same ACL-guarded `kSecValueData` blob as the cookie and one
+  `SecItemUpdate` writes both, so there is no torn state. `Store` therefore **stays opaque**
+  (`Set(account, string)`/`Get`), and `config check` reads the origin from the `Get` it already does,
+  so it adds no prompt. The one-time cost: the first bind `Set` bumps `kSecAttrModificationDate`,
+  which keep-alive reads as a rotation that did not happen (the next scheduled refresh can be delayed
+  by up to one `live-window`)
 - `ModifiedAt(account) (time.Time, error)` is the **last-rotation-time source** for keep-alive: the
   Keychain item's `kSecAttrModificationDate` is updated by `securityd` on every `Set` (login, login
   update, and every rotation), so it is exactly "the last time this context's cookie was
@@ -921,6 +987,16 @@ config-load time.
   (it is cgo against `Security.framework`), so its tests do too — they exercise the real cgo
   Keychain against throwaway accounts, cleaned up via `t.Cleanup`. CI runs the whole module,
   including this package, on a `macos-latest` runner.
+- **Bound fixtures** (`internal/testutils`): `FakeKeychainStore.Value` returns the **decoded cookie**
+  (a value that does not decode passes through), which is what keeps tests that assert the cookie
+  after a rotation green; use `RawValue` to see the stored payload. `BoundSecret(t, cookie, origin)`
+  builds a bound payload and takes an **already-canonical** origin — an `httptest` `server.URL` or a
+  `config.ServerOrigin` result, never a hand-written one — and does no normalising. **`internal/testutils`
+  must never import `internal/config`**: the whitebox `package config` tests import `testutils`, so it
+  would be an import cycle. A fixture that seeds a bare cookie under `--config` is now an unbound
+  legacy item and is refused; seed `BoundSecret(t, cookie, server.URL)` instead. The `--config`
+  attack matrix lives in `cmd/grafanapi/config/origin_binding_test.go`: an `httptest` listener records
+  every request and the tests assert it never sees a `Cookie` header.
 - **Package-level test-seam pattern** (`cmd/grafanapi/login/`, `cmd/grafanapi/config/`): production
   code depends on `keychain.Store` (and, for `login`, a `prompter` interface) via a package-level
   `var` defaulting to the real implementation. Tests swap in a fake via an exported
@@ -1424,6 +1500,15 @@ The codebase is designed for extension:
 - TLS key data remains the only `datapolicy:"secret"`-tagged, redacted field
 - Legacy `token`/`user`/`password` config keys are rejected by strict YAML
   decoding, with a migration message pointing to `grafanapi login`
+- The stored session is **bound to the server origin** it was issued for: the Keychain item carries
+  the cookie and its `ServerOrigin` as a versioned JSON payload, and `ResolveContextSessionCookie`
+  loads the cookie only on an exact origin match (nothing is populated, so nothing is sent, on a
+  mismatch). `GRAFANA_SERVER`, `--config` and `GRAFANAPI_CONFIG` can no longer redirect the cookie. A
+  legacy (origin-less) item is bound on first use only when the server provably comes from the user's
+  own config file (`LegacyBindAllowed`); otherwise the command refuses (exit 2) and `login update`
+  fixes it. Residual risk, out of scope for the binding: a hostile `--config` that keeps the bound
+  origin can still set `tls.insecure-skip-verify` or an attacker `ca-data`, which with a network
+  position still exposes the cookie
 - Automatic session rotation (`internal/config.SessionSource`) re-persists a fresh cookie to the
   Keychain on every `401`, using its own dedicated, bounded-timeout HTTP client that is never
   wrapped in a logging/debug transport — the cookie value is never written to logs at any point
@@ -1525,6 +1610,18 @@ The codebase is designed for extension:
    is no cookie. (b) Per-group k8s discovery failures stringify their inner errors (an accepted
    limit), so `errors.As` cannot reach the typed refusal and such a redirect can render
    with the generic message and the `*url.Error` text, Location query included.
+
+9. **The Server Must Match the Bound Origin, Whatever Set It**: `GRAFANA_SERVER`, a `--config` file
+   or `GRAFANAPI_CONFIG` pointing at a different origin than the one the session was bound to makes
+   every command refuse with "Session cookie not sent: server does not match its login" (exit 1)
+   instead of sending the cookie there; a bound origin is compared as the exact `ServerOrigin` string,
+   so `https://grafana.example.com` and `https://grafana.example.com:443` agree but `http://` and
+   `https://`, or two ports, do not. A legacy item under any of those overrides (or `XDG_CONFIG_HOME`,
+   or a `$HOME` that is not the passwd home) is the unbound refusal (exit 2) — it is not a stale
+   session, so `login update` without `--rebind` also refuses it. Never document or suggest
+   `login update --rebind` first: remove the override first. Keep-alive: the LaunchAgent runs with the
+   passwd `$HOME` and no overrides, so it binds legacy items automatically on its first run; that bind
+   counts as a rotation once.
 
 ### Future Architecture Directions
 

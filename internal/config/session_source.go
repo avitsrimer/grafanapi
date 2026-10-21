@@ -26,10 +26,16 @@ var ErrRotateUnauthorized = errors.New("session rotation: unauthorized")
 // NewSessionSource creates a SessionSource seeded with cookie for the Grafana instance at server,
 // using tlsCfg for the dedicated rotate HTTP client and persisting rotated values to store under
 // account. tlsCfg may be nil.
+//
+// The origin the rotated cookie is persisted bound to is ServerOrigin(server). If server has no
+// valid origin it is left empty and persist refuses to write rather than store an unbound item.
 func NewSessionSource(cookie, server string, tlsCfg *TLS, store keychain.Store, account string) *SessionSource {
+	origin, _ := ServerOrigin(server)
+
 	return &SessionSource{
 		cookie:  cookie,
 		server:  server,
+		origin:  origin,
 		tls:     tlsCfg,
 		store:   store,
 		account: account,
@@ -56,6 +62,7 @@ type SessionSource struct {
 	inflight *rotateCall
 
 	server  string
+	origin  string // ServerOrigin(server), the binding persist writes; empty if server is unparseable
 	tls     *TLS
 	account string
 	store   keychain.Store
@@ -222,8 +229,10 @@ func (s *SessionSource) runRotate(ctx context.Context, cookie string, call *rota
 	return rotate(ctx, cookie)
 }
 
-// persist best-effort saves cookie to the Keychain: a returned error, or - defensively - a panic
-// from a misbehaving Store.Set, is logged to s.warn rather than failing the rotation or crashing the
+// persist best-effort saves cookie to the Keychain, bound to s.origin (the same binding the cookie
+// was loaded under, since s.server never changes). A server without a valid origin skips the write
+// rather than store an unbound item. A returned error, or - defensively - a panic from a
+// misbehaving Store.Set, is logged to s.warn rather than failing the rotation or crashing the
 // process. By the time persist runs, the rotation has already been published to every waiter via
 // runRotate, so there is nothing left that a panic here could deadlock; recovering it merely keeps a
 // single bad Store implementation from taking down the whole process for what is documented as a
@@ -235,7 +244,14 @@ func (s *SessionSource) persist(cookie string) {
 		}
 	}()
 
-	if setErr := s.store.Set(s.account, cookie); setErr != nil {
+	secret, encErr := keychain.EncodeCredential(keychain.Credential{Cookie: cookie, Origin: s.origin})
+	if encErr != nil {
+		fmt.Fprintf(s.warn, "warning: failed to persist rotated Grafana session to the keychain: %v\n", encErr)
+
+		return
+	}
+
+	if setErr := s.store.Set(s.account, secret); setErr != nil {
 		fmt.Fprintf(s.warn, "warning: failed to persist rotated Grafana session to the keychain: %v\n", setErr)
 	}
 }

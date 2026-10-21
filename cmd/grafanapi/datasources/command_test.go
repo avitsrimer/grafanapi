@@ -44,7 +44,7 @@ func newTestConfig(t *testing.T, server *httptest.Server) (string, func()) {
 	configFile := testutils.CreateTempFile(t, "current-context: test\ncontexts:\n  test:\n    grafana:\n      server: "+server.URL+"\n      org-id: 1\n")
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("test"), "the-cookie"))
+	require.NoError(t, store.Set(keychain.Account("test"), testutils.BoundSecret(t, "the-cookie", server.URL)))
 	restoreStore := config.SetKeychainStore(store)
 
 	return configFile, restoreStore

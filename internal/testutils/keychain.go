@@ -2,10 +2,27 @@ package testutils
 
 import (
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/stretchr/testify/require"
 )
+
+// BoundSecret returns the Keychain payload that binds cookie to origin, for seeding a
+// FakeKeychainStore. It does no normalisation: origin must already be canonical, i.e. an httptest
+// server URL or a config.ServerOrigin result, never a hand-written string.
+//
+// This package must never import internal/config: whitebox `package config` tests import
+// testutils, so that import would be a cycle.
+func BoundSecret(tb testing.TB, cookie, origin string) string {
+	tb.Helper()
+
+	secret, err := keychain.EncodeCredential(keychain.Credential{Cookie: cookie, Origin: origin})
+	require.NoError(tb, err)
+
+	return secret
+}
 
 // FakeKeychainStore is an in-memory keychain.Store for tests, shared by the internal/grafana,
 // internal/server, and internal/server/grafana test suites (they all needed the same thing: an
@@ -105,8 +122,25 @@ func (f *FakeKeychainStore) SetModified(account string, mtime time.Time) {
 	f.mtimes[account] = mtime
 }
 
-// Value returns the secret currently stored under account, for test assertions.
+// Value returns the cookie currently stored under account, for test assertions. A bound payload
+// is decoded to its cookie; a value that does not decode (a legacy bare cookie) is returned as
+// stored. Use RawValue to see the payload itself.
 func (f *FakeKeychainStore) Value(account string) (string, bool) {
+	raw, ok := f.RawValue(account)
+	if !ok {
+		return "", false
+	}
+
+	cred, err := keychain.DecodeCredential(raw)
+	if err != nil {
+		return raw, true
+	}
+
+	return cred.Cookie, true
+}
+
+// RawValue returns the secret exactly as stored under account, payload included.
+func (f *FakeKeychainStore) RawValue(account string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

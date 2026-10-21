@@ -96,3 +96,63 @@ func TestFakeKeychainStore_ModifiedAtErr_Scripted(t *testing.T) {
 	_, err := store.ModifiedAt("account")
 	req.ErrorIs(err, boom)
 }
+
+// TestFakeKeychainStore_Value_DecodesBoundPayload ensures Value hands back the cookie of a bound
+// payload, so assertions written against bare cookies keep working.
+func TestFakeKeychainStore_Value_DecodesBoundPayload(t *testing.T) {
+	req := require.New(t)
+
+	store := testutils.NewFakeKeychainStore()
+	req.NoError(store.Set("account", testutils.BoundSecret(t, "the-cookie", "https://grafana.example.com:443")))
+
+	got, ok := store.Value("account")
+	req.True(ok)
+	req.Equal("the-cookie", got)
+}
+
+// TestFakeKeychainStore_Value_PassesThroughUndecodable ensures legacy bare values, and values that
+// start with "{" but are not a payload, are returned as stored.
+func TestFakeKeychainStore_Value_PassesThroughUndecodable(t *testing.T) {
+	for name, stored := range map[string]string{
+		"legacy bare cookie": "bare-cookie",
+		"malformed json":     "{not json",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := require.New(t)
+
+			store := testutils.NewFakeKeychainStore()
+			req.NoError(store.Set("account", stored))
+
+			got, ok := store.Value("account")
+			req.True(ok)
+			req.Equal(stored, got)
+		})
+	}
+}
+
+// TestFakeKeychainStore_Value_Missing ensures an unset account reports not-found.
+func TestFakeKeychainStore_Value_Missing(t *testing.T) {
+	got, ok := testutils.NewFakeKeychainStore().Value("account")
+	require.False(t, ok)
+	require.Empty(t, got)
+}
+
+// TestFakeKeychainStore_RawValue ensures RawValue returns the JSON payload, which decodes to the
+// cookie and origin given to BoundSecret.
+func TestFakeKeychainStore_RawValue(t *testing.T) {
+	req := require.New(t)
+
+	store := testutils.NewFakeKeychainStore()
+	req.NoError(store.Set("account", testutils.BoundSecret(t, "the-cookie", "https://grafana.example.com:443")))
+
+	raw, ok := store.RawValue("account")
+	req.True(ok)
+	req.NotEqual("the-cookie", raw)
+
+	cred, err := keychain.DecodeCredential(raw)
+	req.NoError(err)
+	req.Equal(keychain.Credential{Cookie: "the-cookie", Origin: "https://grafana.example.com:443"}, cred)
+
+	_, ok = store.RawValue("other")
+	req.False(ok)
+}

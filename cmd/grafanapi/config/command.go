@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -38,6 +39,23 @@ func SetKeychainStore(store keychain.Store) func() {
 	keychainStore = store
 
 	return func() { keychainStore = previous }
+}
+
+// legacyBindAllowed decides whether a legacy (origin-less) Keychain item may be bound to the
+// effective server on first use (see config.LegacyBindAllowed). It is a package-level var,
+// defaulting to the real predicate, so tests can pin the wiring and force either answer via
+// SetLegacyBindAllowed.
+//
+//nolint:gochecknoglobals // test seam for the legacy-bind trust predicate; see SetLegacyBindAllowed.
+var legacyBindAllowed = config.LegacyBindAllowed
+
+// SetLegacyBindAllowed overrides the legacy-bind trust predicate. It exists for tests; it returns
+// a function that restores the previous one.
+func SetLegacyBindAllowed(f func(explicitConfigFile string, envOverridesApplied bool) bool) func() {
+	previous := legacyBindAllowed
+	legacyBindAllowed = f
+
+	return func() { legacyBindAllowed = previous }
 }
 
 // keepaliveController resolves the keep-alive LaunchAgent's launchctl-backed status (loaded?) for
@@ -136,7 +154,13 @@ func (opts *Options) LoadConfig(ctx context.Context) (config.Config, error) {
 		return cfg.GetCurrentContext().Validate()
 	}
 
-	return opts.loadConfigTolerant(ctx, config.ResolveSessionCookie(keychainStore), validator)
+	resolveOpts := config.ResolveOptions{
+		// Credential resolution here applies GRAFANA_SERVER, so the predicate must see it.
+		AllowLegacyBind: legacyBindAllowed(opts.ConfigFile, true),
+		Notice:          os.Stderr,
+	}
+
+	return opts.loadConfigTolerant(ctx, config.ResolveSessionCookie(keychainStore, resolveOpts), validator)
 }
 
 // LoadRESTConfig loads the configuration file (resolving the session cookie via LoadConfig) and
@@ -352,8 +376,14 @@ func checkCmd(configOpts *Options) *cobra.Command {
 
 			cmd.Println()
 
+			// "config check" loads through loadConfigTolerant, so GRAFANA_SERVER is applied.
+			resolveOpts := config.ResolveOptions{
+				AllowLegacyBind: legacyBindAllowed(configOpts.ConfigFile, true),
+				Notice:          cmd.ErrOrStderr(),
+			}
+
 			for _, gCtx := range cfg.Contexts {
-				checkContext(cmd, gCtx)
+				checkContext(cmd, gCtx, resolveOpts)
 			}
 
 			checkKeepAlive(cmd, cfg)
@@ -365,7 +395,7 @@ func checkCmd(configOpts *Options) *cobra.Command {
 	return cmd
 }
 
-func checkContext(cmd *cobra.Command, gCtx *config.Context) {
+func checkContext(cmd *cobra.Command, gCtx *config.Context, resolveOpts config.ResolveOptions) {
 	stdout := cmd.OutOrStdout()
 	title := "Context: "
 	titleLen := len(title) + len(gCtx.Name)
@@ -396,8 +426,22 @@ func checkContext(cmd *cobra.Command, gCtx *config.Context) {
 	// probes below always need the cookie. Unlike Options.LoadConfig (which only resolves the
 	// current context via an Override), "config check" inspects every context, so it calls the
 	// per-context helper directly.
-	if err := config.ResolveContextSessionCookie(keychainStore, gCtx); err != nil {
+	binding, err := config.ResolveContextSessionCookie(keychainStore, gCtx, resolveOpts)
+
+	switch {
+	case err != nil:
 		io.Warning(stdout, "Session cookie: %s\n", io.Yellow(summarizeError(err)))
+
+		var bindingErr *config.SessionBindingError
+		if errors.As(err, &bindingErr) {
+			printSuggestions(err)
+		}
+	case binding.State == config.BindingBound:
+		io.Success(stdout, "Session binding: bound to %s", io.Green(binding.Origin))
+	case binding.State == config.BindingMigrated:
+		io.Success(stdout, "Session binding: bound to %s (migrated from an unbound session)", io.Green(binding.Origin))
+	default:
+		io.Info(stdout, "Session binding: no stored session")
 	}
 
 	if err := gCtx.Validate(); err != nil {

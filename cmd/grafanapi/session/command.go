@@ -31,6 +31,13 @@ var keychainStore keychain.Store = keychain.NewStore()
 //nolint:gochecknoglobals // test seam for launchctl; see SetController.
 var controller launchd.Controller = launchd.NewExecController()
 
+// legacyBindAllowed decides whether a legacy (origin-less) Keychain item may be bound to its
+// context's server on first use (see config.LegacyBindAllowed). It is a package-level var,
+// defaulting to the real predicate, so tests can pin the wiring via SetLegacyBindAllowed.
+//
+//nolint:gochecknoglobals // test seam for the legacy-bind trust predicate; see SetLegacyBindAllowed.
+var legacyBindAllowed = config.LegacyBindAllowed
+
 // SetKeychainStore overrides the keychain.Store used by the session command group. It exists for
 // tests; it returns a function that restores the previously configured store.
 func SetKeychainStore(store keychain.Store) func() {
@@ -38,6 +45,15 @@ func SetKeychainStore(store keychain.Store) func() {
 	keychainStore = store
 
 	return func() { keychainStore = previous }
+}
+
+// SetLegacyBindAllowed overrides the legacy-bind trust predicate. It exists for tests; it returns
+// a function that restores the previous one.
+func SetLegacyBindAllowed(f func(explicitConfigFile string, envOverridesApplied bool) bool) func() {
+	previous := legacyBindAllowed
+	legacyBindAllowed = f
+
+	return func() { legacyBindAllowed = previous }
 }
 
 // SetController overrides the launchd.Controller used by the session command group. It exists

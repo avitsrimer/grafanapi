@@ -3,15 +3,21 @@ package config_test
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
+	internalconfig "github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/launchd"
 	"github.com/grafana/grafanapi/internal/testutils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -323,7 +329,7 @@ current-context: dev`
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -352,7 +358,7 @@ current-context: dev`
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -366,9 +372,9 @@ current-context: dev`
 	}
 	testCase.Run(t)
 
-	cookie, err := store.Get(keychain.Account("dev"))
+	secret, err := store.Get(keychain.Account("dev"))
 	require.NoError(t, err, "unsetting a nested field must not touch the Keychain item for the context")
-	require.Equal(t, "cookie-value", cookie)
+	require.Equal(t, boundSecret(t, "cookie-value", "https://grafana-dev.example"), secret)
 }
 
 func Test_UnsetCommand_keychainDeleteFailureDoesNotFailCommand(t *testing.T) {
@@ -448,7 +454,7 @@ contexts:
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -513,7 +519,7 @@ contexts:
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("staging"): "staging-cookie",
+		keychain.Account("staging"): boundSecret(t, "staging-cookie", "https://grafana-staging.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -538,7 +544,7 @@ contexts:
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -573,6 +579,121 @@ contexts:
 		},
 	}
 	testCase.Run(t)
+}
+
+// runCheck runs "config check" against configFile with the keep-alive seams and $HOME isolated and
+// returns its stdout, so a binding assertion never depends on the real LaunchAgent.
+func runCheck(t *testing.T, store keychain.Store, configFile string, env map[string]string) string {
+	t.Helper()
+
+	t.Cleanup(config.SetKeepaliveController(testutils.NewFakeController()))
+	t.Cleanup(config.SetKeychainStore(store))
+
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["HOME"] = checkHome(t)
+
+	var stdout string
+
+	testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Env:     env,
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			func(_ *testing.T, result testutils.CommandResult) { stdout = result.Stdout },
+		},
+	}.Run(t)
+
+	return stdout
+}
+
+func Test_CheckCommand_reportsBoundSession(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), testutils.BoundSecret(t, attackCookie, home.URL)))
+
+	out := runCheck(t, store, serverConfig(t, home.URL), nil)
+
+	assert.Contains(t, out, "Session binding: bound to "+home.URL)
+	assert.NotContains(t, out, "migrated")
+	assert.NotContains(t, out, attackCookie)
+}
+
+// Test_CheckCommand_migratesLegacyItemAndAsksPredicateWithEnvOverrides pins the one line every
+// upgrading user sees and the trust-predicate wiring: config check applies GRAFANA_SERVER, so it
+// must pass envOverridesApplied=true (flipping it would let a legacy item be bound to a
+// GRAFANA_SERVER target and probed with the cookie).
+func Test_CheckCommand_migratesLegacyItemAndAsksPredicateWithEnvOverrides(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), attackCookie))
+
+	var gotFile string
+
+	var gotEnv bool
+
+	t.Cleanup(config.SetLegacyBindAllowed(func(file string, envApplied bool) bool {
+		gotFile, gotEnv = file, envApplied
+
+		return true
+	}))
+
+	configFile := serverConfig(t, home.URL)
+	out := runCheck(t, store, configFile, nil)
+
+	assert.Equal(t, configFile, gotFile)
+	assert.True(t, gotEnv, "config check applies GRAFANA_SERVER, so it must pass envOverridesApplied=true")
+	assert.Contains(t, out, "Session binding: bound to "+home.URL+" (migrated from an unbound session)")
+	assert.NotContains(t, out, attackCookie)
+
+	raw, ok := store.RawValue(keychain.Account("dev"))
+	require.True(t, ok)
+
+	cred, err := keychain.DecodeCredential(raw)
+	require.NoError(t, err)
+	assert.Equal(t, attackCookie, cred.Cookie)
+	assert.Equal(t, home.URL, cred.Origin)
+}
+
+func Test_CheckCommand_reportsNoStoredSession(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+
+	out := runCheck(t, testutils.NewFakeKeychainStore(), serverConfig(t, home.URL), nil)
+
+	assert.Contains(t, out, "Session binding: no stored session")
+}
+
+// Test_CheckCommand_mismatchShowsOrderedRemedyAndKeepsChecking: the item is bound to the
+// legitimate server while GRAFANA_SERVER points elsewhere. The warning names both origins, the
+// remedy lists "unset the overrides" before "login update --rebind", and the remaining checks
+// still run. The other server may be probed, but never with the cookie.
+func Test_CheckCommand_mismatchShowsOrderedRemedyAndKeepsChecking(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+	evil, _, cookied := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), testutils.BoundSecret(t, attackCookie, home.URL)))
+
+	out := runCheck(t, store, serverConfig(t, home.URL), map[string]string{"GRAFANA_SERVER": evil.URL})
+
+	assert.Contains(t, out, "Session cookie:")
+	assert.Contains(t, out, home.URL)
+	assert.Contains(t, out, evil.URL)
+	assert.NotContains(t, out, "Session binding: bound")
+
+	unset := strings.Index(out, "unset GRAFANA_SERVER")
+	rebind := strings.Index(out, "login update --context dev --rebind")
+	require.GreaterOrEqual(t, unset, 0, out)
+	require.Greater(t, rebind, unset, out)
+
+	assert.Contains(t, out, "Configuration:")
+	assert.Contains(t, out, "Connectivity:")
+	assert.NotContains(t, out, attackCookie)
+	assert.Zero(t, cookied.Load())
 }
 
 // checkHome points $HOME at a fresh temporary directory for the duration of the test, so
@@ -735,7 +856,7 @@ contexts:
 	defer restoreController()
 
 	fakeStore := testutils.NewFakeKeychainStore()
-	require.NoError(t, fakeStore.Set(keychain.Account("dev"), "cookie-value"))
+	require.NoError(t, fakeStore.Set(keychain.Account("dev"), boundSecret(t, "cookie-value", "https://grafana-dev.example")))
 	fakeStore.SetModified(keychain.Account("dev"), time.Now().Add(-3*time.Hour))
 	restoreStore := config.SetKeychainStore(fakeStore)
 	defer restoreStore()
@@ -848,4 +969,179 @@ current-context: default
 	}
 
 	testCase.Run(t)
+}
+
+// attackCookie is a distinctive session cookie value, so a NotContains assertion on it means
+// something.
+const attackCookie = "s3cr3t-cookie-value"
+
+// newRecordingServer returns an httptest server standing in for an attacker-controlled Grafana:
+// it counts every request and every one that carried a Cookie header.
+func newRecordingServer(t *testing.T) (*httptest.Server, *atomic.Int32, *atomic.Int32) {
+	t.Helper()
+
+	requests, cookied := &atomic.Int32{}, &atomic.Int32{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+
+		if r.Header.Get("Cookie") != "" {
+			cookied.Add(1)
+		}
+
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	return server, requests, cookied
+}
+
+func serverConfig(t *testing.T, server string) string {
+	t.Helper()
+
+	return testutils.CreateTempFile(t, "current-context: dev\ncontexts:\n  dev:\n    grafana:\n      server: "+server+"\n      org-id: 1\n")
+}
+
+// captureStderr redirects os.Stderr into a file for the test and returns a reader for what was
+// written, since LoadConfig prints the legacy-bind notice there.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+
+	file, err := os.CreateTemp(t.TempDir(), "stderr")
+	require.NoError(t, err)
+
+	previous := os.Stderr
+	os.Stderr = file
+
+	t.Cleanup(func() {
+		os.Stderr = previous
+
+		require.NoError(t, file.Close())
+	})
+
+	return func() string {
+		data, err := os.ReadFile(file.Name())
+		require.NoError(t, err)
+
+		return string(data)
+	}
+}
+
+// Test_LoadConfig_envServerOverrideDoesNotSendCookie is the GRAFANA_SERVER attack: the session is
+// bound to the configured server, the environment (a hostile .envrc) redirects it to another one.
+func Test_LoadConfig_envServerOverrideDoesNotSendCookie(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+	evil, requests, cookied := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), testutils.BoundSecret(t, attackCookie, home.URL)))
+	t.Cleanup(config.SetKeychainStore(store))
+
+	t.Setenv("GRAFANA_SERVER", evil.URL)
+
+	opts := &config.Options{ConfigFile: serverConfig(t, home.URL)}
+	loaded, err := opts.LoadConfig(context.Background())
+
+	require.ErrorIs(t, err, internalconfig.ErrSessionOriginMismatch)
+	assert.NotContains(t, err.Error(), attackCookie)
+	assert.Empty(t, loaded.GetCurrentContext().Grafana.SessionCookie)
+	assert.Nil(t, loaded.GetCurrentContext().Grafana.Session)
+	assert.Zero(t, requests.Load())
+	assert.Zero(t, cookied.Load())
+}
+
+// Test_LoadConfig_configFileServerDoesNotSendCookie is the --config attack: a config file naming
+// another server than the one the session is bound to.
+func Test_LoadConfig_configFileServerDoesNotSendCookie(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+	evil, requests, cookied := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), testutils.BoundSecret(t, attackCookie, home.URL)))
+	t.Cleanup(config.SetKeychainStore(store))
+
+	opts := &config.Options{ConfigFile: serverConfig(t, evil.URL)}
+	loaded, err := opts.LoadConfig(context.Background())
+
+	require.ErrorIs(t, err, internalconfig.ErrSessionOriginMismatch)
+	assert.NotContains(t, err.Error(), attackCookie)
+	assert.Empty(t, loaded.GetCurrentContext().Grafana.SessionCookie)
+	assert.Zero(t, requests.Load())
+	assert.Zero(t, cookied.Load())
+}
+
+// Test_LoadConfig_legacyItemUnderConfigFlagIsNotBound: with --config the real trust predicate is
+// false, so a legacy item is neither loaded nor re-bound to the file's server.
+func Test_LoadConfig_legacyItemUnderConfigFlagIsNotBound(t *testing.T) {
+	evil, requests, cookied := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), attackCookie))
+	t.Cleanup(config.SetKeychainStore(store))
+
+	opts := &config.Options{ConfigFile: serverConfig(t, evil.URL)}
+	loaded, err := opts.LoadConfig(context.Background())
+
+	require.ErrorIs(t, err, internalconfig.ErrSessionUnbound)
+	assert.NotContains(t, err.Error(), attackCookie)
+	assert.Empty(t, loaded.GetCurrentContext().Grafana.SessionCookie)
+	assert.Zero(t, requests.Load())
+	assert.Zero(t, cookied.Load())
+
+	raw, ok := store.RawValue(keychain.Account("dev"))
+	require.True(t, ok)
+	assert.Equal(t, attackCookie, raw, "a refused legacy item must stay as it was")
+}
+
+// Test_LoadConfig_legacyItemBindsWhenConfigIsTrusted pins the wiring of the trust predicate: it
+// receives the --config value and envOverridesApplied=true, and when it allows, the legacy item
+// is bound to the effective server, with a notice that never carries the cookie.
+func Test_LoadConfig_legacyItemBindsWhenConfigIsTrusted(t *testing.T) {
+	server, _, _ := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), attackCookie))
+	t.Cleanup(config.SetKeychainStore(store))
+
+	var gotFile string
+
+	var gotEnv bool
+
+	t.Cleanup(config.SetLegacyBindAllowed(func(file string, envApplied bool) bool {
+		gotFile, gotEnv = file, envApplied
+
+		return true
+	}))
+
+	stderr := captureStderr(t)
+	configFile := serverConfig(t, server.URL)
+
+	opts := &config.Options{ConfigFile: configFile}
+	loaded, err := opts.LoadConfig(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, attackCookie, loaded.GetCurrentContext().Grafana.SessionCookie)
+	assert.Equal(t, configFile, gotFile)
+	assert.True(t, gotEnv)
+
+	raw, ok := store.RawValue(keychain.Account("dev"))
+	require.True(t, ok)
+
+	cred, err := keychain.DecodeCredential(raw)
+	require.NoError(t, err)
+	assert.Equal(t, attackCookie, cred.Cookie)
+	assert.Equal(t, server.URL, cred.Origin)
+
+	assert.Contains(t, stderr(), server.URL)
+	assert.NotContains(t, stderr(), attackCookie)
+}
+
+// boundSecret returns the Keychain payload that binds cookie to the canonical origin of server.
+func boundSecret(t *testing.T, cookie, server string) string {
+	t.Helper()
+
+	secret, err := internalconfig.EncodeSessionCredential(cookie, server)
+	require.NoError(t, err)
+
+	return secret
 }

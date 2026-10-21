@@ -32,6 +32,13 @@ var keychainStore keychain.Store = keychain.NewStore()
 //nolint:gochecknoglobals // test seam for interactive input; see SetPrompter.
 var activePrompter prompter = ttyPrompter{}
 
+// legacyBindAllowed decides whether `login update` may bind a legacy (origin-less) Keychain item
+// without --rebind (see config.LegacyBindAllowed). It is a package-level var, defaulting to the
+// real predicate, so tests can force either answer via SetLegacyBindAllowed.
+//
+//nolint:gochecknoglobals // test seam for the legacy-bind trust predicate; see SetLegacyBindAllowed.
+var legacyBindAllowed = config.LegacyBindAllowed
+
 // SetKeychainStore overrides the keychain.Store used by login/login update. It exists for tests;
 // it returns a function that restores the previously configured store.
 func SetKeychainStore(store keychain.Store) func() {
@@ -39,6 +46,15 @@ func SetKeychainStore(store keychain.Store) func() {
 	keychainStore = store
 
 	return func() { keychainStore = previous }
+}
+
+// SetLegacyBindAllowed overrides the legacy-bind trust predicate. It exists for tests; it returns
+// a function that restores the previous one.
+func SetLegacyBindAllowed(f func(explicitConfigFile string, envOverridesApplied bool) bool) func() {
+	previous := legacyBindAllowed
+	legacyBindAllowed = f
+
+	return func() { legacyBindAllowed = previous }
 }
 
 // SetPrompter overrides the prompter used by login/login update. It exists for tests; it returns
@@ -65,8 +81,9 @@ It is never accepted as a command-line flag value or environment variable: it is
 an interactive, no-echo prompt, or — with --cookie-stdin — from stdin, for scripting and CI. On
 success, the context (server, org-id/stack-id, TLS) is written to the configuration file and the
 cookie itself is stored in the macOS Keychain, never in the plaintext configuration file.
+The stored session is bound to the server's origin (scheme, host, port) and is only ever sent there.
 
-The server must use https://; plain http:// is only accepted for localhost.`,
+The server must use https://; plain http:// is only accepted for a loopback address (localhost, 127.x.x.x, ::1).`,
 		Example: "\n\tgrafanapi login --server https://grafana.example.com\n" +
 			"\tpbpaste | grafanapi login --server https://grafana.example.com --cookie-stdin",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -257,7 +274,15 @@ func runLogin(cmd *cobra.Command, opts *Options) error {
 	// already had one, delete the just-created entry if it didn't, or — if we couldn't even tell
 	// whether a prior cookie existed — leave the item untouched rather than risk destroying a
 	// working credential we simply failed to read.
-	if err := keychainStore.Set(keychain.Account(name), cookie); err != nil {
+	// The item is the bound credential (cookie + server origin), so the cookie can only ever be
+	// loaded for, and sent to, the server it was issued for. priorCookie stays the raw prior item,
+	// so a rollback restores it byte-for-byte, bound or legacy.
+	secret, err := config.EncodeSessionCredential(cookie, server)
+	if err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+
+	if err := keychainStore.Set(keychain.Account(name), secret); err != nil {
 		return fmt.Errorf("login: storing session cookie in keychain: %w", err)
 	}
 

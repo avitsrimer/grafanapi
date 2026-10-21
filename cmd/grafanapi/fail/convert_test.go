@@ -297,6 +297,103 @@ func TestErrorToDetailedError_LegacyAuthFieldMigrationMessage(t *testing.T) {
 	})
 }
 
+// TestErrorToDetailedError_SessionBinding pins the remedy order: removing the overrides comes
+// first, the re-bind is the conditional second step, and the never-paste warning closes the list,
+// so a user standing in an attacker-influenced shell is not steered into `login update` there.
+func TestErrorToDetailedError_SessionBinding(t *testing.T) {
+	const cookie = "s3cr3t-cookie-value"
+
+	mismatch := &config.SessionBindingError{
+		Context:      "dev",
+		BoundOrigin:  "https://grafana.example.com:443",
+		ServerOrigin: "https://evil.example:443",
+	}
+	unbound := &config.SessionBindingError{Context: "dev", ServerOrigin: "https://evil.example:443"}
+
+	t.Run("mismatch", func(t *testing.T) {
+		detailedErr := fail.ErrorToDetailedError(mismatch)
+
+		require.NotNil(t, detailedErr)
+		assert.Equal(t, "Session cookie not sent: server does not match its login", detailedErr.Summary)
+		assert.Nil(t, detailedErr.ExitCode, "a mismatch is not a stale session: exit code stays 1")
+		require.ErrorIs(t, detailedErr.Parent, config.ErrSessionOriginMismatch)
+
+		require.Len(t, detailedErr.Suggestions, 3)
+		assert.True(t, strings.HasPrefix(detailedErr.Suggestions[0], "If you did not expect grafanapi to target https://evil.example:443, unset GRAFANA_SERVER and GRAFANAPI_CONFIG and drop --config"))
+		assert.Contains(t, detailedErr.Suggestions[0], "https://grafana.example.com:443 again")
+		assert.True(t, strings.HasPrefix(detailedErr.Suggestions[1], "Only if you really moved context"))
+		assert.Contains(t, detailedErr.Suggestions[1], "grafanapi login update --context dev --rebind")
+		assert.True(t, strings.HasPrefix(detailedErr.Suggestions[2], "Never paste a session cookie"))
+	})
+
+	t.Run("unbound", func(t *testing.T) {
+		detailedErr := fail.ErrorToDetailedError(unbound)
+
+		require.NotNil(t, detailedErr)
+		assert.Equal(t, "Session cookie not sent: session is not bound to a server yet", detailedErr.Summary)
+		require.NotNil(t, detailedErr.ExitCode)
+		assert.Equal(t, 2, *detailedErr.ExitCode)
+		require.ErrorIs(t, detailedErr.Parent, config.ErrSessionUnbound)
+
+		require.Len(t, detailedErr.Suggestions, 3)
+		assert.True(t, strings.HasPrefix(detailedErr.Suggestions[0], "Run the command again from a shell without GRAFANA_SERVER"))
+		assert.Contains(t, detailedErr.Suggestions[1], "grafanapi login update --context dev")
+		assert.NotContains(t, detailedErr.Suggestions[1], "--rebind")
+		assert.True(t, strings.HasPrefix(detailedErr.Suggestions[2], "Never paste a session cookie"))
+	})
+
+	t.Run("wrapped error still matches", func(t *testing.T) {
+		err := fmt.Errorf("x: %w", mismatch)
+
+		detailedErr := fail.ErrorToDetailedError(err)
+
+		assert.Equal(t, "Session cookie not sent: server does not match its login", detailedErr.Summary)
+		assert.Equal(t, err, detailedErr.Parent)
+	})
+
+	t.Run("rendering carries only origins and the context", func(t *testing.T) {
+		// SessionBindingError has no cookie field, so the rendering can hold nothing but the origins
+		// and the context name; pin exactly that, instead of a guarantee a wrapper could break.
+		for _, bindingErr := range []*config.SessionBindingError{mismatch, unbound} {
+			assert.Contains(t, bindingErr.Error(), `"dev"`)
+			assert.Contains(t, bindingErr.Error(), bindingErr.ServerOrigin)
+
+			if bindingErr.BoundOrigin != "" {
+				assert.Contains(t, bindingErr.Error(), bindingErr.BoundOrigin)
+			}
+
+			detailedErr := fail.ErrorToDetailedError(bindingErr)
+			assert.NotContains(t, detailedErr.Error()+detailedErr.Summary+strings.Join(detailedErr.Suggestions, "\n"), cookie)
+		}
+	})
+
+	t.Run("context name is shell-quoted in the suggested commands", func(t *testing.T) {
+		tests := []struct {
+			context string
+			want    string
+		}{
+			{"dev", "--context dev"},
+			{"my.dev_1-x", "--context my.dev_1-x"},
+			{"my dev", "--context 'my dev'"},
+			{"it's", `--context 'it'\''s'`},
+			{"a;rm", "--context 'a;rm'"},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.context, func(t *testing.T) {
+				for _, bindingErr := range []*config.SessionBindingError{
+					{Context: tc.context, BoundOrigin: "https://grafana.example.com:443", ServerOrigin: "https://evil.example:443"},
+					{Context: tc.context, ServerOrigin: "https://evil.example:443"},
+				} {
+					detailedErr := fail.ErrorToDetailedError(bindingErr)
+
+					assert.Contains(t, strings.Join(detailedErr.Suggestions, "\n"), tc.want)
+				}
+			})
+		}
+	})
+}
+
 func TestErrorToDetailedError_ServerPolicyErrors(t *testing.T) {
 	redirectErr := &config.UnsafeRedirectError{From: "https://grafana.example.com:443", To: "https://other.example:443"}
 	serverErr := &config.ServerURLError{Reason: "server must use https:// (plain http:// is only allowed for localhost, 127.0.0.1 and ::1)"}
@@ -329,6 +426,11 @@ func TestErrorToDetailedError_ServerPolicyErrors(t *testing.T) {
 		{
 			name:        "server URL in fmt.Errorf",
 			err:         fmt.Errorf("explore: query request: %w", serverErr),
+			wantSummary: "Invalid Grafana server URL",
+		},
+		{
+			name:        "server URL refused while resolving a session binding",
+			err:         fmt.Errorf("session for context %q: %w; the session cookie was not sent", "default", serverErr),
 			wantSummary: "Invalid Grafana server URL",
 		},
 	}
