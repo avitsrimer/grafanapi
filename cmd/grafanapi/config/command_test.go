@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
+	internalconfig "github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/launchd"
 	"github.com/grafana/grafanapi/internal/testutils"
@@ -323,7 +324,7 @@ current-context: dev`
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -352,7 +353,7 @@ current-context: dev`
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -366,9 +367,9 @@ current-context: dev`
 	}
 	testCase.Run(t)
 
-	cookie, err := store.Get(keychain.Account("dev"))
+	secret, err := store.Get(keychain.Account("dev"))
 	require.NoError(t, err, "unsetting a nested field must not touch the Keychain item for the context")
-	require.Equal(t, "cookie-value", cookie)
+	require.Equal(t, boundSecret(t, "cookie-value", "https://grafana-dev.example"), secret)
 }
 
 func Test_UnsetCommand_keychainDeleteFailureDoesNotFailCommand(t *testing.T) {
@@ -448,7 +449,7 @@ contexts:
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -513,7 +514,7 @@ contexts:
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("staging"): "staging-cookie",
+		keychain.Account("staging"): boundSecret(t, "staging-cookie", "https://grafana-staging.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -538,7 +539,7 @@ contexts:
 	configFile := testutils.CreateTempFile(t, cfg)
 
 	store := &fakeKeychainStore{cookies: map[string]string{
-		keychain.Account("dev"): "cookie-value",
+		keychain.Account("dev"): boundSecret(t, "cookie-value", "https://grafana-dev.example"),
 	}}
 	restore := config.SetKeychainStore(store)
 	defer restore()
@@ -735,7 +736,7 @@ contexts:
 	defer restoreController()
 
 	fakeStore := testutils.NewFakeKeychainStore()
-	require.NoError(t, fakeStore.Set(keychain.Account("dev"), "cookie-value"))
+	require.NoError(t, fakeStore.Set(keychain.Account("dev"), boundSecret(t, "cookie-value", "https://grafana-dev.example")))
 	fakeStore.SetModified(keychain.Account("dev"), time.Now().Add(-3*time.Hour))
 	restoreStore := config.SetKeychainStore(fakeStore)
 	defer restoreStore()
@@ -848,4 +849,14 @@ current-context: default
 	}
 
 	testCase.Run(t)
+}
+
+// boundSecret returns the Keychain payload that binds cookie to the canonical origin of server.
+func boundSecret(t *testing.T, cookie, server string) string {
+	t.Helper()
+
+	secret, err := internalconfig.EncodeSessionCredential(cookie, server)
+	require.NoError(t, err)
+
+	return secret
 }

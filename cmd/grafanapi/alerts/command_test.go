@@ -217,7 +217,7 @@ func newTestConfigInOrg(t *testing.T, server *httptest.Server, orgID int) string
 	))
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("test"), "the-cookie"))
+	require.NoError(t, store.Set(keychain.Account("test"), testutils.BoundSecret(t, "the-cookie", server.URL)))
 	t.Cleanup(config.SetKeychainStore(store))
 
 	return configFile

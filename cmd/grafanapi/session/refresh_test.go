@@ -67,7 +67,7 @@ func Test_RefreshCmd_Single_Success(t *testing.T) {
 	server, calls := newRotateServer(t, http.StatusOK)
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("default"), "old-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "old-cookie", server.URL)))
 	restore := SetKeychainStore(store)
 	defer restore()
 
@@ -97,7 +97,7 @@ func Test_RefreshCmd_Single_NoCookieNeverInOutput(t *testing.T) {
 	server, _ := newRotateServer(t, http.StatusOK)
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("default"), "old-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "old-cookie", server.URL)))
 	restore := SetKeychainStore(store)
 	defer restore()
 
@@ -122,7 +122,7 @@ func Test_RefreshCmd_Single_Rejected(t *testing.T) {
 	server, _ := newRotateServer(t, http.StatusUnauthorized)
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("default"), "old-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "old-cookie", server.URL)))
 	restore := SetKeychainStore(store)
 	defer restore()
 
@@ -171,8 +171,8 @@ func Test_RefreshCmd_All_LiveDeadNoCookie(t *testing.T) {
 	deadServer, deadCalls := newRotateServer(t, http.StatusUnauthorized)
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("live"), "live-cookie"))
-	require.NoError(t, store.Set(keychain.Account("dead"), "dead-cookie"))
+	require.NoError(t, store.Set(keychain.Account("live"), testutils.BoundSecret(t, "live-cookie", liveServer.URL)))
+	require.NoError(t, store.Set(keychain.Account("dead"), testutils.BoundSecret(t, "dead-cookie", deadServer.URL)))
 	// "nocookie" deliberately has no stored cookie.
 	restore := SetKeychainStore(store)
 	defer restore()
@@ -201,7 +201,7 @@ func Test_RefreshCmd_All_LiveDeadNoCookie(t *testing.T) {
 
 func Test_RefreshCmd_All_NetworkOnlyFailureExitsOne(t *testing.T) {
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("default"), "old-cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "old-cookie", "http://127.0.0.1:0")))
 	restore := SetKeychainStore(store)
 	defer restore()
 
@@ -230,11 +230,11 @@ func Test_RefreshCmd_Due_OnlyStaleRotated(t *testing.T) {
 	unsetServer, unsetCalls := newRotateServer(t, http.StatusOK)
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("fresh"), "fresh-cookie"))
+	require.NoError(t, store.Set(keychain.Account("fresh"), testutils.BoundSecret(t, "fresh-cookie", freshServer.URL)))
 	store.SetModified(keychain.Account("fresh"), time.Now().Add(-1*time.Minute))
-	require.NoError(t, store.Set(keychain.Account("stale"), "stale-cookie"))
+	require.NoError(t, store.Set(keychain.Account("stale"), testutils.BoundSecret(t, "stale-cookie", staleServer.URL)))
 	store.SetModified(keychain.Account("stale"), time.Now().Add(-24*time.Hour))
-	require.NoError(t, store.Set(keychain.Account("unset"), "unset-cookie"))
+	require.NoError(t, store.Set(keychain.Account("unset"), testutils.BoundSecret(t, "unset-cookie", unsetServer.URL)))
 	restore := SetKeychainStore(store)
 	defer restore()
 
@@ -272,7 +272,7 @@ func Test_RefreshCmd_Due_DeadDueContextExitsTwo(t *testing.T) {
 	staleServer, _ := newRotateServer(t, http.StatusUnauthorized)
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("stale"), "stale-cookie"))
+	require.NoError(t, store.Set(keychain.Account("stale"), testutils.BoundSecret(t, "stale-cookie", staleServer.URL)))
 	store.SetModified(keychain.Account("stale"), time.Now().Add(-24*time.Hour))
 	restore := SetKeychainStore(store)
 	defer restore()
@@ -305,7 +305,7 @@ func Test_RefreshCmd_Due_NothingDue(t *testing.T) {
 	server, calls := newRotateServer(t, http.StatusOK)
 
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("default"), "cookie"))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "cookie", server.URL)))
 	store.SetModified(keychain.Account("default"), time.Now())
 	restore := SetKeychainStore(store)
 	defer restore()
