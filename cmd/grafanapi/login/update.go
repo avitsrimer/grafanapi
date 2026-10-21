@@ -154,12 +154,22 @@ func runLoginUpdate(cmd *cobra.Command, opts *UpdateOptions) error {
 // missing item, an item bound to newOrigin, and a legacy item under the user's own configuration
 // pass; everything else (another origin, an untrusted legacy item, an unreadable item) needs --rebind.
 func guardRebind(cmd *cobra.Command, opts *UpdateOptions, name, newOrigin string) error {
-	oldOrigin, rebindNeeded := storedOriginNeedsRebind(name, newOrigin, config.LegacyBindAllowed(opts.ConfigFile, false))
+	oldOrigin, rebindNeeded := storedOriginNeedsRebind(name, newOrigin, legacyBindAllowed(opts.ConfigFile, false))
 	if !rebindNeeded {
 		return nil
 	}
 
 	if !opts.Rebind {
+		if oldOrigin == noServerOrigin {
+			return fmt.Errorf("login update: the session stored for context %q is not bound to a server yet, and its configuration "+
+				"does not come from your own configuration file (--config, GRAFANAPI_CONFIG, XDG_CONFIG_HOME or "+
+				"XDG_CONFIG_DIRS is set, or $HOME is not your home directory); refusing to prompt for a session cookie "+
+				"(it would be sent to %s to validate it). Re-run from a shell without those overrides, which binds the "+
+				"session to the server in your own configuration automatically; only if you really mean to bind it to %s, "+
+				"re-run with --rebind",
+				name, newOrigin, newOrigin)
+		}
+
 		return fmt.Errorf("login update: context %q is bound to %s but its configuration targets %s; "+
 			"refusing to prompt for a session cookie (it would be sent to %s to validate it). "+
 			"If you really moved this context, re-run from a shell without GRAFANAPI_CONFIG or --config overrides with --rebind",

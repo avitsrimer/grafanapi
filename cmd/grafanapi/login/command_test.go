@@ -1275,8 +1275,11 @@ func Test_LoginUpdateCommand_legacyItemUnderExplicitConfig(t *testing.T) {
 		f.run(t, nil, "", func(_ *testing.T, result testutils.CommandResult) { gotErr = result.Err })
 
 		require.Error(t, gotErr)
-		require.Contains(t, gotErr.Error(), "bound to no server")
+		require.Contains(t, gotErr.Error(), "not bound to a server yet")
 		require.Contains(t, gotErr.Error(), f.newServer.URL)
+		require.Contains(t, gotErr.Error(), "XDG_CONFIG_HOME")
+		// Dropping the overrides is the first remedy and --rebind the second, not the other way round.
+		require.Less(t, strings.Index(gotErr.Error(), "without those overrides"), strings.Index(gotErr.Error(), "--rebind"))
 		require.NotContains(t, gotErr.Error(), "legacy-cookie")
 		require.Equal(t, 0, f.prompter.secretN)
 		require.Equal(t, 0, *f.newHits)
@@ -1293,6 +1296,33 @@ func Test_LoginUpdateCommand_legacyItemUnderExplicitConfig(t *testing.T) {
 
 		require.Equal(t, f.newServer.URL, decodedCookie(t, f.store, "default").Origin)
 	})
+}
+
+// Test_LoginUpdateCommand_trustedLegacyItemBindsWithoutRebind is the path every upgrading user
+// takes: a legacy item under the user's own configuration is bound without --rebind. The seam also
+// pins that login update never counts environment overrides (envOverridesApplied=false), because
+// it never applies them.
+func Test_LoginUpdateCommand_trustedLegacyItemBindsWithoutRebind(t *testing.T) {
+	f := newUpdateRebindFixture(t, func(string) (string, bool) { return "legacy-cookie", true })
+
+	var gotFile string
+
+	var gotEnv bool
+
+	t.Cleanup(login.SetLegacyBindAllowed(func(file string, envApplied bool) bool {
+		gotFile, gotEnv = file, envApplied
+
+		return true
+	}))
+
+	f.run(t, nil, "", testutils.CommandSuccess())
+
+	require.Equal(t, f.configFile, gotFile)
+	require.False(t, gotEnv)
+
+	cred := decodedCookie(t, f.store, "default")
+	require.Equal(t, "s3cr3t-cookie-value", cred.Cookie)
+	require.Equal(t, f.newServer.URL, cred.Origin)
 }
 
 func Test_LoginUpdateCommand_unreadableItemNeedsRebind(t *testing.T) {

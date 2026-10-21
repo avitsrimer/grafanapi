@@ -32,6 +32,13 @@ var keychainStore keychain.Store = keychain.NewStore()
 //nolint:gochecknoglobals // test seam for interactive input; see SetPrompter.
 var activePrompter prompter = ttyPrompter{}
 
+// legacyBindAllowed decides whether `login update` may bind a legacy (origin-less) Keychain item
+// without --rebind (see config.LegacyBindAllowed). It is a package-level var, defaulting to the
+// real predicate, so tests can force either answer via SetLegacyBindAllowed.
+//
+//nolint:gochecknoglobals // test seam for the legacy-bind trust predicate; see SetLegacyBindAllowed.
+var legacyBindAllowed = config.LegacyBindAllowed
+
 // SetKeychainStore overrides the keychain.Store used by login/login update. It exists for tests;
 // it returns a function that restores the previously configured store.
 func SetKeychainStore(store keychain.Store) func() {
@@ -39,6 +46,15 @@ func SetKeychainStore(store keychain.Store) func() {
 	keychainStore = store
 
 	return func() { keychainStore = previous }
+}
+
+// SetLegacyBindAllowed overrides the legacy-bind trust predicate. It exists for tests; it returns
+// a function that restores the previous one.
+func SetLegacyBindAllowed(f func(explicitConfigFile string, envOverridesApplied bool) bool) func() {
+	previous := legacyBindAllowed
+	legacyBindAllowed = f
+
+	return func() { legacyBindAllowed = previous }
 }
 
 // SetPrompter overrides the prompter used by login/login update. It exists for tests; it returns
