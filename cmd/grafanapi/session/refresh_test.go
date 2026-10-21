@@ -200,14 +200,18 @@ func Test_RefreshCmd_All_LiveDeadNoCookie(t *testing.T) {
 }
 
 func Test_RefreshCmd_All_NetworkOnlyFailureExitsOne(t *testing.T) {
+	// A closed httptest server leaves a valid, canonical loopback origin nobody listens on: every
+	// request to it fails as a network (connection refused) error, not a 401. (Port 0 would not
+	// do: config.ServerOrigin rejects it, which would fail the resolution instead.)
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+
 	store := testutils.NewFakeKeychainStore()
-	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "old-cookie", "http://127.0.0.1:0")))
+	require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "old-cookie", closed.URL)))
 	restore := SetKeychainStore(store)
 	defer restore()
 
-	// Port 0 on the loopback address is never listening: every request to it fails as a network
-	// (connection refused) error, not a 401.
-	configFile := singleContextConfig(t, "http://127.0.0.1:0")
+	configFile := singleContextConfig(t, closed.URL)
 
 	var gotErr error
 	testCase := testutils.CommandTestCase{
@@ -220,6 +224,8 @@ func Test_RefreshCmd_All_NetworkOnlyFailureExitsOne(t *testing.T) {
 	testCase.Run(t)
 
 	require.Error(t, gotErr)
+	require.NotErrorIs(t, gotErr, config.ErrInvalidServerURL)
+	require.NotErrorIs(t, gotErr, config.ErrSessionOriginMismatch)
 	detailedErr := fail.ErrorToDetailedError(gotErr)
 	assert.Nil(t, detailedErr.ExitCode, "a network-only failure must not use the auth exit code (defaults to exit 1)")
 }

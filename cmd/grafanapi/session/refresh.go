@@ -60,13 +60,20 @@ and reported as a clear error when targeted explicitly.`,
 				return err
 			}
 
+			// refresh loads the configuration without the GRAFANA_SERVER override, so that variable
+			// must not veto a legacy bind (envOverridesApplied=false).
+			resolveOpts := config.ResolveOptions{
+				AllowLegacyBind: config.LegacyBindAllowed(opts.ConfigFile, false),
+				Notice:          cmd.ErrOrStderr(),
+			}
+
 			switch {
 			case due:
-				return runDue(cmd, &cfg)
+				return runDue(cmd, &cfg, resolveOpts)
 			case all:
-				return runAll(cmd, &cfg)
+				return runAll(cmd, &cfg, resolveOpts)
 			default:
-				return runSingle(cmd, &cfg, opts.Context)
+				return runSingle(cmd, &cfg, opts.Context, resolveOpts)
 			}
 		},
 	}
@@ -106,10 +113,10 @@ type refreshOutcome struct {
 // by the automatic 401-triggered rotation. It never prints anything and never returns the cookie
 // itself; callers render outcome.err (never the cookie) and classify outcome.status into an exit
 // code.
-func refreshContext(cmd *cobra.Command, gCtx *config.Context) refreshOutcome {
+func refreshContext(cmd *cobra.Command, gCtx *config.Context, resolveOpts config.ResolveOptions) refreshOutcome {
 	outcome := refreshOutcome{name: gCtx.Name}
 
-	if err := config.ResolveContextSessionCookie(keychainStore, gCtx); err != nil {
+	if _, err := config.ResolveContextSessionCookie(keychainStore, gCtx, resolveOpts); err != nil {
 		outcome.status = refreshErrored
 		outcome.err = fmt.Errorf("resolving session cookie: %w", err)
 
@@ -142,7 +149,7 @@ func refreshContext(cmd *cobra.Command, gCtx *config.Context) refreshOutcome {
 }
 
 // runSingle refreshes exactly one context: contextName if set, otherwise cfg.CurrentContext.
-func runSingle(cmd *cobra.Command, cfg *config.Config, contextName string) error {
+func runSingle(cmd *cobra.Command, cfg *config.Config, contextName string, resolveOpts config.ResolveOptions) error {
 	name := contextName
 	if name == "" {
 		name = cfg.CurrentContext
@@ -157,7 +164,7 @@ func runSingle(cmd *cobra.Command, cfg *config.Config, contextName string) error
 		return config.ContextNotFound(name)
 	}
 
-	outcome := refreshContext(cmd, gCtx)
+	outcome := refreshContext(cmd, gCtx, resolveOpts)
 
 	switch outcome.status {
 	case refreshSucceeded:
@@ -180,7 +187,7 @@ func runSingle(cmd *cobra.Command, cfg *config.Config, contextName string) error
 // silently. The aggregate result is exit-2 (via a *runtime.APIError) if any context's rotation was
 // auth-rejected, exit-1 (a joined error) if any other error occurred with no auth rejection, and
 // nil (exit 0) otherwise.
-func runAll(cmd *cobra.Command, cfg *config.Config) error {
+func runAll(cmd *cobra.Command, cfg *config.Config, resolveOpts config.ResolveOptions) error {
 	names := sortedContextNames(cfg)
 
 	contexts := make([]*config.Context, 0, len(names))
@@ -188,14 +195,14 @@ func runAll(cmd *cobra.Command, cfg *config.Config) error {
 		contexts = append(contexts, cfg.Contexts[name])
 	}
 
-	return refreshAll(cmd, contexts)
+	return refreshAll(cmd, contexts, resolveOpts)
 }
 
 // runDue refreshes only the contexts dueContexts selects: those whose live-window has elapsed
 // since their last rotation, per keychainStore.ModifiedAt. Warnings (e.g. an invalid live-window)
 // are printed but never fail the run - a bad context is skipped, not fatal. A run with nothing due
 // is a success.
-func runDue(cmd *cobra.Command, cfg *config.Config) error {
+func runDue(cmd *cobra.Command, cfg *config.Config, resolveOpts config.ResolveOptions) error {
 	due, warnings := dueContexts(cfg, time.Now(), keychainStore.ModifiedAt)
 
 	for _, warning := range warnings {
@@ -208,7 +215,7 @@ func runDue(cmd *cobra.Command, cfg *config.Config) error {
 		return nil
 	}
 
-	return refreshAll(cmd, due)
+	return refreshAll(cmd, due, resolveOpts)
 }
 
 // refreshAll attempts refreshContext for every context in contexts (assumed already
@@ -216,12 +223,12 @@ func runDue(cmd *cobra.Command, cfg *config.Config) error {
 // (a *runtime.APIError) if any rotation was auth-rejected, exit-1 (a joined error) if any other
 // failure occurred with no auth rejection, nil otherwise. Skipped (no-cookie) contexts never count
 // as a failure.
-func refreshAll(cmd *cobra.Command, contexts []*config.Context) error {
+func refreshAll(cmd *cobra.Command, contexts []*config.Context, resolveOpts config.ResolveOptions) error {
 	var authRejected bool
 	var errs []error
 
 	for _, gCtx := range contexts {
-		outcome := refreshContext(cmd, gCtx)
+		outcome := refreshContext(cmd, gCtx, resolveOpts)
 
 		switch outcome.status {
 		case refreshSucceeded:
