@@ -78,8 +78,8 @@ func (context *Context) ToRESTConfig(ctx context.Context) NamespacedRESTConfig {
 type GrafanaConfig struct {
 	// Server is the address of the Grafana server (https://hostname:port/path).
 	// Required. It must use https://; plain http:// is only accepted for a Grafana running on
-	// this machine (localhost, 127.0.0.1 or ::1). Internationalised host names must be given in
-	// punycode (xn--...).
+	// this machine (localhost, any 127.x.x.x address, or ::1). Internationalised host names must be
+	// given in punycode (xn--...).
 	Server string `env:"GRAFANA_SERVER" json:"server,omitempty" yaml:"server,omitempty"`
 
 	// OrgID specifies the organization targeted by this config.

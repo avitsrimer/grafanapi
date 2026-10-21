@@ -65,8 +65,8 @@ The session cookie only ever travels to the server you configured, so grafanapi
 is strict about that URL:
 
 * **`https://` is required.** Plain `http://` is accepted only for a Grafana
-  running on your own machine: `localhost`, `127.0.0.1` and `::1`. `localhost`
-  is trusted by name, without a DNS lookup. Anything else is rejected,
+  running on your own machine: `localhost`, any `127.x.x.x` address, or `::1`.
+  `localhost` is trusted by name, without a DNS lookup. Anything else is rejected,
   including `http://0.0.0.0`, Docker service names such as
   `http://grafana:3000` and `host.docker.internal`. For a local container,
   publish the port and use `http://localhost:<port>`.
