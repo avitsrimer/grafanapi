@@ -365,7 +365,7 @@ func (rt *rotatingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 		// response as-is; the caller-visible outcome of a failed/skipped rotation is the
 		// original 401 response, not a Go error (which centralized fail/convert.go rendering
 		// does not expect here). rerr itself is not observable by callers, by design.
-		//nolint:nilerr // intentional: original 401 surfaces as (resp, nil), see comment above
+		//nolint:nilerr,nolintlint // intentional: original 401 surfaces as (resp, nil), see comment above
 		return resp, nil
 	}
 
