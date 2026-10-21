@@ -75,5 +75,17 @@ replaces the previous LaunchAgent definition and reloads it.
   private/incognito browser window so the CLI owns a dedicated cookie chain.
 - **Keep-alive requires an active macOS login session.** The LaunchAgent runs in the GUI domain and
   needs Keychain access, so it does not run while the machine is logged out.
+- **After an upgrade, sessions are bound to their server.** The first scheduled refresh binds each
+  session stored by an older version to the server in your configuration file
+  (see [Session binding](../configuration.md#session-binding)). That write counts as a rotation
+  once: the next refresh can be delayed by up to one `live-window`, and `config check` shows a
+  rotation that did not happen. The LaunchAgent runs with your account's home directory and none of
+  the overriding variables, which is the case that binds automatically.
+- **A context that cannot be bound needs `login update`.** If the context's server differs from the
+  one its session is bound to, or its configuration is loaded through `XDG_CONFIG_HOME` or
+  `--config`, the refresh is refused and nothing is sent. The failure shows up as a `✘` line for
+  that context in `~/Library/Logs/grafanapi/keepalive.log` and in `session keepalive status`. Run
+  `grafanapi login update --context <name>` from a clean shell (`--rebind` if the context really
+  moved).
 - **The log never contains a cookie value.** `session keepalive status` and
   `~/Library/Logs/grafanapi/keepalive.log` only ever show `✔`/`✘` status lines per context.

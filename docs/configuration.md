@@ -96,6 +96,81 @@ is strict about that URL:
     verification: an active attacker on the network path can then read the
     session cookie. Never use it for a remote production host.
 
+### Session binding
+
+A stored session is bound to the server it was issued for. At login,
+grafanapi records the server's **origin** (scheme, host and port, with the port
+always explicit, for example `https://grafana.example.com:443`) together with
+the cookie in the same Keychain item. Every time the cookie is loaded, the
+origin of the effective server is compared with the stored one. Only an exact
+match sends the cookie. Host names are compared in lower case and a path such
+as `/grafana` does not take part, so `https://Grafana.Example.com/grafana/` and
+`https://grafana.example.com` are the same origin.
+
+If the origins differ, nothing is sent: the cookie is not loaded at all, and
+the command fails with "Session cookie not sent: server does not match its
+login" (exit code **1**) naming both origins. This is what happens when
+`GRAFANA_SERVER`, a `--config` file, `GRAFANAPI_CONFIG` or an `.envrc` points a
+context at a different server than the one it was logged in to. In that case,
+in this order:
+
+1. Remove the override: unset `GRAFANA_SERVER` and `GRAFANAPI_CONFIG`, drop
+   `--config`, and look for an `.envrc` or a repo-local configuration. The
+   context then targets its bound origin again.
+2. Only if you really moved the context to another server, and from a shell
+   without those overrides, run
+   `grafanapi login update --context <name> --rebind`. Without `--rebind`,
+   `login update` refuses to move a session to another origin before it asks
+   for a cookie.
+3. Never paste a session cookie while an unexpected server is configured:
+   `login update` sends it to that server to validate it.
+
+For a different Grafana instance, prefer a separate context
+(`grafanapi login --context <name> --server ...`) over re-binding.
+
+#### Sessions stored by an older version
+
+Sessions stored before binding existed carry no origin. They are bound on first
+use, but only when the server provably comes from your own configuration file,
+because binding an unbound session to whatever server is configured would
+defeat the check. Binding happens automatically only when **all** of these
+hold:
+
+* `--config` is not used and `GRAFANAPI_CONFIG` is unset or empty;
+* `XDG_CONFIG_HOME` and `XDG_CONFIG_DIRS` are unset or empty;
+* `$HOME` is your account's own home directory;
+* `GRAFANA_SERVER` is not set at all (even if empty). Commands that never read
+  it, `session refresh` and `login update`, ignore this condition.
+
+The first command that meets those conditions binds the session to the server
+in your configuration file and prints one line on stderr, for example
+`notice: bound the stored session for context "default" to https://grafana.example.com:443 (first use since upgrading)`.
+In any other case nothing is sent and the command fails with "Session cookie
+not sent: session is not bound to a server yet" (exit code **2**). Run the
+command again from a shell without those overrides, or run
+`grafanapi login update --context <name>` from one. Under `--config` or
+`GRAFANAPI_CONFIG`, `login update` also needs `--rebind` for an unbound session.
+
+`grafanapi config check` prints a `Session binding:` line for every context:
+`bound to <origin>`, `bound to <origin> (migrated from an unbound session)`,
+`no stored session`, or the error above followed by the same remedies. Reading
+it adds no Keychain prompt beyond the one `config check` already causes.
+
+!!! note
+
+    The Keychain item now holds a small JSON payload (the cookie and its
+    origin) instead of the bare cookie, so a script that reads it with
+    `security find-generic-password -w` sees that payload. An older grafanapi
+    sends such a payload as the cookie, so after a downgrade run
+    `grafanapi login update` once.
+
+!!! warning
+
+    Origin binding does not cover everything a configuration file controls. A
+    hostile `--config` that keeps the bound origin can still set
+    `tls.insecure-skip-verify` or an attacker-controlled `ca-data`, which with a
+    network position exposes the cookie. Only use configuration files you trust.
+
 ### Automatic session rotation
 
 Grafana session cookies stop authenticating ordinary API calls after a
@@ -158,6 +233,11 @@ Environment variables cover the non-secret parts of a context only
 via an environment variable — authenticate with [`grafanapi login`](#authenticating)
 instead, which stores the cookie in the Keychain.
 
+`GRAFANA_SERVER` must name the same origin as the context's login: a stored
+session is only sent to the origin it was bound to (see
+[Session binding](#session-binding)), so a different server fails with an error
+and sends no cookie.
+
 !!! note
 
     * Every supported environment variable is listed in our [reference documentation](./reference/environment-variables/index.md).
@@ -198,7 +278,8 @@ Grafana CLI stores its configuration in a YAML file. Its location is determined 
 4. If the `$XDG_CONFIG_DIRS` environment variable is set, then it will be used: `$XDG_CONFIG_DIRS/grafanapi/config.yaml`
 
 The configuration file never contains the session cookie: it is stored
-separately in the macOS Keychain, keyed by context name.
+separately in the macOS Keychain, keyed by context name. The Keychain item holds
+the cookie and the origin it is bound to as a small JSON payload.
 
 !!! tip
 

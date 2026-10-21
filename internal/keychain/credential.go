@@ -15,7 +15,8 @@ import (
 const CredentialVersion = 1
 
 // ErrMalformedCredential is returned by DecodeCredential for a payload that is not valid
-// versioned JSON, has a missing or non-positive version, or lacks a cookie or an origin. Its message never includes the stored item.
+// versioned JSON, has a missing or non-positive version, or lacks a cookie or an origin. Its
+// message never includes the stored item.
 var ErrMalformedCredential = errors.New("keychain: stored session item is malformed")
 
 // ErrUnsupportedCredential is returned by DecodeCredential for a payload whose version is greater
@@ -25,8 +26,8 @@ var ErrUnsupportedCredential = errors.New("keychain: stored session item was wri
 // EncodeCredential serialises c as the versioned payload stored as the Keychain secret. It
 // requires a non-empty Cookie and a non-empty Origin, both valid UTF-8 (encoding/json would
 // silently rewrite invalid bytes to U+FFFD, so the stored value would differ from the one the
-// caller verified); it does not judge whether the origin is
-// canonical, because normalising is the caller's job (this package cannot import internal/config).
+// caller verified); it does not judge whether the origin is canonical, because normalising is
+// the caller's job (this package cannot import internal/config).
 func EncodeCredential(c Credential) (string, error) {
 	if c.Cookie == "" {
 		return "", errors.New("keychain: cannot encode a session without a cookie")
