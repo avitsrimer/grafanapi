@@ -1477,8 +1477,8 @@ The codebase is designed for extension:
    origins only. (a) A **cookieless** openapi request still follows a cross-origin redirect:
    `WrapWithSession` returns the transport unchanged when there is no cookie, so no round-tripper
    guards it, and go-openapi uses Go's default `CheckRedirect`; nothing secret is sent, since there
-   is no cookie. (b) Per-group k8s discovery failures stringify their inner errors (plan-review
-   #12, accepted), so `errors.As` cannot reach the typed refusal and such a redirect can render
+   is no cookie. (b) Per-group k8s discovery failures stringify their inner errors (an accepted
+   limit), so `errors.As` cannot reach the typed refusal and such a redirect can render
    with the generic message and the `*url.Error` text, Location query included.
 
 ### Future Architecture Directions
