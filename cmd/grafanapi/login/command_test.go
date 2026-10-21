@@ -828,6 +828,8 @@ func Test_LoginCommand_configWriteFailureRestoresPriorKeychainItemOnRelogin(t *t
 		prior func(t *testing.T) string
 	}{
 		{"bound to another origin", func(t *testing.T) string {
+			t.Helper()
+
 			return testutils.BoundSecret(t, "prior-valid-cookie", "https://old.example:443")
 		}},
 		{"legacy bare cookie", func(*testing.T) string { return "prior-legacy-cookie" }},
