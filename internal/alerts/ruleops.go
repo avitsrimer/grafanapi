@@ -337,7 +337,7 @@ func (r *ruleOpRun) resolve(ctx context.Context) ([]*models.ProvisionedAlertRule
 				return nil, stop
 			}
 		case !found:
-			err := fmt.Errorf("alerts: rule %s %w", uid, ErrRuleNotFound)
+			err := ruleNotFoundError(uid)
 			if stop := r.record(RuleOpResult{UID: uid, Err: err}); stop != nil {
 				return nil, stop
 			}

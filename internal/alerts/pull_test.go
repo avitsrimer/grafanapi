@@ -376,6 +376,188 @@ func TestPull_Unauthorized(t *testing.T) {
 	}
 }
 
+// ruleLookup is the answer to GET /alert-rules/<uid>: the rule, addressing the group it lives in.
+func ruleLookup(uid, folderUID, group string) stubResponse {
+	return okResponse(fmt.Sprintf(
+		`{"uid":%q,"title":%q,"folderUID":%q,"ruleGroup":%q,"provenance":"api"}`,
+		uid, uid+"-title", folderUID, group,
+	))
+}
+
+// TestPull_RuleUIDsFetchesOnlyTheirGroups pins what a rule selection reads: one rule GET per uid, one
+// group GET per distinct group, and neither the rule listing nor the two whole-instance objects. The
+// fixture fails any request to an unscripted path, and the counts are asserted too.
+func TestPull_RuleUIDsFetchesOnlyTheirGroups(t *testing.T) {
+	tests := []struct {
+		name       string
+		uids       []string
+		wantGroups []string
+		wantFetch  map[string]int
+	}{
+		{
+			name:       "two uids in one group fetch it once",
+			uids:       []string{"rule-uid-2", "rule-uid-3"},
+			wantGroups: []string{"group-a"},
+			wantFetch:  map[string]int{groupPath("folder-uid-1", "group-a"): 1},
+		},
+		{
+			name:       "uids in two folders fetch both groups",
+			uids:       []string{"rule-uid-1", "rule-uid-4"},
+			wantGroups: []string{"group-b", "group-c"},
+			wantFetch: map[string]int{
+				groupPath("folder-uid-1", "group-b"): 1,
+				groupPath("folder-uid-2", "group-c"): 1,
+			},
+		},
+		{
+			name:       "a duplicated uid is one rule lookup",
+			uids:       []string{"rule-uid-2", "rule-uid-2"},
+			wantGroups: []string{"group-a"},
+			wantFetch: map[string]int{
+				rulePath("rule-uid-2"):               1,
+				groupPath("folder-uid-1", "group-a"): 1,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPullFixture(t, map[string]stubResponse{
+				rulePath("rule-uid-1"):               ruleLookup("rule-uid-1", "folder-uid-1", "group-b"),
+				rulePath("rule-uid-2"):               ruleLookup("rule-uid-2", "folder-uid-1", "group-a"),
+				rulePath("rule-uid-3"):               ruleLookup("rule-uid-3", "folder-uid-1", "group-a"),
+				rulePath("rule-uid-4"):               ruleLookup("rule-uid-4", "folder-uid-2", "group-c"),
+				groupPath("folder-uid-1", "group-a"): groupResponse("folder-uid-1", "group-a", 60, "rule-uid-2", "rule-uid-3"),
+				groupPath("folder-uid-1", "group-b"): groupResponse("folder-uid-1", "group-b", 120, "rule-uid-1"),
+				groupPath("folder-uid-2", "group-c"): groupResponse("folder-uid-2", "group-c", 300, "rule-uid-4"),
+			})
+
+			bundle, err := alerts.Pull(t.Context(), fixture.client, alerts.PullOptions{RuleUIDs: tc.uids})
+			require.NoError(t, err)
+
+			titles := make([]string, 0, len(bundle.Groups))
+			for _, group := range bundle.Groups {
+				titles = append(titles, group.Title)
+			}
+
+			assert.Equal(t, tc.wantGroups, titles)
+			assert.Nil(t, bundle.ContactPoints)
+			assert.Nil(t, bundle.Policies)
+
+			for path, want := range tc.wantFetch {
+				assert.Equal(t, want, fixture.requestCount(path), path)
+			}
+
+			assert.Zero(t, fixture.requestCount(alertRulesPath), "no rule listing")
+			assert.Zero(t, fixture.requestCount(contactPointsPath))
+			assert.Zero(t, fixture.requestCount(policiesPath))
+		})
+	}
+}
+
+// TestPull_RuleUIDsReturnsTheWholeGroup pins that the group comes back complete: the named rule is
+// not extracted, since a group is the unit Grafana writes.
+func TestPull_RuleUIDsReturnsTheWholeGroup(t *testing.T) {
+	fixture := newPullFixture(t, map[string]stubResponse{
+		rulePath("rule-uid-2"):               ruleLookup("rule-uid-2", "folder-uid-1", "group-a"),
+		groupPath("folder-uid-1", "group-a"): groupResponse("folder-uid-1", "group-a", 60, "rule-uid-2", "rule-uid-3"),
+	})
+
+	bundle, err := alerts.Pull(t.Context(), fixture.client, alerts.PullOptions{RuleUIDs: []string{"rule-uid-2"}})
+	require.NoError(t, err)
+	require.Len(t, bundle.Groups, 1)
+	require.Len(t, bundle.Groups[0].Rules, 2)
+	assert.Equal(t, "rule-uid-2", bundle.Groups[0].Rules[0].UID)
+	assert.Equal(t, "rule-uid-3", bundle.Groups[0].Rules[1].UID)
+}
+
+func TestPull_RuleUIDsErrors(t *testing.T) {
+	notFound := stubResponse{status: http.StatusNotFound, body: `{"message":"not found"}`}
+
+	tests := []struct {
+		name    string
+		routes  map[string]stubResponse
+		wantErr string
+	}{
+		{
+			name:    "an unknown uid",
+			routes:  map[string]stubResponse{rulePath("rule-uid-9"): notFound},
+			wantErr: "alerts: rule rule-uid-9 not found",
+		},
+		{
+			name: "the group answers 404 after the rule lookup",
+			routes: map[string]stubResponse{
+				rulePath("rule-uid-9"):               ruleLookup("rule-uid-9", "folder-uid-1", "group-a"),
+				groupPath("folder-uid-1", "group-a"): notFound,
+			},
+			wantErr: "alerts: pull rule rule-uid-9: its rule group no longer holds it",
+		},
+		{
+			name: "the group no longer contains the uid",
+			routes: map[string]stubResponse{
+				rulePath("rule-uid-9"):               ruleLookup("rule-uid-9", "folder-uid-1", "group-a"),
+				groupPath("folder-uid-1", "group-a"): groupResponse("folder-uid-1", "group-a", 60, "rule-uid-2"),
+			},
+			wantErr: "alerts: pull rule rule-uid-9: its rule group no longer holds it",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPullFixture(t, tc.routes)
+
+			_, err := alerts.Pull(t.Context(), fixture.client, alerts.PullOptions{RuleUIDs: []string{"rule-uid-9"}})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Zero(t, fixture.requestCount(alertRulesPath))
+		})
+	}
+
+	t.Run("an unknown uid wraps ErrRuleNotFound", func(t *testing.T) {
+		fixture := newPullFixture(t, map[string]stubResponse{rulePath("rule-uid-9"): notFound})
+
+		_, err := alerts.Pull(t.Context(), fixture.client, alerts.PullOptions{RuleUIDs: []string{"rule-uid-9"}})
+		require.ErrorIs(t, err, alerts.ErrRuleNotFound)
+	})
+}
+
+// TestPull_RuleUIDsUnauthorized pins the exit-2 contract: fetchRule wraps the 401, so it is reached by
+// errors.As, never by identity.
+func TestPull_RuleUIDsUnauthorized(t *testing.T) {
+	fixture := newPullFixture(t, map[string]stubResponse{
+		rulePath("rule-uid-1"): {status: http.StatusUnauthorized, body: `{"message":"Unauthorized"}`},
+	})
+
+	_, err := alerts.Pull(t.Context(), fixture.client, alerts.PullOptions{RuleUIDs: []string{"rule-uid-1"}})
+	require.Error(t, err)
+
+	var apiErr *runtime.APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusUnauthorized, apiErr.Code)
+}
+
+// TestPull_RuleUIDsCannotCombine pins the caller-bug guard: the error comes before any request (the
+// fixture has no routes, so any request would fail the test).
+func TestPull_RuleUIDsCannotCombine(t *testing.T) {
+	tests := []struct {
+		name string
+		opts alerts.PullOptions
+	}{
+		{"with FolderUIDs", alerts.PullOptions{RuleUIDs: []string{"rule-uid-1"}, FolderUIDs: []string{"folder-uid-1"}}},
+		{"with Groups", alerts.PullOptions{RuleUIDs: []string{"rule-uid-1"}, Groups: []alerts.GroupRef{}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPullFixture(t, map[string]stubResponse{})
+
+			_, err := alerts.Pull(t.Context(), fixture.client, tc.opts)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "RuleUIDs cannot be combined with Groups or FolderUIDs")
+		})
+	}
+}
+
 // pullFixture is a generated client wired against a scripted server that also records what was
 // requested and how much of it ran at once - the two things a pull's behaviour is defined by
 // beyond the bundle it returns.
