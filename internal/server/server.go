@@ -121,11 +121,16 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		IdleTimeout:       s.timeouts.idle,
 	}
 
+	// serveCtx also ends when srv.Serve fails for a reason other than a shutdown, so the
+	// shutdown goroutine never outlives Serve.
+	serveCtx, stop := context.WithCancel(ctx)
+	defer stop()
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 
-		<-ctx.Done()
+		<-serveCtx.Done()
 
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 		defer cancel()
@@ -247,9 +252,9 @@ func (s *Server) handler(ctx context.Context) (http.Handler, error) {
 		s.applyStaticProxyConfig(r, handler.StaticEndpoints())
 	}
 
-	// Livereload setup. HandshakeTimeout must stay zero: gorilla then clears the connection
-	// deadlines on upgrade, which is what lets the server's Read/WriteTimeout coexist with the
-	// long-lived websocket.
+	// Livereload setup. The long-lived websocket coexists with the server's Read/WriteTimeout
+	// because net/http's Hijack clears the connection deadlines (gorilla clears them again when
+	// HandshakeTimeout is zero); TestServe_WebsocketSurvivesServerTimeouts pins the behaviour.
 	var upgrader = &websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,

@@ -42,8 +42,8 @@ func TestBrowseURL(t *testing.T) {
 	}
 }
 
-// The websocket must outlive the server's Read/WriteTimeout: gorilla clears the connection
-// deadlines on upgrade while the upgrader's HandshakeTimeout is zero.
+// The websocket must outlive the server's Read/WriteTimeout: net/http's Hijack clears the
+// connection deadlines when the connection is upgraded.
 func TestServe_WebsocketSurvivesServerTimeouts(t *testing.T) {
 	const timeout = 200 * time.Millisecond
 

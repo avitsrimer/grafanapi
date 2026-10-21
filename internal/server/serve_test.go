@@ -74,8 +74,8 @@ func TestServer_ServeReturnsNilAfterContextCancel(t *testing.T) {
 	select {
 	case err := <-errCh:
 		require.NoError(t, err)
-	case <-t.Context().Done():
-		t.Fatal("test context ended before Serve returned")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after its context was cancelled")
 	}
 }
 
@@ -470,4 +470,22 @@ func TestServer_IndexLinksResolve(t *testing.T) {
 
 	status, _ = get(base + "/grafanapi/assets/style.css")
 	assert.Equal(t, http.StatusOK, status)
+}
+
+func TestServer_ServeReturnsListenerError(t *testing.T) {
+	s := newTestServer("127.0.0.1")
+
+	ln, err := s.Listen(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, ln.Close())
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Serve(t.Context(), ln) }()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after its listener failed")
+	}
 }
