@@ -37,7 +37,11 @@ DATASOURCE is resolved first as a UID, then as a name. QUERY is mapped onto the
 datasource-type-appropriate request field: "expr" for Prometheus/Loki, "rawSql" for SQL
 datasources, "target" for Graphite, "query" for Elasticsearch/InfluxDB (override with --field).
 
-This runs a single query (fixed refId "A"); there is no multi-query or query-history support.`,
+This runs a single query (fixed refId "A"); there is no multi-query or query-history support.
+
+In the table format, escape sequences in returned values are removed and other control and
+format characters (bidi overrides, tabs, newlines) are replaced with spaces. -o json and -o yaml
+carry values verbatim: treat them as untrusted data.`,
 		Example: `
 	# Prometheus/Loki:
 	grafanapi explore my-prometheus "up"

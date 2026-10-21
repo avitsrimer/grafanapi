@@ -1,0 +1,55 @@
+{
+  "results": {
+    "A\u001b[2J": {
+      "status": 200,
+      "frames": [
+        {
+          "schema": {
+            "name": "ev\u202eil",
+            "refId": "A",
+            "fields": [
+              {
+                "name": "num",
+                "type": "number"
+              },
+              {
+                "name": "txt\u001b]0;title\u0007",
+                "type": "string",
+                "labels": {
+                  "k\u009bz": "v"
+                }
+              }
+            ]
+          },
+          "data": {
+            "values": [
+              [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8
+              ],
+              [
+                "\u001b]52;c;aGk=\u0007after",
+                "\u001b]52;c;aGk=\u001b\\tail",
+                "\u001b[31mred\u001b[0m",
+                "\u009d52;c;aGk=\u009cc1",
+                "pre\u001b]0;unterminated",
+                "line1\nline2",
+                "tab\there",
+                "cr\rhere"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    "B\u202e": {
+      "status": 200
+    }
+  }
+}

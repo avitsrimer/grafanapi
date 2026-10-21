@@ -1,11 +1,13 @@
 package fail
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/fatih/color"
 	"github.com/goccy/go-yaml"
+	"github.com/grafana/grafanapi/internal/termsafe"
 )
 
 // DetailedError is used to describe errors in a human-friendly way.
@@ -61,8 +63,11 @@ func (e DetailedError) Error() string {
 	red := color.New(color.FgRed).SprintFunc()
 	blue := color.New(color.FgBlue).SprintFunc()
 
-	buffer.WriteString(red("Error: ") + e.Summary + "\n")
+	buffer.WriteString(red("Error: ") + termsafe.Cell(e.Summary) + "\n")
 
+	// Details is deliberately not sanitized: every producer is local, and a config
+	// ValidationError's AnnotatedSource is intentionally coloured (see AnnotateSource(..., true)
+	// in internal/config/loader.go).
 	if e.Details != "" {
 		lines := strings.Split(e.Details, "\n")
 		buffer.WriteString("│\n")
@@ -74,8 +79,17 @@ func (e DetailedError) Error() string {
 	if e.Parent != nil {
 		buffer.WriteString(fmt.Sprintf("│\n├─ %s\n│\n", blue("Details:")))
 
-		// Will pretty-print YAML-related errors and leave the other ones as-is.
-		formattedErr := yaml.FormatError(e.Parent, !color.NoColor, true)
+		// Parent may carry server text: strip terminal control from it. YAML-related errors are
+		// pretty-printed (and coloured on purpose), so they are only sanitized when colour is off.
+		var yamlErr yaml.Error
+
+		formattedErr := termsafe.Text(e.Parent.Error())
+		if errors.As(e.Parent, &yamlErr) {
+			formattedErr = yaml.FormatError(e.Parent, !color.NoColor, true)
+			if color.NoColor {
+				formattedErr = termsafe.Text(formattedErr)
+			}
+		}
 
 		for line := range strings.SplitSeq(formattedErr, "\n") {
 			buffer.WriteString("│ " + line + "\n")
@@ -86,12 +100,12 @@ func (e DetailedError) Error() string {
 		buffer.WriteString(fmt.Sprintf("│\n├─ %s\n│\n", blue("Suggestions:")))
 
 		for _, suggestion := range e.Suggestions {
-			buffer.WriteString("│ • " + suggestion + "\n")
+			buffer.WriteString("│ • " + termsafe.Cell(suggestion) + "\n")
 		}
 	}
 
 	if e.DocsLink != "" {
-		buffer.WriteString(fmt.Sprintf("│\n├─ %s\n│\n│ %s\n", blue("Learn more:"), e.DocsLink))
+		fmt.Fprintf(&buffer, "│\n├─ %s\n│\n│ %s\n", blue("Learn more:"), termsafe.Cell(e.DocsLink))
 	}
 
 	buffer.WriteString("│\n└─\n")

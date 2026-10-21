@@ -8,6 +8,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/grafana/grafanapi/internal/termsafe"
 )
 
 // defaultMaxCellWidth is the RenderOptions.MaxCellWidth used when the caller
@@ -20,6 +22,11 @@ const defaultMaxCellWidth = 60
 // [name]" header; frames render sequentially with a blank line between them.
 // An empty response, a refID with no frames, or a frame with no rows each
 // render a graceful "no data" line instead of nothing or a panic.
+//
+// Every server-controlled string (refID, frame name, field names, label keys and values, cell
+// values) goes through termsafe.Cell, so an escape sequence, a bidi override or an embedded
+// newline or tab can neither reach the terminal nor split a row. The json and yaml codecs do not
+// pass through here and keep raw values.
 func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error {
 	maxWidth := opts.MaxCellWidth
 	if maxWidth <= 0 {
@@ -45,7 +52,7 @@ func RenderTable(w io.Writer, resp *QueryResponse, opts RenderOptions) error {
 			}
 			first = false
 
-			fmt.Fprintf(tab, "%s: no data\n", refID)
+			fmt.Fprintf(tab, "%s: no data\n", termsafe.Cell(refID))
 
 			continue
 		}
@@ -75,9 +82,9 @@ type RenderOptions struct {
 
 // renderFrame writes a single frame's header, column headers, and rows to w.
 func renderFrame(w io.Writer, refID string, frame Frame, maxWidth int) error {
-	header := "# " + refID
+	header := "# " + termsafe.Cell(refID)
 	if frame.Schema.Name != "" {
-		header += " " + frame.Schema.Name
+		header += " " + termsafe.Cell(frame.Schema.Name)
 	}
 
 	if _, err := fmt.Fprintln(w, header); err != nil {
@@ -102,7 +109,7 @@ func renderFrame(w io.Writer, refID string, frame Frame, maxWidth int) error {
 	for row := range rows {
 		cells := make([]string, len(frame.Schema.Fields))
 		for col, field := range frame.Schema.Fields {
-			cells[col] = truncate(formatCell(frame.Cell(col, row), field.Type), maxWidth)
+			cells[col] = truncate(termsafe.Cell(formatCell(frame.Cell(col, row), field.Type)), maxWidth)
 		}
 
 		if _, err := fmt.Fprintln(w, strings.Join(cells, "\t")); err != nil {
@@ -116,8 +123,9 @@ func renderFrame(w io.Writer, refID string, frame Frame, maxWidth int) error {
 // columnHeader renders a field's header cell: its name, plus any labels
 // appended compactly and sorted by key, e.g. `value {instance="…", job="…"}`.
 func columnHeader(field FieldSchema) string {
+	name := termsafe.Cell(field.Name)
 	if len(field.Labels) == 0 {
-		return field.Name
+		return name
 	}
 
 	keys := make([]string, 0, len(field.Labels))
@@ -129,10 +137,10 @@ func columnHeader(field FieldSchema) string {
 
 	pairs := make([]string, len(keys))
 	for i, k := range keys {
-		pairs[i] = fmt.Sprintf("%s=%q", k, field.Labels[k])
+		pairs[i] = fmt.Sprintf("%s=%q", termsafe.Cell(k), termsafe.Cell(field.Labels[k]))
 	}
 
-	return fmt.Sprintf("%s {%s}", field.Name, strings.Join(pairs, ", "))
+	return fmt.Sprintf("%s {%s}", name, strings.Join(pairs, ", "))
 }
 
 // formatCell renders a single cell's raw JSON value as plain text according
@@ -172,7 +180,9 @@ func formatTimeCell(raw json.RawMessage, trimmed string) string {
 }
 
 // truncate shortens s to at most maxWidth runes, appending an ellipsis when
-// truncated. maxWidth is always > 0 here: RenderTable clamps
+// truncated. s must already be sanitized (termsafe.Cell): the width is measured
+// on what the terminal will show, so an escape sequence never counts towards it
+// and truncation can never cut one in half. maxWidth is always > 0 here: RenderTable clamps
 // RenderOptions.MaxCellWidth to defaultMaxCellWidth before calling renderFrame,
 // which is truncate's only caller.
 func truncate(s string, maxWidth int) string {

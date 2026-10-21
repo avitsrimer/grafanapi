@@ -8,11 +8,13 @@ import (
 
 	"github.com/grafana/grafana-openapi-client-go/models"
 	"github.com/grafana/grafanapi/internal/format"
+	"github.com/grafana/grafanapi/internal/termsafe"
 )
 
 // tableCodec implements format.Codec for the "table" output format: it type-asserts the decoded
 // models.DataSourceList and renders it as NAME/UID/TYPE/DEFAULT columns. Mirrors
-// cmd/grafanapi/explore/table.go's tableCodec.
+// cmd/grafanapi/explore/table.go's tableCodec. Name, UID and Type are server-controlled, so each
+// goes through termsafe.Cell; the json and yaml codecs keep the raw values.
 type tableCodec struct{}
 
 func (c *tableCodec) Format() format.Format {
@@ -29,7 +31,7 @@ func (c *tableCodec) Encode(output io.Writer, input any) error {
 
 	fmt.Fprintf(out, "NAME\tUID\tTYPE\tDEFAULT\n")
 	for _, ds := range items {
-		fmt.Fprintf(out, "%s\t%s\t%s\t%t\n", ds.Name, ds.UID, ds.Type, ds.IsDefault)
+		fmt.Fprintf(out, "%s\t%s\t%s\t%t\n", termsafe.Cell(ds.Name), termsafe.Cell(ds.UID), termsafe.Cell(ds.Type), ds.IsDefault)
 	}
 
 	return out.Flush()
