@@ -20,6 +20,15 @@ Files under rules/ that this pull did not produce are removed, so a group delete
 not resurrected by the next push. With --folder-uid that pruning is restricted to the named
 folders, leaving a partial bundle's other folders untouched.
 
+With --rule-uid, only the rule group holding each named rule is pulled, and its file holds the
+WHOLE group: the file is replaced with the group as Grafana holds it now, so a local edit to a
+named rule is discarded - commit or push it first. A file that differs from Grafana in other rules
+(local edits, or changes made in Grafana since the last pull) is refused unless --overwrite, which
+discards those edits. A file for the group in the other format (-o), or another group's file whose
+name clashes, is refused. Editing a sibling rule there is not pushed by push --rule-uid. Contact
+points and policies are not pulled, no other file is written or removed (nothing is pruned), and
+an unknown uid stops the pull before anything is written.
+
 Secure contact-point settings arrive as "[REDACTED]" and must be left that way: pushing the
 placeholder back keeps the stored secret, while replacing it sets a new one.
 
@@ -38,6 +47,8 @@ grafanapi alerts pull [flags]
 	grafanapi alerts pull -p ./alerting -o json
 
 	grafanapi alerts pull --folder-uid folder-uid-1 --folder-uid folder-uid-2
+
+	grafanapi alerts pull --rule-uid rule-uid-1
 ```
 
 ### Options
@@ -47,7 +58,9 @@ grafanapi alerts pull [flags]
   -h, --help                     help for pull
       --max-concurrent int       Maximum number of concurrent operations (default 10)
   -o, --output string            Output format. One of: json, yaml (default "yaml")
+      --overwrite                With --rule-uid, replace a group file even if it differs from Grafana in rules you did not name (those local edits are discarded)
   -p, --path string              Path on disk in which the alerting bundle will be written (default "./alerting")
+      --rule-uid stringArray     Only pull the rule group holding this rule, matched against its UID (repeatable). The group's file is replaced with the group as Grafana holds it now, including any local edit to the named rule; contact points and the notification policy tree are not pulled, and no other file is written or removed
 ```
 
 ### Options inherited from parent commands

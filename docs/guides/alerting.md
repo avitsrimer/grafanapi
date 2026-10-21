@@ -10,9 +10,13 @@ environments.
 ```shell
 grafanapi alerts rules list [flags]
 grafanapi alerts contact-points list [flags]
+grafanapi alerts rules get UID [-o yaml|json]
 
 grafanapi alerts pull [-p ./alerting] [--folder-uid UID]... [-o yaml|json]
 grafanapi alerts push [-p ./alerting] [--dry-run] [--ui-editable] [--on-error ignore|fail|abort]
+
+grafanapi alerts pull --rule-uid UID... [--overwrite] [-p ./alerting] [-o yaml|json]
+grafanapi alerts push --rule-uid UID... [--dry-run] [-p ./alerting]
 
 grafanapi alerts rules pause  UID [UID...] [--dry-run]
 grafanapi alerts rules resume UID [UID...] [--dry-run]
@@ -26,9 +30,10 @@ Every command that changes Grafana takes `--dry-run`. Run it first.
 | Command                        | Role needed | Notes                                                |
 | ------------------------------ | ----------- | ---------------------------------------------------- |
 | `alerts rules list`            | Viewer      | rules in folders you cannot read are filtered out server-side |
+| `alerts rules get`             | Viewer      | one rule's full definition and state                 |
 | `alerts contact-points list`   | Viewer      | contact points are org-wide, so it is all or nothing |
 | `alerts pull`                  | Viewer      | writes only to disk                                  |
-| `alerts push`                  | **Editor**  | creates and updates rule groups, contact points, the policy tree |
+| `alerts push`                  | **Editor**  | creates and updates rule groups, contact points, the policy tree; with `--rule-uid`, rewrites the named rules' groups |
 | `alerts rules pause`/`resume`  | **Editor**  | rewrites the rule's whole group                      |
 | `alerts rules delete`          | **Editor**  | deletes the named rules                              |
 
@@ -417,6 +422,10 @@ directory is ever removed.
 path) and is repeatable; a UID no folder carries is an error. Contact points and the policy tree
 are org-wide and are pulled whatever it is set to.
 
+`alerts pull --rule-uid` is the exception to all of this: it **prunes nothing and removes no
+file**, and writes neither `contact-points` nor `policies`. It writes only the group files holding
+the named rules — see [Editing a single rule](#editing-a-single-rule).
+
 `alerts pull` also takes `--max-concurrent` (default 10), which bounds the rule-group fetches the
 same way it bounds a push's writes.
 
@@ -477,6 +486,9 @@ would hide the rest of the plan.
     Grafana replaces a rule group with exactly what the push sends, so removing a rule from the
     file removes it from Grafana. The dry run prints that as the `- old-rule (rule-uid-3)` line
     above — the one line to read carefully before applying.
+
+To change one rule without editing the group file by hand and re-reading the whole plan, see
+[Editing a single rule](#editing-a-single-rule).
 
 Run `alerts pull` again after a push that **added** a rule, before editing the bundle further.
 Rules are matched by UID, and a rule you typed into the file by hand has none until Grafana assigns
@@ -682,8 +694,108 @@ There is no `--force`: every rule these commands touch is named on the command l
 | Exit | Meaning |
 | ---- | ------- |
 | 0 | everything succeeded (also the whole of a `--dry-run`, and of a push run with `--on-error ignore`) |
-| 1 | something was refused or not found: a `403`, a validation error, an unknown rule UID, a missing or unreadable folder, foreign provenance |
+| 1 | something was refused or not found: a `403`, a validation error, an unknown rule UID (or one the bundle does not hold), a missing or unreadable folder, foreign provenance |
 | 2 | the session cookie is stale or unauthorized — see [Stale sessions](#stale-sessions) |
+
+## Editing a single rule
+
+Changing one rule's fields — a threshold inside a query, an annotation, the `for` duration — does
+not need a whole-bundle pull. Four commands cover it:
+
+```shell
+grafanapi alerts rules get rule-uid-1                         # read the rule, queries included
+grafanapi alerts pull --rule-uid rule-uid-1                   # write its group file
+# edit rules/folder-uid-1/probe-group.yaml
+grafanapi alerts push --rule-uid rule-uid-1 --dry-run         # review
+grafanapi alerts push --rule-uid rule-uid-1                   # apply
+```
+
+`alerts rules get UID` prints two keys: `rule`, the same summary `rules list` shows (state
+included), and `definition`, the rule as a group file holds it, so the queries and thresholds that
+`rules list -o json` leaves out are there. It needs the Viewer role, prints yaml by default (`-o
+json` is the other format), and fails with "Alert rule not found" for an unknown UID. Like an
+unfiltered `rules list`, a failure of the state endpoint is not fatal: it warns on stderr and
+reports the state as `unavailable`.
+
+`pull --rule-uid` is repeatable. It fetches the group holding each named rule — one lookup per UID,
+then one request per distinct group — and writes **only** those group files:
+
+```
+✔ 1 rule group(s) written to ./alerting; contact points and policies were not pulled
+```
+
+The plan of a rule-scoped push is one `~` line per named rule:
+
+```
+Update     RuleGroup     folder-uid-1/probe-group  ~ probe-rule (rule-uid-1)
+0 to create, 1 to update, 0 unchanged
+```
+
+!!! note "The file holds the whole group; only the named rule is pushed"
+
+    A pulled group file holds every rule of the group, so a plain `alerts push` of it is as safe as
+    after any other pull. `push --rule-uid` sends the named rules from the file and takes
+    **everything else from Grafana at push time**: the group's other rules, its interval and the
+    order of its rules. An edit to a sibling rule, the interval or the order in the file is
+    ignored, and a warning on stderr says how many such differences were left out (`alerts push
+    --dry-run` without `--rule-uid` lists them). A sibling added or deleted in Grafana since your
+    pull is kept as Grafana has it, not reverted or resurrected.
+
+    The command never creates a rule: a rule must already exist in Grafana. It also refuses a rule
+    whose group in the file differs from the group Grafana holds it in, because moving a rule
+    between groups is not something it does and would otherwise be silently ignored — use a
+    whole-group push for that.
+
+!!! warning "The named rule is sent exactly as the file holds it, every field"
+
+    Edits made in Grafana to that rule since your pull — an annotation, a label, the `for`
+    duration — are reverted by the push, and the `~` line does not say which fields changed. Run
+    `pull --rule-uid` immediately before editing, not on Monday for a push on Wednesday.
+
+    Grafana still has no optimistic concurrency ([the last writer wins](#scope)): the rule is read,
+    its group is read, its folder is checked and the group is written, and that run is the window
+    in which a concurrent edit by someone else — including another `push --rule-uid` for a
+    different rule of the same group — can be lost. A field the client's model does not know
+    (`metadata.editor_settings`) is reset on **every** rule of the group, the siblings included,
+    exactly as `rules pause` already does.
+
+### What `pull --rule-uid` does to an existing file
+
+- The group's file is **replaced** with the group as Grafana holds it now. A local, unpushed edit
+  to the named rule is discarded — push it or copy it aside first.
+- If the file differs from Grafana in rules you did **not** name — local edits to a sibling, or a
+  change made in Grafana since the last pull — the pull is refused and nothing is written.
+  `--overwrite` discards those differences and writes anyway.
+- A file for the same group in the other format (`-o json` against a bundle pulled as yaml), or a
+  different group whose file name folds to the same path, is refused whatever `--overwrite` says:
+  replacing it could destroy local edits, and keeping both would make every later push fail.
+- A file that cannot be read or validated is refused, naming it, and so is a folder directory that
+  is a symlink.
+- Every check runs before the first write, so a refusal leaves the directory as it was.
+
+A rule that was **moved or renamed** into another group in Grafana is pulled into the new group's
+file, and the old group file still declares its UID. The next push is refused, naming both files,
+because a UID can only live in one place. Delete the old group file, or run a full `alerts pull`.
+
+### Things to know
+
+- **The whole bundle is still read and validated.** `push --rule-uid` ignores the contact points
+  and policies, but a malformed `contact-points.yaml`, a duplicate UID in another file or any other
+  structural error in the bundle blocks it, before any request.
+- **An unknown UID, or one the bundle does not hold, stops the command before anything is
+  written.** This holds for the pull and for the push, and `--on-error` does not apply to it:
+  unlike `rules pause`, which records an unknown UID and carries on, a push that silently skipped a
+  rule you named would do something other than what you asked.
+- **Provenance still applies**: a group another provisioner owns, or whose rules disagree about
+  provenance, is refused as on a whole push, and `--dry-run` prints it as a `✘ would fail:` line.
+- `--rule-uid` and `--folder-uid` cannot be combined on a pull.
+- The messages you may meet:
+
+```
+alerts: rule rule-uid-9 not found
+alerts: push rule rule-uid-1: not in the bundle; run alerts pull --rule-uid rule-uid-1 first
+alerts: push rule rule-uid-1: Grafana holds it in rule group folder-uid-1/probe-group, the bundle in folder-uid-2/other-group; moving a rule between groups needs a whole-group push (alerts push without --rule-uid)
+```
 
 ## Stale sessions
 
@@ -714,7 +826,9 @@ Within what it does cover, five limits are worth knowing before you rely on it:
   rule by removing it from its group file (which *is* a deletion, see
   [A rule group is written whole](#a-rule-group-is-written-whole)), or a rule group in the Grafana
   UI.
-- **No concurrency control.** The last writer wins, always.
+- **No concurrency control.** The last writer wins, always. That includes `push --rule-uid`: it
+  fetches the group fresh and sends it back whole, so the window is the run itself (see
+  [Editing a single rule](#editing-a-single-rule)).
 - **Nothing org-admin.** No Alertmanager reset, no decrypted export, no contact-point deletion, no
   data-source or mute-timing management.
 - **Objects another provisioner owns are refused**, not overwritten — an instance managed by file
@@ -726,4 +840,5 @@ Within what it does cover, five limits are worth knowing before you rely on it:
   default on the objects you push. Values *inside* a known field are not affected: a
   `noDataState: KeepLast` or a contact point of a type this client predates round-trips unchanged,
   because the bundle is checked for structure, not against the generated enums. Check the Grafana
-  UI after the first push of a rule that relies on such a field.
+  UI after the first push of a rule that relies on such a field. A rule-scoped push resets it on
+  every rule of the group, not only the named one.

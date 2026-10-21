@@ -73,3 +73,10 @@ func validationMessage(err error) (string, bool) {
 
 	return payload.Message, true
 }
+
+// ruleNotFoundError is the one source of "alerts: rule <uid> not found": every path that looks a
+// rule up by uid (the rule operations, pull and push by rule, get) renders an unknown uid with
+// it, wrapping ErrRuleNotFound so cmd/grafanapi/fail can match it.
+func ruleNotFoundError(uid string) error {
+	return fmt.Errorf("alerts: rule %s %w", uid, ErrRuleNotFound)
+}

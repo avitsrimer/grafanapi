@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/grafana/grafanapi/cmd/grafanapi/alerts"
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/cmd/grafanapi/fail"
+	intalerts "github.com/grafana/grafanapi/internal/alerts"
 	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -486,4 +488,279 @@ func Test_PullCommand_loadConfigFailure(t *testing.T) {
 	assert.Contains(t, result.Err.Error(), "/nonexistent/path/config.yaml")
 	assert.Nil(t, fail.ErrorToDetailedError(result.Err).ExitCode, "a config error must not claim the auth exit code")
 	assert.Empty(t, bundleFiles(t, dir), "no bundle may be written when the config never loaded")
+}
+
+// ruleScopeGroup is a rule group holding two rules, so a rule-scoped pull has a sibling to leave
+// alone: rule-uid-1 is the one the tests name, rule-uid-2 the one they edit locally.
+func ruleScopeGroup(title string) string {
+	rule := func(uid, name string) string {
+		return `{"uid":"` + uid + `","title":"` + name + `","folderUID":"folder-uid-1","ruleGroup":"` + title + `",
+		  "condition":"C","for":"1m","execErrState":"Error","noDataState":"NoData","orgID":1,
+		  "data":[{"refId":"A","datasourceUid":"ds-uid-1","model":{"refId":"A"}}]}`
+	}
+
+	return `{"folderUid":"folder-uid-1","title":"` + title + `","interval":60,"rules":[` +
+		rule("rule-uid-1", "first") + `,` + rule("rule-uid-2", "second") + `]}`
+}
+
+// ruleScopeRoutes serves the two GETs a rule-scoped pull makes, plus the whole-instance routes of
+// a full pull so a test can seed a bundle first. A request to contact points or policies during
+// the scoped pull is what the tests assert never happens.
+func ruleScopeRoutes(group string) map[string]pullStub {
+	routes := pullRoutes()
+	routes[groupPath("folder-uid-1", group)] = okStub(ruleScopeGroup(group))
+	routes[opRulePath("rule-uid-1")] = okStub(
+		`{"uid":"rule-uid-1","title":"first","folderUID":"folder-uid-1","ruleGroup":"` + group + `"}`)
+	routes[alertRulesPath] = okStub(`[
+	  {"uid":"rule-uid-1","title":"first","folderUID":"folder-uid-1","ruleGroup":"` + group + `"},
+	  {"uid":"rule-uid-2","title":"second","folderUID":"folder-uid-1","ruleGroup":"` + group + `"},
+	  {"uid":"rule-uid-3","title":"third","folderUID":"folder-uid-2","ruleGroup":"group-b"}
+	]`)
+
+	return routes
+}
+
+// reset forgets the requests seen so far, so a test can seed a bundle with a full pull and then
+// assert on the requests of the command under test alone.
+func (f *pullFixture) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.requested = nil
+}
+
+// requestedPaths returns a copy of every path requested since the last reset.
+func (f *pullFixture) requestedPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.requested)
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	return string(raw)
+}
+
+// seedRuleScopeBundle runs a full pull against group-a holding two rules, leaving a bundle with
+// contact points, policies and two group files, and returns the fixture, config and directory.
+func seedRuleScopeBundle(t *testing.T) (*pullFixture, string, string) {
+	t.Helper()
+
+	fixture := newPullFixture(t, ruleScopeRoutes("group-a"))
+	configFile := newTestConfig(t, fixture.Server)
+	dir := t.TempDir()
+
+	require.NoError(t, runPull(t, configFile, dir).Err)
+	fixture.reset()
+
+	return fixture, configFile, dir
+}
+
+// Test_PullCommand_ruleUID pins the happy path: the one group file is rewritten whole, the other
+// files stay byte-identical, only the rule and its group are requested, and the summary says that
+// contact points and policies were not pulled.
+func Test_PullCommand_ruleUID(t *testing.T) {
+	fixture, configFile, dir := seedRuleScopeBundle(t)
+
+	groupFile := filepath.Join(dir, "rules", "folder-uid-1", "group-a.yaml")
+	want := readFile(t, groupFile)
+	others := map[string]string{}
+
+	for _, rel := range []string{"contact-points.yaml", "policies.yaml", "rules/folder-uid-2/group-b.yaml"} {
+		others[rel] = readFile(t, filepath.Join(dir, rel))
+	}
+
+	// A local edit to the NAMED rule is discarded by design: the file is replaced with Grafana's.
+	edited := strings.Replace(want, "first", "edited-locally", 1)
+	require.NotEqual(t, want, edited)
+	require.NoError(t, os.WriteFile(groupFile, []byte(edited), 0o600))
+
+	result := runPull(t, configFile, dir, "--rule-uid", "rule-uid-1")
+	require.NoError(t, result.Err)
+
+	assert.Equal(t, want, readFile(t, groupFile), "the named rule is replaced with Grafana's version")
+	assert.Contains(t, want, "rule-uid-2", "the file holds the whole group")
+
+	for rel, content := range others {
+		assert.Equal(t, content, readFile(t, filepath.Join(dir, rel)), rel)
+	}
+
+	assert.Contains(t, result.Stdout, "1 rule group(s) written to "+dir+"; contact points and policies were not pulled")
+	assert.Equal(t, []string{opRulePath("rule-uid-1"), groupPath("folder-uid-1", "group-a")}, fixture.requestedPaths(),
+		"no contact points, no policies, no rule listing")
+}
+
+// Test_PullCommand_ruleUIDJSONIntoEmptyBundle pins that -o still picks the file format when no file
+// exists for the group yet.
+func Test_PullCommand_ruleUIDJSONIntoEmptyBundle(t *testing.T) {
+	fixture := newPullFixture(t, ruleScopeRoutes("group-a"))
+	configFile := newTestConfig(t, fixture.Server)
+	dir := t.TempDir()
+
+	result := runPull(t, configFile, dir, "--rule-uid", "rule-uid-1", "-o", "json")
+	require.NoError(t, result.Err)
+
+	assert.Equal(t, []string{"rules/folder-uid-1/group-a.json"}, bundleFiles(t, dir))
+}
+
+// Test_PullCommand_ruleUIDInvalidFlags pins the pre-network refusals: each one fails before a
+// config load, so no request is recorded.
+func Test_PullCommand_ruleUIDInvalidFlags(t *testing.T) {
+	cases := map[string]struct {
+		args []string
+		want string
+	}{
+		"with folder-uid": {
+			args: []string{"--rule-uid", "x", "--folder-uid", "y"},
+			want: "--rule-uid and --folder-uid cannot be combined",
+		},
+		"empty uid":                {args: []string{"--rule-uid", ""}, want: "--rule-uid must not be empty"},
+		"blank uid":                {args: []string{"--rule-uid", " "}, want: "--rule-uid must not be empty"},
+		"overwrite without a rule": {args: []string{"--overwrite"}, want: "--overwrite only applies with --rule-uid"},
+	}
+
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			fixture := newPullFixture(t, ruleScopeRoutes("group-a"))
+			configFile := newTestConfig(t, fixture.Server)
+			dir := t.TempDir()
+
+			result := runPull(t, configFile, dir, testCase.args...)
+			require.Error(t, result.Err)
+			assert.Contains(t, result.Err.Error(), testCase.want)
+			assert.Empty(t, fixture.requestedPaths())
+			assert.Empty(t, bundleFiles(t, dir))
+		})
+	}
+}
+
+// Test_PullCommand_ruleUIDRefusesTheOtherFormatTwin pins that a file for the group in another
+// format is refused, nothing is written or removed, and the bundle still reads back.
+func Test_PullCommand_ruleUIDRefusesTheOtherFormatTwin(t *testing.T) {
+	_, configFile, dir := seedRuleScopeBundle(t)
+	before := bundleFiles(t, dir)
+
+	result := runPull(t, configFile, dir, "--rule-uid", "rule-uid-1", "-o", "json", "--overwrite")
+	require.Error(t, result.Err)
+	assert.Contains(t, result.Err.Error(), "group-a.yaml")
+	assert.Contains(t, result.Err.Error(), "-o")
+
+	assert.Equal(t, before, bundleFiles(t, dir), "nothing is written or removed")
+
+	_, err := intalerts.ReadBundle(dir)
+	require.NoError(t, err, "the bundle is not wedged")
+}
+
+// Test_PullCommand_ruleUIDSiblingEdit pins the data-loss guard: a file whose other rules differ
+// from Grafana is refused (byte-identical afterwards), and --overwrite replaces it.
+func Test_PullCommand_ruleUIDSiblingEdit(t *testing.T) {
+	_, configFile, dir := seedRuleScopeBundle(t)
+
+	groupFile := filepath.Join(dir, "rules", "folder-uid-1", "group-a.yaml")
+	remote := readFile(t, groupFile)
+	tampered := strings.Replace(remote, "second", "tampered", 1)
+	require.NotEqual(t, remote, tampered)
+	require.NoError(t, os.WriteFile(groupFile, []byte(tampered), 0o600))
+
+	result := runPull(t, configFile, dir, "--rule-uid", "rule-uid-1")
+	require.Error(t, result.Err)
+	assert.Contains(t, result.Err.Error(), "group-a.yaml")
+	assert.Contains(t, result.Err.Error(), "--overwrite")
+	assert.Nil(t, fail.ErrorToDetailedError(result.Err).ExitCode)
+	assert.Equal(t, tampered, readFile(t, groupFile), "a refused pull leaves the file byte-identical")
+
+	result = runPull(t, configFile, dir, "--rule-uid", "rule-uid-1", "--overwrite")
+	require.NoError(t, result.Err)
+	assert.Equal(t, remote, readFile(t, groupFile), "the sibling equals Grafana's again")
+}
+
+// Test_PullCommand_ruleUIDMovedRule pins the fail-closed behaviour for a rule that moved group:
+// the new group's file is written, the old file is left, and the bundle then refuses to read,
+// naming both files, until the user removes the old one.
+func Test_PullCommand_ruleUIDMovedRule(t *testing.T) {
+	fixture := newPullFixture(t, ruleScopeRoutes("probe-group"))
+	configFile := newTestConfig(t, fixture.Server)
+	dir := t.TempDir()
+
+	old := strings.ReplaceAll(ruleScopeGroupYAML(), "probe-group", "old-group")
+	oldFile := filepath.Join(dir, "rules", "folder-uid-1", "old-group.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(oldFile), 0o750))
+	require.NoError(t, os.WriteFile(oldFile, []byte(old), 0o600))
+
+	result := runPull(t, configFile, dir, "--rule-uid", "rule-uid-1")
+	require.NoError(t, result.Err)
+
+	assert.Equal(t, []string{
+		"rules/folder-uid-1/old-group.yaml",
+		"rules/folder-uid-1/probe-group.yaml",
+	}, bundleFiles(t, dir))
+	assert.Equal(t, old, readFile(t, oldFile), "the old file is left alone")
+
+	_, err := intalerts.ReadBundle(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "old-group.yaml")
+	assert.Contains(t, err.Error(), "probe-group.yaml")
+}
+
+// ruleScopeGroupYAML is a one-rule group file for rule-uid-1 in "probe-group".
+func ruleScopeGroupYAML() string {
+	return `folderUid: folder-uid-1
+title: probe-group
+interval: 60
+rules:
+  - uid: rule-uid-1
+    title: first
+    condition: C
+    for: 1m
+    execErrState: Error
+    noDataState: NoData
+    data:
+      - refId: A
+        datasourceUid: ds-uid-1
+        model:
+          refId: A
+`
+}
+
+// Test_PullCommand_ruleUIDUnknown pins that an unknown uid renders as "Alert rule not found" and
+// stops the pull before anything is written.
+func Test_PullCommand_ruleUIDUnknown(t *testing.T) {
+	routes := ruleScopeRoutes("group-a")
+	routes[opRulePath("rule-uid-gone")] = pullStub{status: http.StatusNotFound, body: `{"message":"not found"}`}
+
+	fixture := newPullFixture(t, routes)
+	configFile := newTestConfig(t, fixture.Server)
+	dir := t.TempDir()
+
+	result := runPull(t, configFile, dir, "--rule-uid", "rule-uid-gone")
+	require.Error(t, result.Err)
+
+	detailed := fail.ErrorToDetailedError(result.Err)
+	assert.Equal(t, "Alert rule not found", detailed.Summary)
+	assert.Nil(t, detailed.ExitCode)
+	assert.Empty(t, bundleFiles(t, dir))
+}
+
+// Test_PullCommand_ruleUIDApiError401 pins the stale-session exit code for the rule GET.
+func Test_PullCommand_ruleUIDApiError401(t *testing.T) {
+	routes := ruleScopeRoutes("group-a")
+	routes[opRulePath("rule-uid-1")] = pullStub{status: http.StatusUnauthorized, body: `{"message":"Unauthorized"}`}
+
+	fixture := newPullFixture(t, routes)
+	configFile := newTestConfig(t, fixture.Server)
+	dir := t.TempDir()
+
+	result := runPull(t, configFile, dir, "--rule-uid", "rule-uid-1")
+	require.Error(t, result.Err)
+
+	detailed := fail.ErrorToDetailedError(result.Err)
+	require.NotNil(t, detailed.ExitCode)
+	assert.Equal(t, 2, *detailed.ExitCode)
+	assert.Contains(t, detailed.Summary, "stale or unauthorized")
+	assert.Empty(t, bundleFiles(t, dir))
 }

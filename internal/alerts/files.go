@@ -90,7 +90,8 @@ var bundleExtensions = []string{".yaml", ".yml", ".json"}
 // group deleted in Grafana is not resurrected by the next push. opts.KeepFolders restricts that
 // pruning to the named folder UIDs. The contact-point and policy files are always rewritten, in
 // the requested format only - a file left behind by a pull in the other format is removed rather
-// than left to contradict it.
+// than left to contradict it. A pull that selects rules rather than the whole instance must not
+// do any of that pruning or removal, and goes through WriteRuleGroups instead.
 func WriteBundle(dir string, bundle Bundle, opts WriteOptions) error {
 	codec, ok := format.Codecs()[opts.Format]
 	if !ok {
@@ -111,6 +112,52 @@ func WriteBundle(dir string, bundle Bundle, opts WriteOptions) error {
 	}
 
 	return writeTopLevelFile(dir, codec, policiesBaseName, bundle.Policies, stripRouteFields)
+}
+
+// WriteRuleGroups writes one file per rule group and nothing else: no contact-point or policy file
+// is written or removed, nothing under rules/ is pruned, and a file for another group is never
+// touched. It is the write half of a rule-selecting pull, which fetched only the groups holding
+// the named rules and therefore knows nothing about the rest of the bundle - going through
+// WriteBundle would delete every file the pull did not produce.
+//
+// Every group is checked before any file is written, so a refusal leaves the directory untouched.
+// For each group, every file already there under the same folded folder and title (see
+// foldFileName) is a candidate, and it is refused - never removed - when:
+//
+//   - it cannot be decoded or validated, since its identity cannot be checked;
+//   - it holds a different rule group, which APFS would let the write replace;
+//   - it carries another extension than the one being written, since removing it could destroy
+//     local edits held only there and leaving it would make every later ReadBundle fail on two
+//     files for one group;
+//   - it differs from the fetched group outside opts.RuleUIDs, unless opts.Overwrite is set: the
+//     difference may be unpushed local work or a change made in Grafana since the last pull, and
+//     this function cannot tell which. Overwrite lifts only this last refusal.
+//
+// The named rules themselves are always replaced by the fetched version.
+func WriteRuleGroups(dir string, groups []*models.AlertRuleGroup, opts RuleGroupWriteOptions) error {
+	codec, ok := format.Codecs()[opts.Format]
+	if !ok {
+		return fmt.Errorf("alerts: write bundle: unsupported format %q", opts.Format)
+	}
+
+	named := make(map[string]struct{}, len(opts.RuleUIDs))
+	for _, uid := range opts.RuleUIDs {
+		named[uid] = struct{}{}
+	}
+
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+
+		if err := checkRuleGroupTargets(dir, codec, group, named, opts.Overwrite); err != nil {
+			return err
+		}
+	}
+
+	_, err := writeGroupFiles(dir, codec, groups)
+
+	return err
 }
 
 // ReadBundle reads the bundle laid out under dir, in whichever of the two formats each file
@@ -184,6 +231,19 @@ type WriteOptions struct {
 	KeepFolders []string
 }
 
+// RuleGroupWriteOptions controls one WriteRuleGroups call.
+type RuleGroupWriteOptions struct {
+	// Format is the file format every group file is encoded in. A format no codec answers to is an
+	// error rather than a fallback.
+	Format format.Format
+	// RuleUIDs are the rules the caller pulled: the only rules an existing file for the same group
+	// may differ from the fetched group in without the write being refused.
+	RuleUIDs []string
+	// Overwrite replaces an existing file that differs from the fetched group outside RuleUIDs. It
+	// does not lift the refusals about another extension, another group or an unreadable file.
+	Overwrite bool
+}
+
 // bundleFilePath returns the path of the single <dir>/<base>.<ext> file that exists, or "" when
 // none does. Two files differing only in extension are an error rather than a silent choice: they
 // are two bundles disagreeing about the same object, and picking one would push the other's
@@ -207,6 +267,67 @@ func bundleFilePath(dir, base string) (string, error) {
 	}
 
 	return found, nil
+}
+
+// checkRuleGroupTargets decides whether WriteRuleGroups may write group, by examining every file
+// that already stands for it (see ruleGroupFiles). It reads and writes nothing else.
+func checkRuleGroupTargets(
+	dir string, codec format.Codec, group *models.AlertRuleGroup, named map[string]struct{}, overwrite bool,
+) error {
+	target := groupFilePath(dir, codec, group)
+
+	candidates, err := ruleGroupFiles(dir, group)
+	if err != nil {
+		return err
+	}
+
+	for _, path := range candidates {
+		existing := &models.AlertRuleGroup{}
+
+		err := decodeBundleFile(path, existing)
+		if err == nil {
+			err = validateGroup(path, existing)
+		}
+
+		if err != nil {
+			return fmt.Errorf(
+				"alerts: write bundle: %s cannot be read (%w); fix or remove it before pulling rule group %s",
+				path, err, groupID(group),
+			)
+		}
+
+		if groupID(existing) != groupID(group) {
+			return fmt.Errorf(
+				"alerts: write bundle: %s holds rule group %q (folder %q), which maps to the same file as "+
+					"rule group %q (folder %q); rename one - file names are compared case-insensitively",
+				path, existing.Title, existing.FolderUID, group.Title, group.FolderUID,
+			)
+		}
+
+		if !strings.EqualFold(filepath.Ext(path), filepath.Ext(target)) {
+			return fmt.Errorf(
+				"alerts: write bundle: %s already holds rule group %s; writing %s would leave two files for one "+
+					"group - re-run with the -o format that matches it, or remove or rename it first",
+				path, groupID(group), target,
+			)
+		}
+
+		lines, err := otherDifferences(existing, group, named)
+		if err != nil {
+			return fmt.Errorf("alerts: write bundle: %s: %w", path, err)
+		}
+
+		if len(lines) > 0 && !overwrite {
+			return fmt.Errorf(
+				"alerts: write bundle: %s differs from Grafana outside the named rule(s) (%d difference(s), "+
+					"first: %s); push or discard those edits first (alerts push --dry-run shows them), "+
+					"or pass --overwrite to replace the file",
+				path, len(lines), lines[0],
+			)
+		}
+	}
+
+	return nil
 }
 
 // compareGroups orders two rule groups by folder UID then title, which is the order a bundle is
@@ -577,6 +698,65 @@ func readPolicyFile(dir string) (*models.Route, error) {
 	}
 
 	return policies, nil
+}
+
+// ruleGroupFiles lists the bundle files under dir that stand for group: those in a folder
+// directory and with a base name equal to the group's, both compared folded (see foldFileName)
+// because the filesystem holds `Alpha.yaml` and `alpha.yaml` as one entry. A missing rules/
+// directory or folder directory means no files; any other read failure is an error.
+//
+// An entry named like the group's folder that is not a plain directory - a symlink above all, which
+// os.ReadDir reports with IsDir() false - is refused rather than skipped: the write would go through
+// it and land where none of the checks looked, and ReadBundle does not read such a folder either.
+func ruleGroupFiles(dir string, group *models.AlertRuleGroup) ([]string, error) {
+	rulesDir := filepath.Join(dir, rulesDirName)
+
+	folders, err := os.ReadDir(rulesDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("alerts: write bundle: %s: %w", rulesDir, err)
+	}
+
+	wantFolder := foldFileName(sanitizeFileName(group.FolderUID))
+	wantBase := foldFileName(sanitizeFileName(group.Title))
+
+	var paths []string
+
+	for _, folder := range folders {
+		if foldFileName(folder.Name()) != wantFolder {
+			continue
+		}
+
+		if !folder.IsDir() {
+			return nil, fmt.Errorf(
+				"alerts: write bundle: %s is a symlink or not a directory; refusing to write rule group %s through it",
+				filepath.Join(rulesDir, folder.Name()), groupID(group),
+			)
+		}
+
+		folderDir := filepath.Join(rulesDir, folder.Name())
+
+		files, err := os.ReadDir(folderDir)
+		if err != nil {
+			return nil, fmt.Errorf("alerts: write bundle: %s: %w", folderDir, err)
+		}
+
+		for _, file := range files {
+			if file.IsDir() || !isBundleFile(file.Name()) {
+				continue
+			}
+
+			base := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
+			if foldFileName(base) == wantBase {
+				paths = append(paths, filepath.Join(folderDir, file.Name()))
+			}
+		}
+	}
+
+	return paths, nil
 }
 
 // sanitizeFileName maps a folder UID or group title onto a single path component: the separators

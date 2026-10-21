@@ -442,6 +442,18 @@ func matchContactPoint(
 	}
 }
 
+// otherDifferences describes what pushing local over remote would change in one rule group
+// *outside* the rules named in named (a set of rule uids): sibling additions, removals and edits,
+// the interval and the order the siblings stand in.
+//
+// The named rules are removed from copies of both groups before groupDetail runs, so the answer is
+// structural - no plan line is parsed or filtered, and a title crafted to look like a named rule's
+// line cannot hide a difference. Nil rules are dropped from the copies; the arguments are not
+// modified.
+func otherDifferences(local, remote *models.AlertRuleGroup, named map[string]struct{}) ([]string, error) {
+	return groupDetail(withoutRules(local, named), withoutRules(remote, named))
+}
+
 // planContactPoints plans the contact-point half of a bundle, one entry per local point.
 //
 // Uniqueness is enforced against the *resolved* remote object rather than against the local IDs,
@@ -682,4 +694,26 @@ func sharedRuleUIDs(rules, other []*models.ProvisionedAlertRule) []string {
 	}
 
 	return uids
+}
+
+// withoutRules returns a copy of group whose rules exclude every one whose uid is in uids, and
+// every nil entry. Only the rule slice is rebuilt; the rules themselves are shared, which is safe
+// because every caller only reads them.
+func withoutRules(group *models.AlertRuleGroup, uids map[string]struct{}) *models.AlertRuleGroup {
+	trimmed := *group
+	trimmed.Rules = make([]*models.ProvisionedAlertRule, 0, len(group.Rules))
+
+	for _, rule := range group.Rules {
+		if rule == nil {
+			continue
+		}
+
+		if _, named := uids[rule.UID]; named && rule.UID != "" {
+			continue
+		}
+
+		trimmed.Rules = append(trimmed.Rules, rule)
+	}
+
+	return &trimmed
 }

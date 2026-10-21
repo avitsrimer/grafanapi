@@ -751,6 +751,330 @@ func TestReadBundle_AcceptsValuesTheVendoredEnumsPredate(t *testing.T) {
 	}
 }
 
+// TestWriteRuleGroups_WritesOnlyTheGroupFile pins what separates WriteRuleGroups from WriteBundle:
+// the rest of the bundle is left exactly as it was. A write that went through WriteBundle would
+// remove the policy file (nil policies), prune other.yaml and rewrite the contact-point file.
+func TestWriteRuleGroups_WritesOnlyTheGroupFile(t *testing.T) {
+	dir := t.TempDir()
+
+	contactPoints := filepath.Join(dir, "contact-points.yaml")
+	policies := filepath.Join(dir, "policies.json")
+
+	require.NoError(t, os.WriteFile(contactPoints, []byte(testPoint("cp-uid-1", "probe-slack")), bundleFilePerm))
+	require.NoError(t, os.WriteFile(policies, []byte(`{"receiver":"grafana-default-email"}`+"\n"), bundleFilePerm))
+
+	seedRuleGroup(t, dir, format.YAML, testGroup("folder-uid-1", "other", testRule("folder-uid-1", "other", "rule-uid-9", "other rule")))
+
+	local := remoteRuleGroup()
+	local.Rules[0].IsPaused = false
+	local.Rules[0].Title = new("edited locally")
+	groupPath := seedRuleGroup(t, dir, format.YAML, local)
+
+	before := snapshotDir(t, dir)
+
+	err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
+		Format:   format.YAML,
+		RuleUIDs: []string{"rule-uid-1"},
+	})
+	require.NoError(t, err)
+
+	after := snapshotDir(t, dir)
+	for path, content := range before {
+		if path == groupPath {
+			continue
+		}
+
+		assert.Equal(t, content, after[path], "%s must be byte-identical", path)
+	}
+
+	assert.NotEqual(t, before[groupPath], after[groupPath])
+
+	bundle, err := alerts.ReadBundle(dir)
+	require.NoError(t, err)
+	require.Len(t, bundle.Groups, 2)
+
+	written := bundle.Groups[1]
+	require.Equal(t, "probe-group", written.Title)
+	assert.True(t, written.Rules[0].IsPaused, "the named rule is Grafana's version, not the local edit")
+	assert.Equal(t, "always firing", *written.Rules[0].Title)
+}
+
+func TestWriteRuleGroups_CreatesTheFileInAFreshDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "alerting")
+
+	err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
+		Format:   format.JSON,
+		RuleUIDs: []string{"rule-uid-1"},
+	})
+	require.NoError(t, err)
+
+	files := snapshotDir(t, dir)
+	require.Len(t, files, 1)
+	assert.Contains(t, files, filepath.Join(dir, "rules", "folder-uid-1", "probe-group.json"))
+}
+
+func TestWriteRuleGroups_UnsupportedFormat(t *testing.T) {
+	err := alerts.WriteRuleGroups(t.TempDir(), nil, alerts.RuleGroupWriteOptions{Format: "toml"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unsupported format "toml"`)
+}
+
+// TestWriteRuleGroups_RefusesTheOtherFormat covers the twin the command must never remove (it may
+// hold the only copy of a local edit) and never leave beside the new file (every later ReadBundle
+// would refuse two files for one group). Overwrite does not lift it.
+func TestWriteRuleGroups_RefusesTheOtherFormat(t *testing.T) {
+	for _, twinFormat := range []format.Format{format.JSON, format.YAML} {
+		for _, overwrite := range []bool{false, true} {
+			t.Run(string(twinFormat)+overwriteName(overwrite), func(t *testing.T) {
+				dir := t.TempDir()
+
+				seedRuleGroup(t, dir, format.JSON, testGroup("folder-uid-1", "other", testRule("folder-uid-1", "other", "rule-uid-9", "other rule")))
+
+				twin := seedRuleGroup(t, dir, twinFormat, remoteRuleGroup())
+				if twinFormat == format.YAML {
+					// A .yml file is a twin of a .yaml write: the extensions are compared exactly.
+					renamed := strings.TrimSuffix(twin, ".yaml") + ".yml"
+					require.NoError(t, os.Rename(twin, renamed))
+
+					twin = renamed
+				}
+
+				before := snapshotDir(t, dir)
+
+				err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
+					Format:    format.YAML,
+					RuleUIDs:  []string{"rule-uid-1"},
+					Overwrite: overwrite,
+				})
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), filepath.Base(twin))
+				assert.Contains(t, err.Error(), "-o")
+				assert.Equal(t, before, snapshotDir(t, dir), "nothing is written, removed or renamed")
+			})
+		}
+	}
+}
+
+// TestWriteRuleGroups_RefusesAFolderThatIsNotADirectory pins the fail-closed rule: a symlinked folder
+// directory must not let a write past the sibling and other-extension refusals.
+func TestWriteRuleGroups_RefusesAFolderThatIsNotADirectory(t *testing.T) {
+	edited := remoteRuleGroup()
+	edited.Rules[1].IsPaused = !edited.Rules[1].IsPaused
+
+	tests := []struct {
+		name string
+		seed func(t *testing.T, linked string)
+	}{
+		{"a sibling differs from Grafana", func(t *testing.T, linked string) {
+			t.Helper()
+
+			seedRuleGroup(t, linked, format.YAML, edited)
+		}},
+		{"the group is held in the other format", func(t *testing.T, linked string) {
+			t.Helper()
+
+			seedRuleGroup(t, linked, format.JSON, remoteRuleGroup())
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			linked, dir := t.TempDir(), t.TempDir()
+			tc.seed(t, linked)
+
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, "rules"), 0o750))
+			require.NoError(t, os.Symlink(filepath.Join(linked, "rules", "folder-uid-1"), filepath.Join(dir, "rules", "folder-uid-1")))
+
+			before := snapshotDir(t, linked)
+
+			err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
+				Format:    format.YAML,
+				RuleUIDs:  []string{"rule-uid-1"},
+				Overwrite: true,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "symlink or not a directory")
+			assert.Contains(t, err.Error(), filepath.Join(dir, "rules", "folder-uid-1"))
+			assert.Equal(t, before, snapshotDir(t, linked), "nothing is written through the link")
+		})
+	}
+}
+
+// TestWriteRuleGroups_RefusesADifferentGroupWithTheSameFileName is the data-loss case on APFS: the
+// write would replace the file of a group that is not the one being pulled.
+func TestWriteRuleGroups_RefusesADifferentGroupWithTheSameFileName(t *testing.T) {
+	tests := []struct {
+		name     string
+		seeded   string
+		pulled   string
+		contains []string
+	}{
+		{name: "title differing by case", seeded: "alpha", pulled: "Alpha", contains: []string{`"alpha"`, `"Alpha"`}},
+		{name: "sanitized separator", seeded: "a_b", pulled: "a/b", contains: []string{`"a_b"`, `"a/b"`}},
+	}
+
+	for _, test := range tests {
+		for _, overwrite := range []bool{false, true} {
+			t.Run(test.name+overwriteName(overwrite), func(t *testing.T) {
+				dir := t.TempDir()
+
+				seedRuleGroup(t, dir, format.YAML, testGroup("folder-uid-1", test.seeded, testRule("folder-uid-1", test.seeded, "rule-uid-1", "always firing")))
+
+				before := snapshotDir(t, dir)
+
+				pulled := testGroup("folder-uid-1", test.pulled, testRule("folder-uid-1", test.pulled, "rule-uid-1", "always firing"))
+
+				err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{pulled}, alerts.RuleGroupWriteOptions{
+					Format:    format.YAML,
+					RuleUIDs:  []string{"rule-uid-1"},
+					Overwrite: overwrite,
+				})
+				require.Error(t, err)
+
+				for _, want := range test.contains {
+					assert.Contains(t, err.Error(), want)
+				}
+
+				assert.Equal(t, before, snapshotDir(t, dir), "the seeded file is byte-identical")
+			})
+		}
+	}
+}
+
+func TestWriteRuleGroups_RefusesAnUnreadableFile(t *testing.T) {
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, "rules", "folder-uid-1", "probe-group.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), bundleDirPerm))
+	require.NoError(t, os.WriteFile(path, []byte("folderUid: [\n"), bundleFilePerm))
+
+	before := snapshotDir(t, dir)
+
+	err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
+		Format:    format.YAML,
+		RuleUIDs:  []string{"rule-uid-1"},
+		Overwrite: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "probe-group.yaml")
+	assert.Contains(t, err.Error(), "cannot be read")
+	assert.Equal(t, before, snapshotDir(t, dir))
+}
+
+// TestWriteRuleGroups_RefusesLocalDifferencesOutsideTheNamedRules is the safeguard for unpushed
+// work: a sibling edit in the file is invisible to a pull that names another rule, so replacing
+// the file would silently discard it.
+func TestWriteRuleGroups_RefusesLocalDifferencesOutsideTheNamedRules(t *testing.T) {
+	tests := []struct {
+		name  string
+		edit  func(group *models.AlertRuleGroup)
+		first string
+	}{
+		{
+			name:  "an edited sibling",
+			edit:  func(group *models.AlertRuleGroup) { group.Rules[1].IsPaused = false },
+			first: "~ rule two (rule-uid-2)",
+		},
+		{
+			name:  "a dropped sibling",
+			edit:  func(group *models.AlertRuleGroup) { group.Rules = append(group.Rules[:1], group.Rules[2:]...) },
+			first: "- rule two (rule-uid-2)",
+		},
+		{
+			name: "an added sibling",
+			edit: func(group *models.AlertRuleGroup) {
+				group.Rules = append(group.Rules, testRule("folder-uid-1", "probe-group", "rule-uid-9", "rule nine"))
+			},
+			first: "+ rule nine (rule-uid-9)",
+		},
+		{
+			name:  "a changed interval",
+			edit:  func(group *models.AlertRuleGroup) { group.Interval = 120 },
+			first: "~ interval 60s",
+		},
+		{
+			name:  "re-ordered siblings",
+			edit:  func(group *models.AlertRuleGroup) { group.Rules[1], group.Rules[2] = group.Rules[2], group.Rules[1] },
+			first: "~ rule order",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+
+			local := remoteRuleGroup()
+			test.edit(local)
+
+			path := seedRuleGroup(t, dir, format.YAML, local)
+			before := snapshotDir(t, dir)
+			opts := alerts.RuleGroupWriteOptions{Format: format.YAML, RuleUIDs: []string{"rule-uid-1"}}
+
+			err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, opts)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), path)
+			assert.Contains(t, err.Error(), "1 difference(s)")
+			assert.Contains(t, err.Error(), "first: "+test.first)
+			assert.Contains(t, err.Error(), "--overwrite")
+			assert.Equal(t, before, snapshotDir(t, dir), "the file is byte-identical")
+
+			opts.Overwrite = true
+			require.NoError(t, alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, opts))
+
+			bundle, err := alerts.ReadBundle(dir)
+			require.NoError(t, err)
+
+			changes, err := alerts.Plan(bundle, alerts.Bundle{Groups: []*models.AlertRuleGroup{remoteRuleGroup()}})
+			require.NoError(t, err)
+			require.Len(t, changes, 1)
+			assert.Equal(t, alerts.ActionUnchanged, changes[0].Action, "with Overwrite the file equals the fetched group")
+		})
+	}
+}
+
+func TestWriteRuleGroups_NamedRulesMayDifferLocally(t *testing.T) {
+	dir := t.TempDir()
+
+	local := remoteRuleGroup()
+	local.Rules[0].IsPaused = false
+	local.Rules[1].Title = new("edited too")
+	seedRuleGroup(t, dir, format.YAML, local)
+
+	// Not rule-uid-3: the siblings of the two named rules are equal.
+	local.Rules[2].IsPaused = true
+
+	err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
+		Format:   format.YAML,
+		RuleUIDs: []string{"rule-uid-1", "rule-uid-2"},
+	})
+	require.NoError(t, err)
+
+	bundle, err := alerts.ReadBundle(dir)
+	require.NoError(t, err)
+	require.Len(t, bundle.Groups, 1)
+	assert.True(t, bundle.Groups[0].Rules[0].IsPaused)
+	assert.Equal(t, "rule two", *bundle.Groups[0].Rules[1].Title)
+}
+
+// TestWriteRuleGroups_RefusalWritesNothing pins atomicity: every group is checked before the first
+// one is written, so a refusal on the second leaves the first group's file absent.
+func TestWriteRuleGroups_RefusalWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+
+	other := testGroup("folder-uid-2", "other", testRule("folder-uid-2", "other", "rule-uid-9", "other rule"))
+	edited := testGroup("folder-uid-2", "other", testRule("folder-uid-2", "other", "rule-uid-9", "other rule"), testRule("folder-uid-2", "other", "rule-uid-8", "sibling"))
+	seedRuleGroup(t, dir, format.YAML, edited)
+
+	before := snapshotDir(t, dir)
+
+	err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup(), other}, alerts.RuleGroupWriteOptions{
+		Format:   format.YAML,
+		RuleUIDs: []string{"rule-uid-1", "rule-uid-9"},
+	})
+	require.Error(t, err)
+	assert.Equal(t, before, snapshotDir(t, dir), "the clean group was not written either")
+}
+
 // testPoint renders one valid contact-point entry of a contact-points.yaml file, so the tests
 // above vary only the thing they are about rather than repeating every required field.
 func testPoint(uid, name string) string {
@@ -786,6 +1110,63 @@ func testRuleEntry(uid string) string {
 		"        datasourceUid: __expr__\n" +
 		"        model:\n" +
 		"          type: math\n"
+}
+
+// overwriteName suffixes a subtest name with the Overwrite setting it runs under.
+func overwriteName(overwrite bool) string {
+	if overwrite {
+		return "/overwrite"
+	}
+
+	return ""
+}
+
+// remoteRuleGroup is the group a rule-selecting pull fetched: three rules, so a test can name one
+// and have two siblings whose order and content matter.
+func remoteRuleGroup() *models.AlertRuleGroup {
+	one := testRule("folder-uid-1", "probe-group", "rule-uid-1", "always firing")
+	two := testRule("folder-uid-1", "probe-group", "rule-uid-2", "rule two")
+	three := testRule("folder-uid-1", "probe-group", "rule-uid-3", "rule three")
+
+	return testGroup("folder-uid-1", "probe-group", one, two, three)
+}
+
+// seedRuleGroup writes group into dir through WriteRuleGroups, which is only used here to produce a
+// file; it returns the file's path. The target must not exist yet.
+func seedRuleGroup(t *testing.T, dir string, f format.Format, group *models.AlertRuleGroup) string {
+	t.Helper()
+
+	require.NoError(t, alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{group}, alerts.RuleGroupWriteOptions{Format: f}))
+
+	return filepath.Join(dir, "rules", group.FolderUID, strings.ReplaceAll(group.Title, "/", "_")+"."+string(f))
+}
+
+// snapshotDir returns every file under dir with its content, so a test can assert that a refused
+// write changed nothing - not a byte, not a name.
+func snapshotDir(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+
+	var paths []string
+
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() {
+			paths = append(paths, path)
+		}
+
+		return err
+	})
+	require.NoError(t, err)
+
+	files := make(map[string][]byte, len(paths))
+
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		require.NoError(t, err)
+
+		files[path] = content
+	}
+
+	return files
 }
 
 // assertPerm checks the mode of a file or directory a bundle write created.

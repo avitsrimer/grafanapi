@@ -216,6 +216,27 @@ grafanapi follows the Cobra command pattern with eight main command groups:
      `<uid> (<title> in <group>) <outcome>` where the outcome is `paused`/`resumed`/`deleted`,
      `already paused`/`not paused`, or the same words prefixed `would be` under `--dry-run`, closed
      by `%d rule(s) %s, %d unchanged, %d error(s)`
+   - `alerts rules get UID`: `cobra.ExactArgs(1)`, `-o yaml|json` (default yaml; no table — the
+     definition is nested). Prints `alerts.RuleDetail{Rule, Definition}`: `rule` is the `rules list`
+     summary with state, `definition` is the rule through the same generic-map projection
+     `alerts pull` writes (no `id`/`updated`/`provenance`), so it reads as the rule does in a pulled
+     bundle — the gap `rules list -o json` leaves (no queries). A blank UID is refused in
+     `Validate`, before the config load. State-call failure degrades exactly as an unfiltered list
+     (stderr warning, state `unavailable`); a 401 from either call is fatal. Viewer role
+   - `alerts pull --rule-uid UID...` (repeatable `StringArrayVar`; `--overwrite`): pulls only the
+     group holding each named rule and writes it through `alerts.WriteRuleGroups`, **not**
+     `WriteBundle`. No contact points, no policies, no file removed, nothing pruned; the summary is
+     `%d rule group(s) written to %s; contact points and policies were not pulled`. `Validate`
+     refuses `--rule-uid` with `--folder-uid`, a blank uid, and `--overwrite` without `--rule-uid`,
+     all before any network call. The group file is **replaced** (a local edit to the named rule is
+     discarded) and the help says so; a file differing from Grafana in unnamed rules is refused
+     unless `--overwrite`
+   - `alerts push --rule-uid UID...` (repeatable `StringArrayVar`): pushes only the named rules,
+     each exactly as the file holds it; everything else about their groups comes from a fresh
+     fetch (see `internal/alerts/scope.go`). `Validate` refuses a blank uid. Plan table, `--dry-run`,
+     the result lines, `--on-error` and the exit-code rule are `alerts push`'s own; an unknown or
+     not-in-bundle uid is fatal before any write whatever `--on-error` says. `--ui-editable` is
+     inert (a scoped push never creates)
 
 ### Core Packages
 
@@ -250,8 +271,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   completed `explore` plan did for its own dead-session path. `keepalive.go` derives the LaunchAgent
   spec from `internal/launchd` and shells out only through the `Controller` seam — never real
   `launchctl` in tests.
-- `alerts/`: `alerts rules list|pause|resume|delete`, `alerts contact-points list`, `alerts pull`,
-  `alerts push` — thin Cobra wiring over `internal/alerts`, mirroring `datasources`/`explore`:
+- `alerts/`: `alerts rules list|get|pause|resume|delete`, `alerts contact-points list`, `alerts pull`,
+  `alerts push` (`rules_get.go` holds `rules get`; `--rule-uid` lives in `pull.go`/`push.go`) — thin Cobra wiring over `internal/alerts`, mirroring `datasources`/`explore`:
   flag binding, a fast pre-network `--state`
   check that calls the same `internal/alerts.ValidateState` `ListRules` uses (so the message and
   the accepted set have one source, while the domain function stays safe for non-Cobra callers),
@@ -431,8 +452,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   models (`models.DataSource`) round-trip correctly; only the query response is lossy.
 
 **internal/alerts/** - Unified Alerting domain logic (no Cobra) — reading (`rules.go`, `state.go`,
-`contactpoints.go`) and writing (`files.go`, `provenance.go`, `pull.go`, `diff.go`, `push.go`,
-`ruleops.go`), over two files both write paths share: `body.go` (the write-body projections) and
+`contactpoints.go`, `get.go`) and writing (`files.go`, `provenance.go`, `pull.go`, `diff.go`,
+`push.go`, `scope.go`, `ruleops.go`), over two files both write paths share: `body.go` (the write-body projections) and
 `errors.go` (the error vocabulary). The package **never imports a `cmd/` package**: like
 `remote.PushRequest`, `Push` takes a `StopOnError bool` and the cmd layer owns the `--on-error`
 mode.
@@ -526,6 +547,21 @@ mode.
   error names both groups *and* both folders and says names are compared case-insensitively.
   `golang.org/x/text/unicode/norm` was already vendored (and already `## explicit` in
   `vendor/modules.txt`), so this added no dependency
+- **`WriteRuleGroups(dir, groups, RuleGroupWriteOptions{Format, RuleUIDs, Overwrite})` is the write
+  half of a rule-selecting pull, and it is not `WriteBundle`** on purpose: `WriteBundle` prunes every
+  file under `rules/` it did not produce and `writeTopLevelFile` **removes** the contact-point and
+  policy files when the bundle holds a nil one, which is exactly what a rule pull's bundle is — so
+  routing it through there would delete the rest of the bundle. `WriteBundle` is untouched.
+  `WriteRuleGroups` writes group files via `writeGroupFiles` and nothing else, and every group is
+  checked by `checkRuleGroupTargets` **before the first write**, so a refusal leaves the directory
+  as it was. For each group, every existing file that folds (`foldFileName`) to the same folder and
+  base name is a candidate (`ruleGroupFiles`; a symlinked folder directory is refused, never
+  followed) and is **refused, never removed**, when: it cannot be decoded/validated; it holds a
+  different group (APFS would let the write replace it); it has the other extension (a twin: leaving
+  it makes every later `ReadBundle` fail on two files for one group, removing it could destroy edits
+  held only there); or it differs from the fetched group outside the named uids
+  (`otherDifferences`) — the last one is the only refusal `Overwrite` lifts. The named rules are
+  always replaced by Grafana's version
 - **Rule uids are unique across the whole bundle.** `validateGroup` refuses a uid repeated inside
   one group (the body would carry the rule twice, and `Plan` — which pairs by uid — would match
   both entries to the one remote rule and report a re-order that is really a duplicate);
@@ -585,8 +621,17 @@ mode.
   `*folders.GetFolderByUIDUnauthorized` and `cmd/grafanapi/fail`'s `errors.As` for
   `*runtime.APIError` would miss it — a stale session would exit 1 with an opaque message instead
   of exiting 2. Both the pull check and the push pre-check go through it. `MaxConcurrent <= 0`
-  falls back to 10 (`errgroup.SetLimit(0)` deadlocks)
-- `diff.go`: `Plan(local, remote Bundle) ([]Change, error)` — pure, deterministic, unit-tested.
+  falls back to 10 (`errgroup.SetLimit(0)` deadlocks). **`PullOptions.RuleUIDs`** selects the groups
+  holding named rules (one `GetAlertRule` per uid in order, first failure wins, then one group GET
+  per distinct group, no rule listing) and leaves `ContactPoints`/`Policies` **nil**; it cannot be
+  combined with `Groups`/`FolderUIDs`. An unknown uid is fatal (`ruleNotFoundError`), and
+  `requireRules` re-checks that every fetched group still holds its rule, since the rule lookup and
+  the group fetch are two requests
+- `diff.go`: `otherDifferences(local, remote, named)` is the structural "what differs outside the
+  named rules" — it removes the named uids (and nil rules) from **copies** of both groups and runs
+  `groupDetail`, so no plan line is parsed and a crafted title cannot hide a difference. It backs
+  both the `pull --rule-uid` refusal and the `push --rule-uid` warning.
+  `Plan(local, remote Bundle) ([]Change, error)` — pure, deterministic, unit-tested.
   Actions are `Create|Update|Unchanged` **only** (no `Delete` until `--prune` exists), and the
   `Kind` strings sort into the apply order (`ContactPoint` < `PolicyTree` < `RuleGroup`), so one
   sort gives both a readable plan and the order push walks. Rules are matched by **uid**, so moving
@@ -673,6 +718,33 @@ mode.
   until a future responder does. `checkFolders` uses the same type for its 403 refusal, which is
   why it is `messageError` rather than `validationError`: the message replaces the rendering, the
   wrapped error keeps the status code reachable
+- `scope.go`: the rule-scoped push (`PushOptions.RuleUIDs`). `push(..., scope scopeFunc)` is the
+  one real implementation and `Push` calls it with `scopeBundles`; the parameter is a **test seam**
+  so a test can hand `push` doctored (local, remote) output and prove the plan check — not the
+  builder — is what keeps a wrong group body from reaching a write. `locateLocalRules` finds each
+  named rule in the bundle before any request (plain error, not `ErrRuleNotFound`, whose suggestion
+  — `alerts rules list` — is wrong for a rule that exists remotely). `scopedBundles` then `Pull`s the
+  groups holding the rules **fresh**, warns about ignored edits (`warnOtherDifferences`, one stderr
+  line per group file, exit code unchanged) and calls `scopeBundles`, which builds, per group, a
+  **synthetic local group = the group Grafana holds now** (identity, interval, rule order, every
+  rule, nil elements kept in place) with only the named rules swapped for the bundle's. Nothing about
+  an unnamed rule comes from the file, so a sibling edited, dropped, re-ordered or added in the file
+  cannot reach the PUT, and a sibling Grafana gained since the pull is kept. **Keep the other rules
+  out of the file's reach**: never read an unnamed rule, the interval or the order from the bundle
+  on this path. `scopeBundles` refuses a rule whose file group differs from the group Grafana holds
+  it in — as **UX**, not as protection: the synthetic group addresses the rule's current group, so
+  the rule could not move anyway, but the move the file asks for would be silently ignored.
+  `planScoped` is the **only** scoped planner (`Plan` plus the tripwire; there is no second `Plan(`
+  call on the scoped path) and requires of every entry: a rule group, `Update`/`Unchanged` (never
+  `Create`), an ID of a group holding a named rule, every detail line the `~` line of a named rule
+  *of that group* (a rule is credited to the first group holding it), `Unchanged` with no detail and
+  `Update` with some. `export_test.go` exposes it for tests with doctored pairs. Neither bundle has
+  contact points or policies, so the plan never reaches them. No `Create RuleGroup` is reachable, so
+  `--ui-editable` is inert. The apply path is `push.go`'s unchanged, so provenance (per group,
+  through `GroupProvenanceHeader`), `StopOnError`, `--dry-run` parity and the 401 contract all hold
+- `get.go`: `GetRule(ctx, gCtx, gClient, uid) (RuleDetail, error)` for `alerts rules get` —
+  `fetchRule` (definition), the same state read `ListRules` uses, same failure policy as an
+  unfiltered list. `RuleDetail.Definition` is the generic-map projection `alerts pull` writes
 - `body.go`: the write-body projections, shared by `push.go`'s phases, `ruleops.go`'s group PUT and
   `diff.go`'s plan — `pinRule`, `ruleGroupBody`, `contactPointBody`, `routeBody`, plus
   `resolveOrgID`/`requireOrgID`. Every one of them returns a **copy**, which is what lets `Plan`
@@ -684,7 +756,9 @@ mode.
   it rather than hand-building the same `fmt.Errorf`, which is what keeps the `ValidationError`
   substitution and the `errors.As`-reachable response on all of them at once (the message-only
   failures — a group that is gone, a rule its group no longer holds — stay plain `fmt.Errorf`, since
-  there is no response to keep reachable)
+  there is no response to keep reachable). `ruleNotFoundError(uid)` is the one source of
+  `alerts: rule <uid> not found` (wrapping `ErrRuleNotFound`) for every uid lookup: the rule
+  operations, pull and push by rule, and `get`
 - `ruleops.go`: `SetRulesPaused(ctx, gClient, uids, RuleOpOptions)` and
   `DeleteRules(ctx, gClient, uids, RuleOpOptions)` — **one** options type for all three operations
   (delete ignores `Paused`), so the cmd layer hands every one of them the same value instead of
@@ -1336,6 +1410,16 @@ and 5 (contactPointsTableCodec over models.ContactPoints) - no state join.
      401 as stale-session (exit 2)
 ```
 
+**Rule-scoped (`alerts push --rule-uid UID...`)** changes steps 2-3 and nothing after them.
+`ReadBundle` still reads and validates the whole bundle (step 1). Each named rule is located in the
+bundle (absent → error before any request); `Pull` fetches only the groups holding them, **fresh**,
+with one `GetAlertRule` per uid (unknown → `ErrRuleNotFound`, fatal whatever `--on-error` says).
+`scopeBundles` builds a synthetic local group that is the fetched group with only the named rules
+swapped in from the file, `planScoped` plans it and refuses anything beyond the `~` lines of the
+named rules, and steps 4-6 run unchanged on that plan (folder pre-check, provenance, apply, report).
+Contact points and policies are never fetched or planned. Edits to unnamed rules, the interval or
+the order in the file are not pushed and are reported as one stderr warning per group file.
+
 `alerts rules pause|resume|delete` share steps 5-6's shape without a bundle
 (and without step 4: a rule's folder is wherever Grafana already holds it):
 GetAlertRule per uid (unknown -> "not found", before any write), group by
@@ -1779,17 +1863,26 @@ Based on TODO comments in code:
       config.SameOriginRedirects` (and the session-wrapped transport), or the fifth call site
       silently follows redirects
 
-14. **Alerting Write Limits (`alerts pull`/`push`, `alerts rules pause|resume|delete`)**
+14. **Alerting Write Limits (`alerts pull`/`push` incl. `--rule-uid`, `alerts rules pause|resume|delete`)**
     - *Current*: five accepted limits, all documented in the alerting guide and the command help
       rather than worked around silently:
       (a) **no `--prune`** — groups, contact points and policies that exist only in Grafana are
       left alone, so a push can add and replace but never remove an object the bundle omits;
       (b) **no optimistic concurrency** — the provisioning API has no ETag/version and ignores
       `If-Match`, so the last writer wins and two people pushing the same bundle cannot be
-      serialised client-side;
+      serialised client-side. `push --rule-uid` restates it: the named rule is sent **exactly as the
+      file holds it, every field**, so a change made in Grafana to that rule since the pull is
+      reverted (the `~` line names no field), and the group is re-sent from a fresh GET, so the
+      window in which a concurrent edit to any rule of the group is lost is the run itself (rule
+      GET, group GET, folder check, PUT), not milliseconds;
       (c) **`isPaused` only persists through the group PUT** on Grafana 12.3.x — a single-rule
       `PutAlertRule` with only `isPaused` flipped returns 200 but does not persist for an Editor
-      (5/5, both directions; Admin persists it), so pause/resume rewrites the whole group;
+      (5/5, both directions; Admin persists it), so pause/resume rewrites the whole group — and so
+      does `push --rule-uid`. **UNVERIFIED** against a live Grafana: whether a single-rule
+      `PutAlertRule` persists *other* field edits for an Editor; the rule-scoped push avoids the
+      question by using the group PUT. Likewise unverified is what Grafana does with a group PUT
+      carrying a uid that lives in another group: `push --rule-uid` never sends one (the group
+      comes from Grafana, and a file group that differs is refused), by design;
       (d) **objects with foreign provenance are refused** (`file`, `converted_prometheus`,
       `disabled`, …) rather than overwritten — correct, but it means a file-provisioned instance
       cannot be managed with this group at all;
@@ -1798,7 +1891,9 @@ Based on TODO comments in code:
       (`metadata.editor_settings` is the known one) never reaches the file, and the push then
       sends a body without it, resetting it server-side. Note this is about *fields*, not values:
       values inside a known field round-trip fine since `ReadBundle` validates structurally rather
-      than against the generated enums (see `files.go` above)
+      than against the generated enums (see `files.go` above). For `push --rule-uid` this applies
+      to **every sibling** of the named rule, because the group PUT re-sends them from the
+      vendored model, as pause/resume already do
     - *Impact*: Low - (a) and (d) are deliberate safety choices; (b) is a server-side gap; (c) is a
       Grafana bug we work around correctly; (e) is bounded by how current the vendored client is
     - *Effort*: Low for (a) (a `--prune` flag plus `Delete` actions in `Plan`, which is why

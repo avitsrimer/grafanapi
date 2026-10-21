@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"errors"
+	"strings"
 
 	cmdconfig "github.com/grafana/grafanapi/cmd/grafanapi/config"
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
@@ -32,6 +33,8 @@ type pullOptions struct {
 
 	Path          string
 	FolderUIDs    []string
+	RuleUIDs      []string
+	Overwrite     bool
 	MaxConcurrent int
 }
 
@@ -45,6 +48,14 @@ func (opts *pullOptions) BindFlags(flags *pflag.FlagSet) {
 		"Only pull rule groups from this folder, matched against its UID (repeatable). "+
 			"A UID no folder carries is an error; contact points and the notification policy tree are "+
 			"org-wide and are pulled whatever this is set to")
+	flags.StringArrayVar(&opts.RuleUIDs, "rule-uid", nil,
+		"Only pull the rule group holding this rule, matched against its UID (repeatable). "+
+			"The group's file is replaced with the group as Grafana holds it now, including any local edit "+
+			"to the named rule; contact points and the notification policy tree are not pulled, and no "+
+			"other file is written or removed")
+	flags.BoolVar(&opts.Overwrite, "overwrite", false,
+		"With --rule-uid, replace a group file even if it differs from Grafana in rules you did not name "+
+			"(those local edits are discarded)")
 	flags.IntVar(&opts.MaxConcurrent, "max-concurrent", alerts.DefaultMaxConcurrent,
 		"Maximum number of concurrent operations")
 }
@@ -65,6 +76,20 @@ func (opts *pullOptions) Validate() error {
 		return errors.New("max-concurrent must be greater than zero")
 	}
 
+	if len(opts.RuleUIDs) > 0 && len(opts.FolderUIDs) > 0 {
+		return errors.New("--rule-uid and --folder-uid cannot be combined")
+	}
+
+	for _, uid := range opts.RuleUIDs {
+		if strings.TrimSpace(uid) == "" {
+			return errors.New("--rule-uid must not be empty")
+		}
+	}
+
+	if opts.Overwrite && len(opts.RuleUIDs) == 0 {
+		return errors.New("--overwrite only applies with --rule-uid")
+	}
+
 	return nil
 }
 
@@ -74,6 +99,7 @@ func (opts *pullOptions) Validate() error {
 func (opts *pullOptions) pullOptions() alerts.PullOptions {
 	return alerts.PullOptions{
 		FolderUIDs:    opts.FolderUIDs,
+		RuleUIDs:      opts.RuleUIDs,
 		MaxConcurrent: opts.MaxConcurrent,
 	}
 }
@@ -91,6 +117,12 @@ func (opts *pullOptions) writeOptions(f format.Format) alerts.WriteOptions {
 	}
 
 	return alerts.WriteOptions{Format: f, KeepFolders: keep}
+}
+
+// ruleGroupWriteOptions returns the internal/alerts options this command asks WriteRuleGroups for
+// when --rule-uid is set, in the format the codec the user selected writes.
+func (opts *pullOptions) ruleGroupWriteOptions(f format.Format) alerts.RuleGroupWriteOptions {
+	return alerts.RuleGroupWriteOptions{Format: f, RuleUIDs: opts.RuleUIDs, Overwrite: opts.Overwrite}
 }
 
 // pullCmd returns the `alerts pull` command.
@@ -117,6 +149,15 @@ Files under rules/ that this pull did not produce are removed, so a group delete
 not resurrected by the next push. With --folder-uid that pruning is restricted to the named
 folders, leaving a partial bundle's other folders untouched.
 
+With --rule-uid, only the rule group holding each named rule is pulled, and its file holds the
+WHOLE group: the file is replaced with the group as Grafana holds it now, so a local edit to a
+named rule is discarded - commit or push it first. A file that differs from Grafana in other rules
+(local edits, or changes made in Grafana since the last pull) is refused unless --overwrite, which
+discards those edits. A file for the group in the other format (-o), or another group's file whose
+name clashes, is refused. Editing a sibling rule there is not pushed by push --rule-uid. Contact
+points and policies are not pulled, no other file is written or removed (nothing is pruned), and
+an unknown uid stops the pull before anything is written.
+
 Secure contact-point settings arrive as "[REDACTED]" and must be left that way: pushing the
 placeholder back keeps the stored secret, while replacing it sets a new one.
 
@@ -126,7 +167,9 @@ Reading needs the Viewer role. Pushing the result back needs Editor.`,
 
 	grafanapi alerts pull -p ./alerting -o json
 
-	grafanapi alerts pull --folder-uid folder-uid-1 --folder-uid folder-uid-2`,
+	grafanapi alerts pull --folder-uid folder-uid-1 --folder-uid folder-uid-2
+
+	grafanapi alerts pull --rule-uid rule-uid-1`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPull(cmd, configOpts, opts)
 		},
@@ -168,6 +211,17 @@ func runPull(cmd *cobra.Command, configOpts *cmdconfig.Options, opts *pullOption
 	bundle, err := alerts.Pull(ctx, gClient, opts.pullOptions())
 	if err != nil {
 		return err
+	}
+
+	if len(opts.RuleUIDs) > 0 {
+		if err := alerts.WriteRuleGroups(opts.Path, bundle.Groups, opts.ruleGroupWriteOptions(codec.Format())); err != nil {
+			return err
+		}
+
+		cmdio.Success(cmd.OutOrStdout(), "%d rule group(s) written to %s; contact points and policies were not pulled",
+			len(bundle.Groups), opts.Path)
+
+		return nil
 	}
 
 	if err := alerts.WriteBundle(opts.Path, bundle, opts.writeOptions(codec.Format())); err != nil {

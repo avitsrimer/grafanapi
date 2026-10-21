@@ -33,13 +33,20 @@ const getFolderOperation = "[GET /folders/{folder_uid}] getFolderByUID"
 //     selection therefore fetches no group at all). This is what push uses: the local bundle
 //     already names every group it intends to write, and listing a whole instance to find three of
 //     them is both slower and a larger blast radius.
+//
 //   - otherwise every rule group is discovered from the rule list and filtered by opts.FolderUIDs.
 //     Each requested folder UID is verified first, because GetAlertRules has no folder filter:
 //     without the check a misspelled UID and a folder holding no rules are the same empty result,
 //     and the pull would silently write an empty bundle - which the next push would read as
 //     "these groups no longer exist".
 //
-// Contact points and the policy tree are fetched whole in both cases; neither API offers a
+//   - opts.RuleUIDs non-empty selects the groups holding those rules: one GetAlertRule per uid,
+//     then one GET per distinct group, no rule listing. The groups come back whole (every rule of
+//     each, not only the named ones) and the result carries no contact points and no policy tree:
+//     a rule selection is about rules only, and fetching the rest is the whole-instance read it
+//     exists to avoid. An unknown uid is an error wrapping ErrRuleNotFound.
+//
+// Otherwise contact points and the policy tree are fetched whole; neither API offers a
 // selection, and both are single objects.
 //
 // A rule group that has disappeared between the listing and its own fetch (or one named in
@@ -51,10 +58,14 @@ const getFolderOperation = "[GET /folders/{folder_uid}] getFolderByUID"
 // typed response instead (see asAPIError) - so the stale-session exit-2 rendering still fires.
 //
 // Bundle.Groups and Bundle.ContactPoints are sorted and never nil, so two pulls of an unchanged
-// instance produce byte-identical files.
+// instance produce byte-identical files (a rule selection leaves ContactPoints and Policies nil).
 func Pull(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, opts PullOptions) (Bundle, error) {
 	if gClient == nil {
 		return Bundle{}, errors.New("alerts: no grafana client configured")
+	}
+
+	if len(opts.RuleUIDs) > 0 {
+		return pullRules(ctx, gClient, opts)
 	}
 
 	refs, err := pullGroupRefs(ctx, gClient, opts)
@@ -108,6 +119,11 @@ type PullOptions struct {
 	// needs, since listing every rule to then use none of them is exactly the whole-instance read
 	// the selection exists to avoid.
 	Groups []GroupRef
+	// RuleUIDs, when non-empty, selects the rule groups holding these rules - one GetAlertRule per
+	// uid, then one group GET per distinct group, no rule listing - and leaves ContactPoints and
+	// Policies nil: a rule selection is about rules only. It cannot be combined with Groups or
+	// FolderUIDs.
+	RuleUIDs []string
 	// MaxConcurrent bounds the in-flight rule-group fetches. Zero or negative means
 	// DefaultMaxConcurrent.
 	MaxConcurrent int
@@ -305,6 +321,88 @@ func pullGroupRefs(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, opts Pull
 	}
 
 	return dedupeGroupRefs(refs), nil
+}
+
+// pullRules is Pull for a rule selection: the groups holding opts.RuleUIDs, whole, and nothing
+// else.
+func pullRules(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, opts PullOptions) (Bundle, error) {
+	if opts.Groups != nil || len(opts.FolderUIDs) > 0 {
+		return Bundle{}, errors.New("alerts: pull: RuleUIDs cannot be combined with Groups or FolderUIDs")
+	}
+
+	uids := dedupeUIDs(opts.RuleUIDs)
+
+	refs, holders, err := ruleGroupRefs(ctx, gClient, uids)
+	if err != nil {
+		return Bundle{}, err
+	}
+
+	groups, err := fetchGroups(ctx, gClient, refs, maxConcurrent(opts.MaxConcurrent))
+	if err != nil {
+		return Bundle{}, err
+	}
+
+	if err := requireRules(groups, uids, holders); err != nil {
+		return Bundle{}, err
+	}
+
+	return Bundle{Groups: groups}, nil
+}
+
+// requireRules checks that every uid is held by one of the fetched groups. The rule lookup and the
+// group fetch are two requests, so a group deleted between them (absent from groups) or a rule
+// moved out of it would otherwise yield a bundle silently missing a rule the caller named.
+//
+// holders maps each uid to the group its rule lookup reported, so the error can name the group even
+// when it is the one that is gone.
+func requireRules(groups []*models.AlertRuleGroup, uids []string, holders map[string]GroupRef) error {
+	for _, uid := range uids {
+		found := false
+
+		for _, group := range groups {
+			if group != nil && findRule(group.Rules, uid) != nil {
+				found = true
+
+				break
+			}
+		}
+
+		if !found {
+			return fmt.Errorf("alerts: pull rule %s: rule group %s no longer holds it", uid, groupRefID(holders[uid]))
+		}
+	}
+
+	return nil
+}
+
+// ruleGroupRefs resolves the rule groups holding the named rules, one GetAlertRule per uid.
+//
+// The lookups run in order and stop at the first failure rather than concurrently, as
+// validateFolders does: there are a handful at most, and the first uid typed is the one reported.
+// An unknown uid is fatal here (unlike the rule operations, which record it per uid), because a
+// pull or push that silently skipped a named rule would do something other than what was asked.
+func ruleGroupRefs(
+	ctx context.Context, gClient *goapi.GrafanaHTTPAPI, uids []string,
+) ([]GroupRef, map[string]GroupRef, error) {
+	refs := make([]GroupRef, 0, len(uids))
+	holders := make(map[string]GroupRef, len(uids))
+
+	for _, uid := range uids {
+		rule, found, err := fetchRule(ctx, gClient, uid)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if !found {
+			return nil, nil, ruleNotFoundError(uid)
+		}
+
+		ref := ruleRef(rule)
+		holders[uid] = ref
+		refs = append(refs, ref)
+	}
+
+	return dedupeGroupRefs(refs), holders, nil
 }
 
 // validateFolders checks that every requested folder UID exists, which is what tells a typo apart
