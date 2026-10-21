@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"runtime"
@@ -36,7 +36,7 @@ type serveOpts struct {
 }
 
 func (opts *serveOpts) setup(flags *pflag.FlagSet) {
-	flags.StringVar(&opts.Address, "address", "0.0.0.0", "Address to bind")
+	flags.StringVar(&opts.Address, "address", "127.0.0.1", "Address to bind (loopback by default; any other address exposes the server, which acts with your Grafana session, to the network)")
 	flags.IntVar(&opts.Port, "port", 8080, "Port on which the server will listen")
 	flags.StringArrayVarP(&opts.WatchPaths, "watch", "w", nil, "Paths to watch for changes")
 	flags.BoolVar(&opts.NoWatch, "no-watch", opts.NoWatch, "Do not watch for changes")
@@ -77,6 +77,14 @@ While resources are loaded from disk, the server will use the Grafana instance
 described in the current context to access some data (example: to run queries
 when previewing dashboards).
 
+Security: the server listens on 127.0.0.1 by default and prints a URL carrying
+a per-run access token. Open that URL once: the token is exchanged for a
+session cookie and changes on every run. Requests with a foreign Host header
+are rejected (421), requests without the token (401) or that a browser marks
+as coming from another origin or site (403) too. A non-loopback --address
+prints a warning: the server acts with your Grafana session and becomes
+reachable from other machines.
+
 Note on NFS/SMB and watch mode: fsnotify requires support from underlying
 OS to work. The current NFS and SMB protocols does not provide network level
 support for file notifications.
@@ -87,6 +95,10 @@ support for file notifications.
 
 	# Serve resources from a directory but don't watch for changes:
 	grafanapi resources serve ./resources --no-watch
+
+	# Expose the server to the network (it acts with your Grafana session, so
+	# anyone who obtains the token can use that session):
+	grafanapi resources serve ./resources --address 0.0.0.0
 
 	# Serve resources from a script that outputs a YAML resource and watch for changes:
 	# Note: the Grafana Foundation SDK can be used to generate dashboards (https://grafana.github.io/grafana-foundation-sdk/)
@@ -185,10 +197,14 @@ support for file notifications.
 			}
 			resourceServer := server.New(serverCfg, cfg.GetCurrentContext(), parsedResources)
 
-			logger.Debug(fmt.Sprintf("Listening on %s:%d", opts.Address, opts.Port))
-			cmdio.Info(cmd.OutOrStdout(), "Server will be available on http://localhost:%d/", opts.Port)
+			ln, err := resourceServer.Listen(cmd.Context())
+			if err != nil {
+				return err
+			}
 
-			return resourceServer.Start(cmd.Context())
+			reportListening(cmd.OutOrStdout(), cmd.ErrOrStderr(), opts.Address, resourceServer.URL())
+
+			return resourceServer.Serve(cmd.Context(), ln)
 		},
 	}
 
@@ -234,4 +250,12 @@ func executeWatchScript(ctx context.Context, command string) ([]byte, error) {
 	}
 
 	return stdout.Bytes(), nil
+}
+
+func reportListening(stdout io.Writer, stderr io.Writer, address string, url string) {
+	cmdio.Info(stdout, "Server is listening on %s", url)
+
+	if !server.IsLoopbackAddress(address) {
+		cmdio.Warning(stderr, "--address %s is not a loopback address: the server acts with your Grafana session and is reachable from other machines; keep the URL's token secret", address)
+	}
 }
