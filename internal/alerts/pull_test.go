@@ -1,6 +1,7 @@
 package alerts_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/grafana/grafanapi/internal/alerts"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/grafana"
+	"github.com/grafana/grafanapi/internal/termsafe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -490,7 +492,7 @@ func TestPull_RuleUIDsErrors(t *testing.T) {
 				rulePath("rule-uid-9"):               ruleLookup("rule-uid-9", "folder-uid-1", "group-a"),
 				groupPath("folder-uid-1", "group-a"): notFound,
 			},
-			wantErr: "alerts: pull rule rule-uid-9: its rule group no longer holds it",
+			wantErr: "alerts: pull rule rule-uid-9: rule group folder-uid-1/group-a no longer holds it",
 		},
 		{
 			name: "the group no longer contains the uid",
@@ -498,7 +500,7 @@ func TestPull_RuleUIDsErrors(t *testing.T) {
 				rulePath("rule-uid-9"):               ruleLookup("rule-uid-9", "folder-uid-1", "group-a"),
 				groupPath("folder-uid-1", "group-a"): groupResponse("folder-uid-1", "group-a", 60, "rule-uid-2"),
 			},
-			wantErr: "alerts: pull rule rule-uid-9: its rule group no longer holds it",
+			wantErr: "alerts: pull rule rule-uid-9: rule group folder-uid-1/group-a no longer holds it",
 		},
 	}
 
@@ -512,6 +514,29 @@ func TestPull_RuleUIDsErrors(t *testing.T) {
 			assert.Zero(t, fixture.requestCount(alertRulesPath))
 		})
 	}
+
+	t.Run("a hostile group title stays safe once scrubbed", func(t *testing.T) {
+		title := "evil\n\x1b[31m✔ forged\u202e"
+		body, err := json.Marshal(map[string]string{
+			"uid": "rule-uid-9", "title": "t", "folderUID": "folder-uid-1", "ruleGroup": title, "provenance": "api",
+		})
+		require.NoError(t, err)
+
+		fixture := newPullFixture(t, map[string]stubResponse{
+			rulePath("rule-uid-9"):           okResponse(string(body)),
+			groupPath("folder-uid-1", title): notFound,
+		})
+
+		_, err = alerts.Pull(t.Context(), fixture.client, alerts.PullOptions{RuleUIDs: []string{"rule-uid-9"}})
+		require.Error(t, err)
+
+		scrubbed := termsafe.Cell(err.Error())
+		assert.Contains(t, scrubbed, "no longer holds it")
+		assert.Contains(t, scrubbed, "evil")
+		assert.NotContains(t, scrubbed, "\n")
+		assert.NotContains(t, scrubbed, "\x1b")
+		assert.NotContains(t, scrubbed, "\u202e")
+	})
 
 	t.Run("an unknown uid wraps ErrRuleNotFound", func(t *testing.T) {
 		fixture := newPullFixture(t, map[string]stubResponse{rulePath("rule-uid-9"): notFound})

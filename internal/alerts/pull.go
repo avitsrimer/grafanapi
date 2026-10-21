@@ -332,7 +332,7 @@ func pullRules(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, opts PullOpti
 
 	uids := dedupeUIDs(opts.RuleUIDs)
 
-	refs, err := ruleGroupRefs(ctx, gClient, uids)
+	refs, holders, err := ruleGroupRefs(ctx, gClient, uids)
 	if err != nil {
 		return Bundle{}, err
 	}
@@ -342,7 +342,7 @@ func pullRules(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, opts PullOpti
 		return Bundle{}, err
 	}
 
-	if err := requireRules(groups, uids); err != nil {
+	if err := requireRules(groups, uids, holders); err != nil {
 		return Bundle{}, err
 	}
 
@@ -352,7 +352,10 @@ func pullRules(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, opts PullOpti
 // requireRules checks that every uid is held by one of the fetched groups. The rule lookup and the
 // group fetch are two requests, so a group deleted between them (absent from groups) or a rule
 // moved out of it would otherwise yield a bundle silently missing a rule the caller named.
-func requireRules(groups []*models.AlertRuleGroup, uids []string) error {
+//
+// holders maps each uid to the group its rule lookup reported, so the error can name the group even
+// when it is the one that is gone.
+func requireRules(groups []*models.AlertRuleGroup, uids []string, holders map[string]GroupRef) error {
 	for _, uid := range uids {
 		found := false
 
@@ -365,7 +368,7 @@ func requireRules(groups []*models.AlertRuleGroup, uids []string) error {
 		}
 
 		if !found {
-			return fmt.Errorf("alerts: pull rule %s: its rule group no longer holds it", uid)
+			return fmt.Errorf("alerts: pull rule %s: rule group %s no longer holds it", uid, groupRefID(holders[uid]))
 		}
 	}
 
@@ -378,23 +381,28 @@ func requireRules(groups []*models.AlertRuleGroup, uids []string) error {
 // validateFolders does: there are a handful at most, and the first uid typed is the one reported.
 // An unknown uid is fatal here (unlike the rule operations, which record it per uid), because a
 // pull or push that silently skipped a named rule would do something other than what was asked.
-func ruleGroupRefs(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, uids []string) ([]GroupRef, error) {
+func ruleGroupRefs(
+	ctx context.Context, gClient *goapi.GrafanaHTTPAPI, uids []string,
+) ([]GroupRef, map[string]GroupRef, error) {
 	refs := make([]GroupRef, 0, len(uids))
+	holders := make(map[string]GroupRef, len(uids))
 
 	for _, uid := range uids {
 		rule, found, err := fetchRule(ctx, gClient, uid)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if !found {
-			return nil, ruleNotFoundError(uid)
+			return nil, nil, ruleNotFoundError(uid)
 		}
 
-		refs = append(refs, ruleRef(rule))
+		ref := ruleRef(rule)
+		holders[uid] = ref
+		refs = append(refs, ref)
 	}
 
-	return dedupeGroupRefs(refs), nil
+	return dedupeGroupRefs(refs), holders, nil
 }
 
 // validateFolders checks that every requested folder UID exists, which is what tells a typo apart
