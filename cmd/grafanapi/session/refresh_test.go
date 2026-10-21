@@ -592,6 +592,46 @@ func Test_RefreshCmd_Single_LegacyItemUnderConfigFlagIsNotBound(t *testing.T) {
 	assert.Equal(t, attackCookie, raw, "a refused legacy item must not be re-written as bound")
 }
 
+// Test_RefreshCmd_LegacyBindAllowedIsAskedWithoutEnvOverrides pins the wiring of the trust
+// predicate: refresh loads its configuration without the GRAFANA_SERVER override, so it must pass
+// envOverridesApplied=false (config check and LoadConfig pass true), together with --config.
+func Test_RefreshCmd_LegacyBindAllowedIsAskedWithoutEnvOverrides(t *testing.T) {
+	for _, mode := range []string{"", "--all", "--due"} {
+		t.Run("mode "+mode, func(t *testing.T) {
+			server, _ := newRotateServer(t, http.StatusOK)
+
+			store := testutils.NewFakeKeychainStore()
+			require.NoError(t, store.Set(keychain.Account("default"), testutils.BoundSecret(t, "old-cookie", server.URL)))
+			t.Cleanup(SetKeychainStore(store))
+
+			var (
+				calls   int
+				gotFile string
+				gotEnv  = true
+			)
+
+			t.Cleanup(SetLegacyBindAllowed(func(file string, envApplied bool) bool {
+				calls++
+				gotFile, gotEnv = file, envApplied
+
+				return false
+			}))
+
+			configFile := singleContextConfig(t, server.URL)
+			args := []string{"refresh", "--config", configFile}
+			if mode != "" {
+				args = append(args, mode)
+			}
+
+			testutils.CommandTestCase{Cmd: Command(), Command: args}.Run(t)
+
+			require.Equal(t, 1, calls)
+			assert.Equal(t, configFile, gotFile)
+			assert.False(t, gotEnv, "session refresh never applies GRAFANA_SERVER, so it must pass envOverridesApplied=false")
+		})
+	}
+}
+
 // Test_RefreshCmd_Single_BoundRotationKeepsOrigin pins the happy path: a bound session whose
 // origin matches rotates, and the rotated cookie is persisted under the same origin.
 func Test_RefreshCmd_Single_BoundRotationKeepsOrigin(t *testing.T) {

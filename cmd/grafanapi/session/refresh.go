@@ -63,7 +63,7 @@ and reported as a clear error when targeted explicitly.`,
 			// refresh loads the configuration without the GRAFANA_SERVER override, so that variable
 			// must not veto a legacy bind (envOverridesApplied=false).
 			resolveOpts := config.ResolveOptions{
-				AllowLegacyBind: config.LegacyBindAllowed(opts.ConfigFile, false),
+				AllowLegacyBind: legacyBindAllowed(opts.ConfigFile, false),
 				Notice:          cmd.ErrOrStderr(),
 			}
 
