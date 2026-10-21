@@ -308,7 +308,8 @@ Caveats:
   intent before running; prefer `--dry-run` first.
 - `resources validate` checks local manifests against the live Grafana instance.
 - `resources serve` previews dashboards locally with live reload (needs the `kubernetesDashboards`
-  feature toggle on the server).
+  feature toggle on the server). It listens on loopback only by default: open the tokenized URL it
+  prints (the token changes every run).
 
 ## 7. Contexts (multi-environment)
 
