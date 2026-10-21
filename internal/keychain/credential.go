@@ -8,21 +8,24 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // CredentialVersion is the payload version written by EncodeCredential.
 const CredentialVersion = 1
 
 // ErrMalformedCredential is returned by DecodeCredential for a payload that is not valid
-// versioned JSON or lacks a cookie or an origin. Its message never includes the stored item.
+// versioned JSON, has a missing or non-positive version, or lacks a cookie or an origin. Its message never includes the stored item.
 var ErrMalformedCredential = errors.New("keychain: stored session item is malformed")
 
-// ErrUnsupportedCredential is returned by DecodeCredential for a payload whose version is not
-// CredentialVersion. Its message never includes the stored item.
+// ErrUnsupportedCredential is returned by DecodeCredential for a payload whose version is greater
+// than CredentialVersion. Its message never includes the stored item.
 var ErrUnsupportedCredential = errors.New("keychain: stored session item was written by a newer grafanapi")
 
 // EncodeCredential serialises c as the versioned payload stored as the Keychain secret. It
-// requires a non-empty Cookie and a non-empty Origin; it does not judge whether the origin is
+// requires a non-empty Cookie and a non-empty Origin, both valid UTF-8 (encoding/json would
+// silently rewrite invalid bytes to U+FFFD, so the stored value would differ from the one the
+// caller verified); it does not judge whether the origin is
 // canonical, because normalising is the caller's job (this package cannot import internal/config).
 func EncodeCredential(c Credential) (string, error) {
 	if c.Cookie == "" {
@@ -30,6 +33,9 @@ func EncodeCredential(c Credential) (string, error) {
 	}
 	if c.Origin == "" {
 		return "", errors.New("keychain: cannot encode a session without an origin")
+	}
+	if !utf8.ValidString(c.Cookie) || !utf8.ValidString(c.Origin) {
+		return "", errors.New("keychain: cannot encode a session that is not valid UTF-8")
 	}
 
 	raw, err := json.Marshal(credentialPayload{Version: CredentialVersion, Cookie: c.Cookie, Origin: c.Origin})
@@ -60,7 +66,10 @@ func DecodeCredential(raw string) (Credential, error) {
 		return Credential{}, ErrMalformedCredential
 	}
 
-	if payload.Version != CredentialVersion {
+	if payload.Version < CredentialVersion {
+		return Credential{}, ErrMalformedCredential
+	}
+	if payload.Version > CredentialVersion {
 		return Credential{}, ErrUnsupportedCredential
 	}
 	if payload.Cookie == "" || payload.Origin == "" {
