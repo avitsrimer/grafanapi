@@ -101,6 +101,28 @@ This runs a **single** query with a fixed `refId` of `"A"`: there is no multi-qu
 query history, and no streaming. CSV output isn't implemented either — `-o json` covers piping to
 other tools today, and is the recommended way to extract specific fields.
 
+## Output safety
+
+Query results, datasource names and error messages come from the server, and a terminal interprets
+more of that text than a reader expects. In the default `table` format `explore` and `datasources`
+therefore:
+
+- remove escape sequences (CSI, OSC, DCS, …) whole, payload included;
+- replace other control characters (C0, C1, DEL) and Unicode format characters (bidi overrides,
+  invisible tag characters) with spaces;
+- render a multi-line value on a single row.
+
+Errors returned by `explore` and `datasources` (and by every other command) are scrubbed the same way
+when printed, and log warnings no longer echo escape sequences.
+
+`-o json` and `-o yaml` carry values **verbatim**. Treat them as untrusted data and do not print them
+to a terminal unfiltered: `jq -r` writes raw control characters. For example, run
+`grafanapi explore example-prometheus "up" -o json | jq '.results.A.frames[0].data'` (which escapes them)
+rather than `jq -r` on a field a server controls.
+
+Scrubbing cannot stop text-level prompt injection: if an agent reads query output, a value can still
+contain instructions in plain words.
+
 ## Stale sessions
 
 If your session cookie has expired, `explore` fails the same way every other authenticated command

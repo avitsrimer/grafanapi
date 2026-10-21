@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/grafana/grafanapi/cmd/grafanapi/config"
 	"github.com/grafana/grafanapi/cmd/grafanapi/datasources"
@@ -142,4 +143,68 @@ func Test_DatasourcesCommand_loadConfigFailure(t *testing.T) {
 		},
 	}
 	testCase.Run(t)
+}
+
+func hostileDataSource() map[string]any {
+	return map[string]any{
+		"uid":       "uid\x1b[2Juid",
+		"name":      "ds\x1b]52;c;aGk=\x07name\u202e\nforged",
+		"type":      "ty\tpe",
+		"isDefault": false,
+	}
+}
+
+func Test_DatasourcesCommand_tableOutputStripsTerminalControl(t *testing.T) {
+	server := newTestServer(t, http.StatusOK, []map[string]any{hostileDataSource()})
+	configFile, restoreStore := newTestConfig(t, server)
+	defer restoreStore()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     datasources.Command(),
+		Command: []string{"--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			func(t *testing.T, result testutils.CommandResult) {
+				t.Helper()
+
+				for _, r := range result.Stdout {
+					if r == '\n' {
+						continue
+					}
+
+					assert.False(t, unicode.IsControl(r) || unicode.Is(unicode.Cf, r), "unsafe rune %U", r)
+				}
+
+				assert.NotContains(t, result.Stdout, "aGk=")
+				assert.Len(t, strings.Split(strings.TrimSuffix(result.Stdout, "\n"), "\n"), 2, "header plus one row")
+			},
+		},
+	}
+	testCase.Run(t)
+}
+
+func Test_DatasourcesCommand_jsonOutputKeepsRawValues(t *testing.T) {
+	want := hostileDataSource()
+	server := newTestServer(t, http.StatusOK, []map[string]any{want})
+	configFile, restoreStore := newTestConfig(t, server)
+	defer restoreStore()
+
+	var gotOutput string
+	testCase := testutils.CommandTestCase{
+		Cmd:     datasources.Command(),
+		Command: []string{"--config", configFile, "-o", "json"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			func(_ *testing.T, result testutils.CommandResult) { gotOutput = result.Stdout },
+		},
+	}
+	testCase.Run(t)
+
+	var decoded []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(gotOutput), &decoded))
+	require.Len(t, decoded, 1)
+
+	assert.Equal(t, want["name"], decoded[0]["name"])
+	assert.Equal(t, want["uid"], decoded[0]["uid"])
+	assert.Equal(t, want["type"], decoded[0]["type"])
 }

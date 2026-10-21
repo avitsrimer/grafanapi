@@ -9,12 +9,12 @@ import (
 	"log/slog"
 	"reflect"
 	"strconv"
-	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/fatih/color"
+	"github.com/grafana/grafanapi/internal/termsafe"
 )
 
 const (
@@ -107,11 +107,12 @@ func (h *handler) Handle(_ context.Context, r slog.Record) error {
 		buf.WriteByte(' ')
 	}
 
-	// Message
+	// Message. Messages can embed server-controlled text; a record is one line.
+	msg := termsafe.Cell(r.Message)
 	if rep == nil {
-		buf.WriteString(r.Message)
+		buf.WriteString(msg)
 		buf.WriteByte(' ')
-	} else if a := rep(nil /* groups */, slog.String(slog.MessageKey, r.Message)); a.Key != "" {
+	} else if a := rep(nil /* groups */, slog.String(slog.MessageKey, msg)); a.Key != "" {
 		h.appendValue(buf, a.Value, false)
 		buf.WriteByte(' ')
 	}
@@ -284,9 +285,7 @@ func prepareString(s string, quote bool) string {
 
 	switch {
 	case quote && needsQuoting(s):
-		s = strconv.Quote(s)
-		s = strings.ReplaceAll(s, `\x1b`, string(ansiEsc))
-		return s
+		return strconv.Quote(s)
 	default:
 		return s
 	}

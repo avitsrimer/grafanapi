@@ -13,6 +13,10 @@ datasources, "target" for Graphite, "query" for Elasticsearch/InfluxDB (override
 
 This runs a single query (fixed refId "A"); there is no multi-query or query-history support.
 
+In the table format, escape sequences in returned values are removed and other control and
+format characters (bidi overrides, tabs, newlines) are replaced with spaces. -o json and -o yaml
+carry values verbatim: treat them as untrusted data.
+
 ```
 grafanapi explore DATASOURCE QUERY [flags]
 ```

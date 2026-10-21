@@ -228,7 +228,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
 - `explore/`: `explore` — thin Cobra wiring (flags, a `table` `format.Codec` adapter) over
   `internal/explore`; no domain logic lives here
 - `datasources/`: `datasources` — thin Cobra wiring (flags, a `table` `format.Codec` adapter)
-  calling the generated Grafana client directly; no domain logic to extract for a single list call
+  calling the generated Grafana client directly; no domain logic to extract for a single list call.
+  Its table cells go through `termsafe.Cell` (name/UID/type are server-controlled); json/yaml stay raw
 - `installskill/`: `install-skill` — writes the `skill.Files` embedded FS to `<--to>/skills/grafanapi`
   (`os.RemoveAll` then `fs.WalkDir`, directories `0o750`/files `0o600`); no config/auth dependency
 - `session/`: `session refresh` / `session keepalive install|status|uninstall` — a **standalone**
@@ -255,7 +256,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   title or rule name is arbitrary user input, one embedded tab or newline is read by the tabwriter
   as a column or row terminator (silently shifting or splitting the row), and a `Cf` bidi override
   makes a terminal re-order the rest of the line without changing a byte of the layout (the
-  json/yaml codecs keep the raw value).
+  json/yaml codecs keep the raw value). `cell` delegates to `termsafe.Runes` (byte-identical to
+  the predicate it used before the extraction).
   `newTableWriter` deliberately drops the
   `tabwriter.TabIndent` the repo's other table renderers pass: that flag pads a *leading* empty
   cell with raw tabs, and FOLDER is empty for every row in degraded mode, which would shift whole
@@ -290,7 +292,12 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   the rule ops (positional uids Cobra already counted plus a bool flag); `pull`/`push` keep
   `resources`' own flag validation and byte-identical messages (`--path is required`,
   `max-concurrent must be greater than zero`)
-- `fail/`: Error handling and detailed error messages
+- `fail/`: Error handling and detailed error messages. `DetailedError.Error()` scrubs `Summary`,
+  `Suggestions` and `DocsLink` with `termsafe.Cell` and a non-yaml `Parent` with `termsafe.Text`; a
+  `yaml.Error` parent is scrubbed only when colour is off (with colour on, stripping would remove the
+  legitimate highlighting). `Details` is **never** scrubbed: every producer is local and
+  `ValidationError.AnnotatedSource` is intentionally coloured. Only errors *returned* by a command pass
+  through here; `config check` and `session refresh` print some error text directly
 - `io/`: Output formatting and user messages
 
 **skill/** - Embedded Claude Code skill (repo root, not under `internal/` or `cmd/`)
@@ -364,7 +371,9 @@ grafanapi follows the Cobra command pattern with eight main command groups:
 - `run.go`: `Run` — raw `POST /api/ds/query` (client `CheckRedirect: config.SameOriginRedirects`) over `httputils.NewTransport` wrapped with
   `GrafanaConfig.WrapWithSession` (so a `401` rotates-and-retries like every other authenticated
   path), decode, and per-`refId` error surfacing
-- `render.go`: `RenderTable` — `text/tabwriter` rendering for the default `table` output format
+- `render.go`: `RenderTable` — `text/tabwriter` rendering for the default `table` output format.
+  Cells, headers, frame names and refIDs go through `termsafe.Cell` **before** `truncate`, which
+  measures runes (so a dropped sequence cannot make a cell look longer than it renders)
 - **Deliberate raw-HTTP decision**: the query path decodes the raw `/api/ds/query` response body
   into these local structs instead of calling the generated client's
   `Datasources.QueryMetricsWithExpressions`, because the vendored `models.Frame`/`models.Field`
@@ -786,8 +795,22 @@ generation is stdlib `text/template`, inspection is stdlib `encoding/xml` token 
 **internal/secrets/** - Secret management
 - Secure handling of sensitive configuration data (currently just TLS key data; the session cookie is never serialized to disk)
 
+**internal/termsafe/** - Terminal-safe rendering of server-controlled text (leaf package, stdlib only)
+- `Cell` drops every escape sequence whole (CSI, OSC, DCS, SOS, PM, APC and other ESC-introduced
+  sequences, 7-bit and 8-bit C1 forms) and then replaces each remaining control or Unicode format rune
+  with a space; an unterminated string sequence (OSC/DCS/SOS/PM/APC) is dropped to the end of the value.
+  `Text` is `Cell` for multi-line messages (keeps `\n` and `\t`, still replaces `\r`)
+- `Runes` is the per-rune rule alone, with no sequence parsing; it exists only so alerts' `cell` stays
+  byte-identical. New callers use `Cell`
+- Tag characters (U+E0000 block, `Cf`) are removed. Deliberate non-goal: U+2028/U+2029 and variation
+  selectors pass through (not terminal control)
+- The json/yaml codecs must **not** use it: they carry raw values and callers are told to treat them as
+  untrusted. Callers: `explore`, `datasources`, `alerts` tables, `fail.DetailedError`, `internal/logs`
+
 **internal/logs/** - Structured logging
 - slog-based logging with verbosity levels
+- The record message goes through `termsafe.Cell`, and `prepareString` no longer rewrites a literal
+  `\x1b` in a quoted value into a real ESC (it used to re-create the byte the earlier cut had removed)
 - Integration with k8s klog
 
 ### Key Design Patterns
@@ -1382,6 +1405,15 @@ The codebase is designed for extension:
   refused (see `internal/alerts/push.go`), so the literal string is never stored as a secret.
 - Nothing in this package decrypts, prints or logs a secret: there is no `decrypt=true` call site
   and no contact-point delete.
+
+**Terminal Output**:
+- Server-controlled text (datasource names, label values, error messages, log lines) is scrubbed by
+  `internal/termsafe` before it reaches a terminal: escape sequences are removed, other control and
+  format characters (bidi overrides, tag characters) become spaces
+- `-o json` / `-o yaml` are raw by design and must be treated as untrusted data; `jq -r` prints
+  control characters verbatim
+- Scrubbing removes terminal control only. It cannot stop plain-text prompt injection in output an
+  agent reads
 
 **Network Security**:
 - TLS verification enabled by default
