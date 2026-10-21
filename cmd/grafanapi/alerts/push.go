@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	cmdconfig "github.com/grafana/grafanapi/cmd/grafanapi/config"
 	cmdio "github.com/grafana/grafanapi/cmd/grafanapi/io"
@@ -20,6 +21,7 @@ import (
 // rendering an object, so the only thing it prints is the plan (--dry-run) or one line per change.
 type pushOptions struct {
 	Path          string
+	RuleUIDs      []string
 	DryRun        bool
 	UIEditable    bool
 	OnError       onerror.Mode
@@ -31,6 +33,10 @@ func (opts *pushOptions) BindFlags(flags *pflag.FlagSet) {
 	// layout ReadBundle walks, not a set of files that can be collected from anywhere.
 	flags.StringVarP(&opts.Path, "path", "p", defaultAlertingPath,
 		"Path on disk from which the alerting bundle will be read")
+	flags.StringArrayVar(&opts.RuleUIDs, "rule-uid", nil,
+		"Only push this rule, matched against its UID (repeatable). The rule is sent exactly as the file "+
+			"holds it; its group is written with every other rule exactly as Grafana currently holds it; "+
+			"the rest of the bundle is ignored")
 	flags.BoolVar(&opts.DryRun, "dry-run", opts.DryRun,
 		"If set, the push is planned and printed, without creating or updating anything in Grafana")
 	flags.BoolVar(&opts.UIEditable, "ui-editable", opts.UIEditable,
@@ -42,8 +48,9 @@ func (opts *pushOptions) BindFlags(flags *pflag.FlagSet) {
 }
 
 // Validate checks everything that can be checked before a config load or a network call: the
-// source path, the concurrency bound and the --on-error vocabulary. Same order and same messages
-// as `alerts pull` and the `resources` commands, so an invalid flag costs nothing.
+// source path, the concurrency bound, the --on-error vocabulary and any --rule-uid value. Same
+// order and same messages as `alerts pull` and the `resources` commands, so an invalid flag costs
+// nothing.
 func (opts *pushOptions) Validate() error {
 	if opts.Path == "" {
 		return errors.New("--path is required")
@@ -53,7 +60,17 @@ func (opts *pushOptions) Validate() error {
 		return errors.New("max-concurrent must be greater than zero")
 	}
 
-	return opts.OnError.Validate()
+	if err := opts.OnError.Validate(); err != nil {
+		return err
+	}
+
+	for _, uid := range opts.RuleUIDs {
+		if strings.TrimSpace(uid) == "" {
+			return errors.New("--rule-uid must not be empty")
+		}
+	}
+
+	return nil
 }
 
 // pushOptions returns the internal/alerts options this command asks Push for. --on-error is
@@ -65,6 +82,7 @@ func (opts *pushOptions) pushOptions(orgID int64) alerts.PushOptions {
 		StopOnError:   opts.OnError.StopOnError(),
 		UIEditable:    opts.UIEditable,
 		MaxConcurrent: opts.MaxConcurrent,
+		RuleUIDs:      opts.RuleUIDs,
 		OrgID:         orgID,
 	}
 }
@@ -99,13 +117,25 @@ it back keeps the stored secret, while replacing it sets a new one. A contact po
 is the exception - there is no stored secret to keep - and is refused until the file carries the
 real value, which is what pushing a bundle into a different instance runs into.
 
+With --rule-uid, only the named rules are pushed, each exactly as the file holds it, every field:
+a change made in Grafana to that rule since your pull is reverted, and the "~" line does not say
+which fields changed, so run ` + "`alerts pull --rule-uid`" + ` immediately before editing. The group's other
+rules, its interval and their order are taken from Grafana at push time; edits to them in the file
+are not pushed (a warning says how many were ignored). The bundle's contact points and policies
+are ignored, but the whole bundle is still read and validated. A rule must already exist: this
+cannot create one, and a uid that is unknown to Grafana or absent from the bundle stops the push
+before anything is written, whatever --on-error says. Moving a rule between groups needs a
+whole-group push (without --rule-uid).
+
 Grafana has no optimistic concurrency here: the last writer wins. Pushing needs the Editor role.`,
 		Example: `
 	grafanapi alerts push --dry-run
 
 	grafanapi alerts push
 
-	grafanapi alerts push -p ./alerting --on-error abort`,
+	grafanapi alerts push -p ./alerting --on-error abort
+
+	grafanapi alerts push --rule-uid rule-uid-1 --dry-run`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPush(cmd, configOpts, opts)
 		},
