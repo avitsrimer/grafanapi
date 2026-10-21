@@ -169,6 +169,34 @@ func Test_LoginCommand_success(t *testing.T) {
 	require.Equal(t, server.URL, cred.Origin, "login must bind the cookie to the server origin")
 }
 
+// Test_LoginCommand_bindsTheNormalisedOrigin proves login stores the canonical origin, not the
+// server string as typed: a trailing slash and a path must not reach the bound origin.
+func Test_LoginCommand_bindsTheNormalisedOrigin(t *testing.T) {
+	server := newTestUserServer(t, http.StatusOK)
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{line: server.URL + "/", secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	cred := decodedCookie(t, store, "default")
+	require.Equal(t, server.URL, cred.Origin, "login must bind the normalised origin, not the typed server string")
+}
+
 func Test_LoginCommand_serverFlagSkipsPrompt(t *testing.T) {
 	server := newTestUserServer(t, http.StatusOK)
 
@@ -793,38 +821,54 @@ func Test_LoginCommand_configWriteFailureRestoresPriorKeychainItemOnRelogin(t *t
 		t.Skip("running as root ignores file permissions, so this test cannot force a write failure")
 	}
 
-	server := newTestUserServer(t, http.StatusOK)
-
-	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
-	configFile := testutils.CreateTempFile(t, initialContents)
-	// config.Load only needs read access; config.Write reopens the file for writing and must fail
-	// here, simulating any persistence failure that happens after the keychain Set already
-	// overwrote the prior cookie.
-	require.NoError(t, os.Chmod(configFile, 0o400))
-
-	store := &fakeKeychainStore{}
-	priorRaw := testutils.BoundSecret(t, "prior-valid-cookie", server.URL)
-	require.NoError(t, store.Set(keychain.Account("default"), priorRaw))
-	restoreStore := login.SetKeychainStore(store)
-	defer restoreStore()
-
-	prompter := &fakePrompter{secret: "new-cookie"}
-	restorePrompter := login.SetPrompter(prompter)
-	defer restorePrompter()
-
-	testCase := testutils.CommandTestCase{
-		Cmd:     login.Command(),
-		Command: []string{"--config", configFile, "--server", server.URL},
-		Assertions: []testutils.CommandAssertion{
-			testutils.CommandErrorContains("writing configuration"),
-		},
+	// The prior items deliberately differ from what a re-encode for the new login would produce
+	// (another origin, or no origin at all), so only a restore of the raw bytes passes.
+	tests := []struct {
+		name  string
+		prior func(t *testing.T) string
+	}{
+		{"bound to another origin", func(t *testing.T) string {
+			return testutils.BoundSecret(t, "prior-valid-cookie", "https://old.example:443")
+		}},
+		{"legacy bare cookie", func(*testing.T) string { return "prior-legacy-cookie" }},
 	}
-	testCase.Run(t)
 
-	raw, err := store.Get(keychain.Account("default"))
-	require.NoError(t, err)
-	require.Equal(t, priorRaw, raw,
-		"a failed config write during re-login must restore the prior raw payload byte-for-byte instead of deleting it")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestUserServer(t, http.StatusOK)
+
+			initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: " + server.URL + "\n"
+			configFile := testutils.CreateTempFile(t, initialContents)
+			// config.Load only needs read access; config.Write reopens the file for writing and must fail
+			// here, simulating any persistence failure that happens after the keychain Set already
+			// overwrote the prior cookie.
+			require.NoError(t, os.Chmod(configFile, 0o400))
+
+			store := &fakeKeychainStore{}
+			priorRaw := tc.prior(t)
+			require.NoError(t, store.Set(keychain.Account("default"), priorRaw))
+			restoreStore := login.SetKeychainStore(store)
+			defer restoreStore()
+
+			prompter := &fakePrompter{secret: "new-cookie"}
+			restorePrompter := login.SetPrompter(prompter)
+			defer restorePrompter()
+
+			testCase := testutils.CommandTestCase{
+				Cmd:     login.Command(),
+				Command: []string{"--config", configFile, "--server", server.URL},
+				Assertions: []testutils.CommandAssertion{
+					testutils.CommandErrorContains("writing configuration"),
+				},
+			}
+			testCase.Run(t)
+
+			raw, err := store.Get(keychain.Account("default"))
+			require.NoError(t, err)
+			require.Equal(t, priorRaw, raw,
+				"a failed config write during re-login must restore the prior raw payload byte-for-byte instead of deleting it")
+		})
+	}
 }
 
 // Test_LoginCommand_configWriteFailureLeavesItemOnTransientGetError covers the narrow case where
