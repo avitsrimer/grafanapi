@@ -863,25 +863,29 @@ func TestWriteRuleGroups_RefusesAFolderThatIsNotADirectory(t *testing.T) {
 
 	tests := []struct {
 		name string
-		seed func(t *testing.T, real string)
+		seed func(t *testing.T, linked string)
 	}{
-		{"a sibling differs from Grafana", func(t *testing.T, real string) {
-			seedRuleGroup(t, real, format.YAML, edited)
+		{"a sibling differs from Grafana", func(t *testing.T, linked string) {
+			t.Helper()
+
+			seedRuleGroup(t, linked, format.YAML, edited)
 		}},
-		{"the group is held in the other format", func(t *testing.T, real string) {
-			seedRuleGroup(t, real, format.JSON, remoteRuleGroup())
+		{"the group is held in the other format", func(t *testing.T, linked string) {
+			t.Helper()
+
+			seedRuleGroup(t, linked, format.JSON, remoteRuleGroup())
 		}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			real, dir := t.TempDir(), t.TempDir()
-			tc.seed(t, real)
+			linked, dir := t.TempDir(), t.TempDir()
+			tc.seed(t, linked)
 
 			require.NoError(t, os.MkdirAll(filepath.Join(dir, "rules"), 0o750))
-			require.NoError(t, os.Symlink(filepath.Join(real, "rules", "folder-uid-1"), filepath.Join(dir, "rules", "folder-uid-1")))
+			require.NoError(t, os.Symlink(filepath.Join(linked, "rules", "folder-uid-1"), filepath.Join(dir, "rules", "folder-uid-1")))
 
-			before := snapshotDir(t, real)
+			before := snapshotDir(t, linked)
 
 			err := alerts.WriteRuleGroups(dir, []*models.AlertRuleGroup{remoteRuleGroup()}, alerts.RuleGroupWriteOptions{
 				Format:    format.YAML,
@@ -891,7 +895,7 @@ func TestWriteRuleGroups_RefusesAFolderThatIsNotADirectory(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "symlink or not a directory")
 			assert.Contains(t, err.Error(), filepath.Join(dir, "rules", "folder-uid-1"))
-			assert.Equal(t, before, snapshotDir(t, real), "nothing is written through the link")
+			assert.Equal(t, before, snapshotDir(t, linked), "nothing is written through the link")
 		})
 	}
 }
