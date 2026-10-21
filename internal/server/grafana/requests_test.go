@@ -1,18 +1,22 @@
 package grafana_test
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/grafana/grafana-app-sdk/logging"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/httputils"
 	"github.com/grafana/grafanapi/internal/keychain"
 	"github.com/grafana/grafanapi/internal/server/grafana"
 	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAuthenticateAndProxyHandler_NoGrafanaURLConfigured(t *testing.T) {
@@ -218,21 +222,61 @@ func TestAuthenticateAndProxyHandler_RotateRejectedSurfacesOriginal401(t *testin
 }
 
 func TestAuthenticateAndProxyHandler_RefusesCrossOriginRedirect(t *testing.T) {
+	// The cookieless case is the one the proxy's own CheckRedirect has to carry: with a cookie the
+	// origin-bound round-tripper already refuses the hop.
+	testCases := []struct {
+		name   string
+		cookie string
+	}{
+		{name: "with session cookie", cookie: "abc123"},
+		{name: "without session cookie", cookie: ""},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			trap := testutils.NewCookieTrap(t)
+			backend := testutils.NewRedirectServer(t, trap.URL+"/cb?token=s3cret", http.StatusFound)
+
+			cfg := &config.Context{Grafana: &config.GrafanaConfig{Server: backend.URL, SessionCookie: testCase.cookie}}
+			handler := grafana.AuthenticateAndProxyHandler(cfg)
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/dashboards", nil)
+			rec := httptest.NewRecorder()
+
+			handler(rec, req)
+
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Equal(t, "Internal Server Error", strings.TrimSpace(rec.Body.String()))
+			assert.NotContains(t, rec.Body.String(), "s3cret")
+			assert.Zero(t, trap.Requests(), "the redirect target must never be contacted")
+		})
+	}
+}
+
+func TestAuthenticateAndProxyHandler_RefusedRedirectLogsOriginsOnly(t *testing.T) {
 	trap := testutils.NewCookieTrap(t)
 	backend := testutils.NewRedirectServer(t, trap.URL+"/cb?token=s3cret", http.StatusFound)
 
 	cfg := &config.Context{Grafana: &config.GrafanaConfig{Server: backend.URL, SessionCookie: "abc123"}}
 	handler := grafana.AuthenticateAndProxyHandler(cfg)
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/dashboards", nil)
+	var logs bytes.Buffer
+	ctx := logging.Context(t.Context(), logging.NewSLogLogger(slog.NewTextHandler(&logs, nil)))
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/dashboards", nil)
 	rec := httptest.NewRecorder()
 
 	handler(rec, req)
 
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, "Internal Server Error", strings.TrimSpace(rec.Body.String()))
-	assert.NotContains(t, rec.Body.String(), "s3cret")
-	assert.Zero(t, trap.Requests(), "the redirect target must never be contacted")
+	from, err := config.ServerOrigin(backend.URL)
+	require.NoError(t, err)
+	to, err := config.ServerOrigin(trap.URL)
+	require.NoError(t, err)
+
+	logged := logs.String()
+	assert.Contains(t, logged, from)
+	assert.Contains(t, logged, to)
+	assert.NotContains(t, logged, "s3cret", "the Location query must not reach the log")
+	assert.NotContains(t, logged, "/cb", "the Location path must not reach the log")
 }
 
 func TestAuthenticateAndProxyHandler_RedirectToLoginOnOtherOriginStillRendersAuthenticationError(t *testing.T) {
@@ -274,5 +318,5 @@ func TestAuthenticateAndProxyHandler_SameOriginRedirectKeepsCookie(t *testing.T)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "final destination", rec.Body.String())
-	assert.Equal(t, []string{"grafana_session=abc123", "grafana_session=abc123"}, cookies)
+	assert.Equal(t, []string{config.CookieHeaderValue("abc123"), config.CookieHeaderValue("abc123")}, cookies)
 }
