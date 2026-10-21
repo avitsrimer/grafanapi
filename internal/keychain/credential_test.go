@@ -48,7 +48,9 @@ func TestDecodeCredential_Errors(t *testing.T) {
 	}{
 		{"garbage after brace", `{not json` + testCookie, keychain.ErrMalformedCredential},
 		{"unsupported version", `{"v":2,"cookie":"` + testCookie + `","origin":"` + testOrigin + `"}`, keychain.ErrUnsupportedCredential},
-		{"missing version", `{"cookie":"` + testCookie + `","origin":"` + testOrigin + `"}`, keychain.ErrUnsupportedCredential},
+		{"missing version", `{"cookie":"` + testCookie + `","origin":"` + testOrigin + `"}`, keychain.ErrMalformedCredential},
+		{"zero version", `{"v":0,"cookie":"` + testCookie + `","origin":"` + testOrigin + `"}`, keychain.ErrMalformedCredential},
+		{"negative version", `{"v":-1,"cookie":"` + testCookie + `","origin":"` + testOrigin + `"}`, keychain.ErrMalformedCredential},
 		{"unknown field", `{"v":1,"cookie":"` + testCookie + `","origin":"` + testOrigin + `","x":1}`, keychain.ErrMalformedCredential},
 		{"empty cookie", `{"v":1,"cookie":"","origin":"` + testOrigin + `"}`, keychain.ErrMalformedCredential},
 		{"empty origin", `{"v":1,"cookie":"` + testCookie + `","origin":""}`, keychain.ErrMalformedCredential},
@@ -73,6 +75,8 @@ func TestEncodeCredential_Errors(t *testing.T) {
 		{"empty cookie", keychain.Credential{Origin: testOrigin}},
 		{"empty origin", keychain.Credential{Cookie: testCookie}},
 		{"both empty", keychain.Credential{}},
+		{"invalid utf-8 cookie", keychain.Credential{Cookie: "a\xffb", Origin: testOrigin}},
+		{"invalid utf-8 origin", keychain.Credential{Cookie: testCookie, Origin: "https://a\xff.example:443"}},
 	}
 
 	for _, tc := range tests {
