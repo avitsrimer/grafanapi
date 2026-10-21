@@ -4,9 +4,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	// startTimeout bounds how long a test waits for something that must happen.
+	startTimeout = 5 * time.Second
+	// settleTime is how long a test waits to prove something does not happen.
+	settleTime = 100 * time.Millisecond
 )
 
 func TestStartOnce(t *testing.T) {
@@ -22,13 +30,7 @@ func TestStartOnce(t *testing.T) {
 		startOnce(&once, start)
 		startOnce(&once, start)
 
-		select {
-		case <-started:
-		case <-t.Context().Done():
-			require.FailNow(t, "start was never called")
-		}
-		assert.Equal(t, int32(1), count.Load())
-		assert.Empty(t, started)
+		requireStartedOnce(t, started, &count)
 	})
 
 	t.Run("concurrent calls start once", func(t *testing.T) {
@@ -46,13 +48,7 @@ func TestStartOnce(t *testing.T) {
 		}
 		wg.Wait()
 
-		select {
-		case <-started:
-		case <-t.Context().Done():
-			require.FailNow(t, "start was never called")
-		}
-		assert.Equal(t, int32(1), count.Load())
-		assert.Empty(t, started)
+		requireStartedOnce(t, started, &count)
 	})
 }
 
@@ -60,15 +56,48 @@ func TestInitialize_runsHubOnce(t *testing.T) {
 	Initialize()
 	Initialize()
 
+	// Do runs its function synchronously and only if the Once is still unused: Initialize
+	// consumed hubOnce exactly when this function is skipped.
+	consumed := true
+	hubOnce.Do(func() { consumed = false })
+	require.True(t, consumed, "Initialize did not guard the hub start with hubOnce")
+
 	c := &connection{send: make(chan []byte, 1)}
-	wsHub.register <- c
-	wsHub.unregister <- c
+	timeout := time.After(startTimeout)
+
+	select {
+	case wsHub.register <- c:
+	case <-timeout:
+		require.FailNow(t, "hub did not accept the register request")
+	}
+	select {
+	case wsHub.unregister <- c:
+	case <-timeout:
+		require.FailNow(t, "hub did not accept the unregister request")
+	}
 
 	// unregister closes the connection's send channel: only a running hub does that.
 	select {
 	case _, ok := <-c.send:
 		assert.False(t, ok)
-	case <-t.Context().Done():
+	case <-timeout:
 		require.FailNow(t, "hub did not process the unregister request")
 	}
+}
+
+func requireStartedOnce(t *testing.T, started <-chan struct{}, count *atomic.Int32) {
+	t.Helper()
+
+	select {
+	case <-started:
+	case <-time.After(startTimeout):
+		require.FailNow(t, "start was never called")
+	}
+
+	select {
+	case <-started:
+		require.FailNow(t, "start was called more than once")
+	case <-time.After(settleTime):
+	}
+	assert.Equal(t, int32(1), count.Load())
 }
