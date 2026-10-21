@@ -2,8 +2,10 @@ package alerts_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -326,6 +328,371 @@ func TestPushRuleUIDs_RefusesBeforeAnyWrite(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, apiErr.Code)
 		assert.Empty(t, fixture.writes())
 	})
+}
+
+// TestPlanScoped_RefusesWhatReachesBeyondTheNamedRules feeds the guard plans no real scope output
+// produces, built by doctoring the synthetic group, and pins that each is refused while the plan
+// scopeBundles really builds passes.
+func TestPlanScoped_RefusesWhatReachesBeyondTheNamedRules(t *testing.T) {
+	remote := alerts.Bundle{Groups: []*models.AlertRuleGroup{scopedRemoteGroup("api", "rule-uid-1", "rule-uid-2", "rule-uid-3")}}
+	uids := []string{"rule-uid-1"}
+	editedLine := "~ rule-uid-1 title (rule-uid-1)"
+
+	// synthetic is the local side of a genuine rule-scoped plan: rule 1 edited, nothing else.
+	synthetic := func(t *testing.T) *models.AlertRuleGroup {
+		t.Helper()
+
+		edited := scopedFileRule("rule-uid-1")
+		edited.Data[0].Model = map[string]any{"type": "math", "expression": "$A > 5"}
+
+		local := alerts.Bundle{Groups: []*models.AlertRuleGroup{pushGroup(scopedGroup, edited)}}
+
+		built, _, err := alerts.ScopeBundlesForTest(local, remote, uids)
+		require.NoError(t, err)
+		require.Len(t, built.Groups, 1)
+
+		group := *built.Groups[0]
+		group.Rules = slices.Clone(group.Rules)
+
+		return &group
+	}
+
+	otherRemote := scopedGroupOf("folder-uid-2", "other-group", "api", "rule-uid-1", "rule-uid-9")
+	otherLocal := func(expression string) *models.AlertRuleGroup {
+		edited := scopedFileRuleIn("folder-uid-2", "other-group", "rule-uid-1")
+		edited.Data[0].Model = map[string]any{"type": "math", "expression": expression}
+
+		return testGroup("folder-uid-2", "other-group", edited, scopedFileRuleIn("folder-uid-2", "other-group", "rule-uid-9"))
+	}
+
+	tests := []struct {
+		name    string
+		local   func(group *models.AlertRuleGroup) alerts.Bundle
+		remote  alerts.Bundle
+		uids    []string
+		wantErr string
+	}{
+		{
+			name: "a dropped sibling",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				group.Rules = []*models.ProvisionedAlertRule{group.Rules[0], group.Rules[2]}
+
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group}}
+			},
+			remote:  remote,
+			uids:    uids,
+			wantErr: "(- rule-uid-2 title (rule-uid-2))",
+		},
+		{
+			name: "another interval",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				group.Interval = 120
+
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group}}
+			},
+			remote:  remote,
+			uids:    uids,
+			wantErr: "(~ interval 60s→120s)",
+		},
+		{
+			name: "another order",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				group.Rules[0], group.Rules[2] = group.Rules[2], group.Rules[0]
+
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group}}
+			},
+			remote:  remote,
+			uids:    uids,
+			wantErr: "(~ rule order)",
+		},
+		{
+			name: "a changed sibling",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				edited := *group.Rules[1]
+				edited.Data = slices.Clone(edited.Data)
+				edited.Data[0] = &models.AlertQuery{
+					RefID: edited.Data[0].RefID, DatasourceUID: edited.Data[0].DatasourceUID,
+					Model: map[string]any{"type": "math", "expression": "tampered"},
+				}
+				group.Rules[1] = &edited
+
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group}}
+			},
+			remote:  remote,
+			uids:    uids,
+			wantErr: "(~ rule-uid-2 title (rule-uid-2))",
+		},
+		{
+			name: "a group Grafana does not hold",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				group.Title = "ghost"
+
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group}}
+			},
+			remote:  remote,
+			uids:    uids,
+			wantErr: "RuleGroup folder-uid-1/ghost: the plan would change more than the named rules (action Create)",
+		},
+		{
+			name: "a group holding none of the named rules",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group, otherLocal("changed")}}
+			},
+			remote: alerts.Bundle{Groups: []*models.AlertRuleGroup{
+				remote.Groups[0], scopedGroupOf("folder-uid-2", "other-group", "api", "rule-uid-9"),
+			}},
+			uids:    uids,
+			wantErr: "RuleGroup folder-uid-2/other-group: the plan would change more than the named rules (a rule group holding none",
+		},
+		{
+			name: "a named rule's change under another group's ID",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group, otherLocal("changed")}}
+			},
+			remote:  alerts.Bundle{Groups: []*models.AlertRuleGroup{remote.Groups[0], otherRemote}},
+			uids:    []string{"rule-uid-1", "rule-uid-9"},
+			wantErr: "RuleGroup folder-uid-2/other-group: the plan would change more than the named rules (" + editedLine + ")",
+		},
+		{
+			name: "a contact point",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				return alerts.Bundle{
+					Groups:        []*models.AlertRuleGroup{group},
+					ContactPoints: []*models.EmbeddedContactPoint{diffPoint("cp-uid-1", "probe-slack", map[string]any{"recipient": "#probe"})},
+				}
+			},
+			remote:  remote,
+			uids:    uids,
+			wantErr: "push of ContactPoint cp-uid-1: the plan would change more than the named rules (not a rule group)",
+		},
+		{
+			name: "a policy tree",
+			local: func(group *models.AlertRuleGroup) alerts.Bundle {
+				return alerts.Bundle{Groups: []*models.AlertRuleGroup{group}, Policies: &models.Route{Receiver: "probe"}}
+			},
+			remote:  remote,
+			uids:    uids,
+			wantErr: "push of PolicyTree",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			changes, err := alerts.PlanScopedForTest(tc.local(synthetic(t)), tc.remote, tc.uids)
+			require.Error(t, err)
+			assert.Nil(t, changes)
+			assert.Contains(t, err.Error(), "alerts: push: refusing a rule-scoped push of ")
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+
+	t.Run("the plan scopeBundles builds passes", func(t *testing.T) {
+		changes, err := alerts.PlanScopedForTest(alerts.Bundle{Groups: []*models.AlertRuleGroup{synthetic(t)}}, remote, uids)
+		require.NoError(t, err)
+		assert.Equal(t, []alerts.Change{{
+			Action: alerts.ActionUpdate, Kind: alerts.KindRuleGroup, ID: "folder-uid-1/probe-group", Detail: []string{editedLine},
+		}}, changes)
+	})
+
+	t.Run("an identical pair is one Unchanged and passes", func(t *testing.T) {
+		identical := alerts.Bundle{Groups: []*models.AlertRuleGroup{
+			pushGroup(scopedGroup, scopedFileRule("rule-uid-1"), scopedFileRule("rule-uid-2"), scopedFileRule("rule-uid-3")),
+		}}
+
+		changes, err := alerts.PlanScopedForTest(identical, remote, uids)
+		require.NoError(t, err)
+		assert.Equal(t, []alerts.Change{{
+			Action: alerts.ActionUnchanged, Kind: alerts.KindRuleGroup, ID: "folder-uid-1/probe-group",
+		}}, changes)
+	})
+}
+
+// TestPushRuleUIDs_GuardStandsBetweenScopeAndWrite hands push doctored scope output - which no
+// scopeBundles produces - and pins that Push itself refuses it, in apply and in dry run, before a
+// write and with an empty Result. It fails if push plans without planScoped.
+func TestPushRuleUIDs_GuardStandsBetweenScopeAndWrite(t *testing.T) {
+	doctors := map[string]func(*models.AlertRuleGroup) []*models.AlertRuleGroup{
+		"an extra sibling": func(group *models.AlertRuleGroup) []*models.AlertRuleGroup {
+			extra := scopedFileRule("rule-uid-8")
+			group.Rules = append(group.Rules, extra)
+
+			return []*models.AlertRuleGroup{group}
+		},
+		"another interval": func(group *models.AlertRuleGroup) []*models.AlertRuleGroup {
+			group.Interval = 120
+
+			return []*models.AlertRuleGroup{group}
+		},
+		"a group Grafana does not hold": func(group *models.AlertRuleGroup) []*models.AlertRuleGroup {
+			return []*models.AlertRuleGroup{group, scopedGroupOf(scopedFolder, "ghost", "", "rule-uid-8")}
+		},
+	}
+
+	for name, doctor := range doctors {
+		for _, dryRun := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s dryRun=%t", name, dryRun), func(t *testing.T) {
+				fixture := newPushFixture(t, scopedRoutes(t, scopedRemoteGroup("api", "rule-uid-1", "rule-uid-2")))
+
+				edited := scopedFileRule("rule-uid-1")
+				edited.Data[0].Model = map[string]any{"type": "math", "expression": "$A > 5"}
+
+				local := alerts.Bundle{Groups: []*models.AlertRuleGroup{pushGroup(scopedGroup, edited, scopedFileRule("rule-uid-2"))}}
+
+				scope := func(local, remote alerts.Bundle, uids []string) (alerts.Bundle, alerts.Bundle, error) {
+					built, held, err := alerts.ScopeBundlesForTest(local, remote, uids)
+					if err != nil {
+						return built, held, err
+					}
+
+					group := *built.Groups[0]
+					group.Rules = slices.Clone(group.Rules)
+
+					return alerts.Bundle{Groups: doctor(&group)}, held, nil
+				}
+
+				result, err := alerts.PushWithScopeForTest(
+					t.Context(), fixture.client, local, alerts.PushOptions{RuleUIDs: []string{"rule-uid-1"}, DryRun: dryRun}, scope,
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "refusing a rule-scoped push")
+				assert.Equal(t, alerts.Result{}, result)
+				assert.Empty(t, fixture.writes())
+			})
+		}
+	}
+}
+
+// TestPushRuleUIDs_ProvenanceRefusals pins that a scoped write is refused exactly as a whole push
+// refuses it, per item and in dry run too.
+func TestPushRuleUIDs_ProvenanceRefusals(t *testing.T) {
+	mixed := scopedRemoteGroup("", "rule-uid-1", "rule-uid-2")
+	mixed.Rules[1].Provenance = "api"
+
+	tests := []struct {
+		name    string
+		remote  *models.AlertRuleGroup
+		wantErr string
+	}{
+		{name: "mixed provenance", remote: mixed, wantErr: "mixed provenance"},
+		{name: "foreign provenance", remote: scopedRemoteGroup("file", "rule-uid-1", "rule-uid-2"), wantErr: `provenance "file" is managed outside the API`},
+	}
+
+	for _, tc := range tests {
+		for _, dryRun := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s dryRun=%t", tc.name, dryRun), func(t *testing.T) {
+				fixture := newPushFixture(t, scopedRoutes(t, tc.remote))
+
+				edited := scopedFileRule("rule-uid-1")
+				edited.Data[0].Model = map[string]any{"type": "math", "expression": "$A > 5"}
+
+				local := alerts.Bundle{Groups: []*models.AlertRuleGroup{pushGroup(scopedGroup, edited, scopedFileRule("rule-uid-2"))}}
+
+				result, err := alerts.Push(
+					t.Context(), fixture.client, local, alerts.PushOptions{RuleUIDs: []string{"rule-uid-1"}, DryRun: dryRun},
+				)
+				require.NoError(t, err)
+				assert.Empty(t, result.Applied)
+				require.Len(t, result.Failed, 1)
+				assert.Equal(t, "folder-uid-1/probe-group", result.Failed[0].Change.ID)
+				assert.Contains(t, result.Failed[0].Err.Error(), tc.wantErr)
+				assert.Empty(t, fixture.writes())
+			})
+		}
+	}
+}
+
+// TestPushRuleUIDs_ForbiddenWrite pins that a 403 on the group PUT is a per-item failure keeping
+// the *runtime.APIError reachable, so it renders as permission denied.
+func TestPushRuleUIDs_ForbiddenWrite(t *testing.T) {
+	routes := scopedRoutes(t, scopedRemoteGroup("api", "rule-uid-1"))
+	routes[pushRoute(http.MethodPut, groupPath(scopedFolder, scopedGroup))] = stubResponse{
+		status: http.StatusForbidden, body: `{"message":"denied"}`,
+	}
+
+	fixture := newPushFixture(t, routes)
+
+	edited := scopedFileRule("rule-uid-1")
+	edited.Data[0].Model = map[string]any{"type": "math", "expression": "$A > 5"}
+
+	local := alerts.Bundle{Groups: []*models.AlertRuleGroup{pushGroup(scopedGroup, edited)}}
+
+	result, err := alerts.Push(t.Context(), fixture.client, local, alerts.PushOptions{RuleUIDs: []string{"rule-uid-1"}})
+	require.NoError(t, err)
+	require.Len(t, result.Failed, 1)
+
+	var apiErr *runtime.APIError
+
+	require.ErrorAs(t, result.Failed[0].Err, &apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.Code)
+}
+
+// TestPushRuleUIDs_StopOnErrorStopsAtTheFirstGroup pins that with StopOnError the second group is
+// never written once the first group's PUT failed.
+func TestPushRuleUIDs_StopOnErrorStopsAtTheFirstGroup(t *testing.T) {
+	other := scopedGroupOf("folder-uid-2", "other-group", "api", "rule-uid-9")
+	routes := scopedRoutes(t, scopedRemoteGroup("api", "rule-uid-1"), other)
+	routes[pushRoute(http.MethodPut, groupPath(scopedFolder, scopedGroup))] = stubResponse{
+		status: http.StatusForbidden, body: `{"message":"denied"}`,
+	}
+
+	fixture := newPushFixture(t, routes)
+
+	one, nine := scopedFileRule("rule-uid-1"), scopedFileRuleIn("folder-uid-2", "other-group", "rule-uid-9")
+	one.Data[0].Model = map[string]any{"type": "math", "expression": "one"}
+	nine.Data[0].Model = map[string]any{"type": "math", "expression": "nine"}
+
+	local := alerts.Bundle{Groups: []*models.AlertRuleGroup{
+		pushGroup(scopedGroup, one),
+		testGroup("folder-uid-2", "other-group", nine),
+	}}
+
+	result, err := alerts.Push(
+		t.Context(), fixture.client, local,
+		alerts.PushOptions{RuleUIDs: []string{"rule-uid-1", "rule-uid-9"}, StopOnError: true},
+	)
+	require.Error(t, err)
+
+	var apiErr *runtime.APIError
+
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.Code)
+
+	require.Len(t, result.Failed, 1)
+	assert.Equal(t, "folder-uid-1/probe-group", result.Failed[0].Change.ID)
+	assert.Len(t, fixture.writes(), 1, "only the first group's PUT is attempted")
+	assert.Empty(t, fixture.requests(http.MethodPut, groupPath("folder-uid-2", "other-group")))
+}
+
+// TestPushRuleUIDs_DryRunMatchesApply pins that a dry run reports the plan an apply then performs,
+// with no write.
+func TestPushRuleUIDs_DryRunMatchesApply(t *testing.T) {
+	run := func(t *testing.T, dryRun bool) (alerts.Result, *pushFixture) {
+		t.Helper()
+
+		fixture := newPushFixture(t, scopedRoutes(t, scopedRemoteGroup("api", "rule-uid-1", "rule-uid-2", "rule-uid-3")))
+
+		edited := scopedFileRule("rule-uid-1")
+		edited.Data[0].Model = map[string]any{"type": "math", "expression": "$A > 5"}
+
+		local := alerts.Bundle{Groups: []*models.AlertRuleGroup{{
+			FolderUID: scopedFolder, Title: scopedGroup, Interval: 120,
+			Rules: []*models.ProvisionedAlertRule{scopedFileRule("rule-uid-3"), edited},
+		}}}
+
+		result, err := alerts.Push(
+			t.Context(), fixture.client, local, alerts.PushOptions{RuleUIDs: []string{"rule-uid-1"}, DryRun: dryRun},
+		)
+		require.NoError(t, err)
+
+		return result, fixture
+	}
+
+	applied, _ := run(t, false)
+	planned, fixture := run(t, true)
+
+	assert.Equal(t, applied.Applied, planned.Applied)
+	assert.Equal(t, applied.Failed, planned.Failed)
+	assert.Empty(t, fixture.writes())
 }
 
 // scopedFileRule is a rule as a bundle file holds it, addressing the probe group.

@@ -134,6 +134,111 @@ func scopedBundles(
 	return scope(local, remote, uids)
 }
 
+// planScoped is Plan plus the check that makes a rule-scoped push unable to reach beyond the rules it
+// names: it is the only way the scoped path plans, so what push applies is what this accepted.
+//
+// scopeBundles builds a local group that equals Grafana's but for the named rules, so on real input
+// every entry is an Update or Unchanged of a group holding a named rule, and an Update's detail is
+// the `~ <title> (<uid>)` lines of those rules. The check is the tripwire for the day that stops
+// being true. Every entry must satisfy all of:
+//
+//   - it is a rule group, never a contact point or the policy tree;
+//   - it is an Update or an Unchanged, never a Create;
+//   - its ID is a group holding a named rule;
+//   - each of its detail lines is the `~` line of a named rule of that group - a rule belongs to the
+//     first group (in plan order) that holds it, so a line cannot be borrowed from another group;
+//   - an Unchanged has no detail and an Update has some.
+//
+// Anything else - an added or removed rule, a changed interval, a re-order, a replaced uid-less rule -
+// is an error, whatever stage produced it, and push returns it before any write.
+func planScoped(local, remote Bundle, uids []string) ([]Change, error) {
+	changes, err := Plan(local, remote)
+	if err != nil {
+		return nil, err
+	}
+
+	allowed := allowedScopedDetails(local.Groups, uids)
+
+	for _, change := range changes {
+		if offence := scopedOffence(change, allowed); offence != "" {
+			return nil, fmt.Errorf(
+				"alerts: push: refusing a rule-scoped push of %s %s: the plan would change more than the named rules (%s)",
+				change.Kind, change.ID, offence,
+			)
+		}
+	}
+
+	return changes, nil
+}
+
+// allowedScopedDetails maps the ID of every group holding a named rule to the detail lines a plan
+// may carry for it: the `~` line of each named rule it holds. A rule is credited to the first group
+// that holds it, so the same uid in a second group is allowed nothing there.
+func allowedScopedDetails(groups []*models.AlertRuleGroup, uids []string) map[string]map[string]struct{} {
+	allowed := make(map[string]map[string]struct{}, len(uids))
+	claimed := make(map[string]struct{}, len(uids))
+
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+
+		for _, uid := range uids {
+			rule := findRule(group.Rules, uid)
+			if rule == nil {
+				continue
+			}
+
+			if _, taken := claimed[uid]; taken {
+				continue
+			}
+
+			claimed[uid] = struct{}{}
+
+			if allowed[groupID(group)] == nil {
+				allowed[groupID(group)] = make(map[string]struct{})
+			}
+
+			allowed[groupID(group)][ruleDetail(changedMarker, rule)] = struct{}{}
+		}
+	}
+
+	return allowed
+}
+
+// scopedOffence names what is wrong with one plan entry of a rule-scoped push, or returns "" when it
+// is allowed.
+func scopedOffence(change Change, allowed map[string]map[string]struct{}) string {
+	if change.Kind != KindRuleGroup {
+		return "not a rule group"
+	}
+
+	if change.Action != ActionUpdate && change.Action != ActionUnchanged {
+		return "action " + string(change.Action)
+	}
+
+	lines, scoped := allowed[change.ID]
+	if !scoped {
+		return "a rule group holding none of the named rules"
+	}
+
+	if change.Action == ActionUnchanged && len(change.Detail) > 0 {
+		return "an unchanged group with changes"
+	}
+
+	if change.Action == ActionUpdate && len(change.Detail) == 0 {
+		return "an update that changes none of the named rules"
+	}
+
+	for _, line := range change.Detail {
+		if _, ok := lines[line]; !ok {
+			return line
+		}
+	}
+
+	return ""
+}
+
 // remoteGroupHolding returns the group among groups that holds the rule carrying uid, or nil.
 func remoteGroupHolding(groups []*models.AlertRuleGroup, uid string) *models.AlertRuleGroup {
 	for _, group := range groups {

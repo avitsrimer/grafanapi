@@ -636,7 +636,7 @@ func push(
 			return Result{}, err
 		}
 
-		changes, err = Plan(local, remote)
+		changes, err = planScoped(local, remote, dedupeUIDs(opts.RuleUIDs))
 	} else {
 		remote, err = Pull(ctx, gClient, PullOptions{
 			Groups:        localGroupRefs(local.Groups),

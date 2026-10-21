@@ -22,3 +22,8 @@ func PushWithScopeForTest(
 func ScopeBundlesForTest(local, remote Bundle, uids []string) (Bundle, Bundle, error) {
 	return scopeBundles(local, remote, uids)
 }
+
+// PlanScopedForTest exposes planScoped.
+func PlanScopedForTest(local, remote Bundle, uids []string) ([]Change, error) {
+	return planScoped(local, remote, uids)
+}
