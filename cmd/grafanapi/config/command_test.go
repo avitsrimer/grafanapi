@@ -622,6 +622,43 @@ func Test_CheckCommand_reportsBoundSession(t *testing.T) {
 	assert.NotContains(t, out, attackCookie)
 }
 
+// Test_CheckCommand_migratesLegacyItemAndAsksPredicateWithEnvOverrides pins the one line every
+// upgrading user sees and the trust-predicate wiring: config check applies GRAFANA_SERVER, so it
+// must pass envOverridesApplied=true (flipping it would let a legacy item be bound to a
+// GRAFANA_SERVER target and probed with the cookie).
+func Test_CheckCommand_migratesLegacyItemAndAsksPredicateWithEnvOverrides(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), attackCookie))
+
+	var gotFile string
+
+	var gotEnv bool
+
+	t.Cleanup(config.SetLegacyBindAllowed(func(file string, envApplied bool) bool {
+		gotFile, gotEnv = file, envApplied
+
+		return true
+	}))
+
+	configFile := serverConfig(t, home.URL)
+	out := runCheck(t, store, configFile, nil)
+
+	assert.Equal(t, configFile, gotFile)
+	assert.True(t, gotEnv, "config check applies GRAFANA_SERVER, so it must pass envOverridesApplied=true")
+	assert.Contains(t, out, "Session binding: bound to "+home.URL+" (migrated from an unbound session)")
+	assert.NotContains(t, out, attackCookie)
+
+	raw, ok := store.RawValue(keychain.Account("dev"))
+	require.True(t, ok)
+
+	cred, err := keychain.DecodeCredential(raw)
+	require.NoError(t, err)
+	assert.Equal(t, attackCookie, cred.Cookie)
+	assert.Equal(t, home.URL, cred.Origin)
+}
+
 func Test_CheckCommand_reportsNoStoredSession(t *testing.T) {
 	home, _, _ := newRecordingServer(t)
 
