@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -578,6 +579,84 @@ contexts:
 		},
 	}
 	testCase.Run(t)
+}
+
+// runCheck runs "config check" against configFile with the keep-alive seams and $HOME isolated and
+// returns its stdout, so a binding assertion never depends on the real LaunchAgent.
+func runCheck(t *testing.T, store keychain.Store, configFile string, env map[string]string) string {
+	t.Helper()
+
+	t.Cleanup(config.SetKeepaliveController(testutils.NewFakeController()))
+	t.Cleanup(config.SetKeychainStore(store))
+
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["HOME"] = checkHome(t)
+
+	var stdout string
+
+	testutils.CommandTestCase{
+		Cmd:     config.Command(),
+		Command: []string{"check", "--config", configFile},
+		Env:     env,
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+			func(_ *testing.T, result testutils.CommandResult) { stdout = result.Stdout },
+		},
+	}.Run(t)
+
+	return stdout
+}
+
+func Test_CheckCommand_reportsBoundSession(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), testutils.BoundSecret(t, attackCookie, home.URL)))
+
+	out := runCheck(t, store, serverConfig(t, home.URL), nil)
+
+	assert.Contains(t, out, "Session binding: bound to "+home.URL)
+	assert.NotContains(t, out, "migrated")
+	assert.NotContains(t, out, attackCookie)
+}
+
+func Test_CheckCommand_reportsNoStoredSession(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+
+	out := runCheck(t, testutils.NewFakeKeychainStore(), serverConfig(t, home.URL), nil)
+
+	assert.Contains(t, out, "Session binding: no stored session")
+}
+
+// Test_CheckCommand_mismatchShowsOrderedRemedyAndKeepsChecking: the item is bound to the
+// legitimate server while GRAFANA_SERVER points elsewhere. The warning names both origins, the
+// remedy lists "unset the overrides" before "login update --rebind", and the remaining checks
+// still run. The other server may be probed, but never with the cookie.
+func Test_CheckCommand_mismatchShowsOrderedRemedyAndKeepsChecking(t *testing.T) {
+	home, _, _ := newRecordingServer(t)
+	evil, _, cookied := newRecordingServer(t)
+
+	store := testutils.NewFakeKeychainStore()
+	require.NoError(t, store.Set(keychain.Account("dev"), testutils.BoundSecret(t, attackCookie, home.URL)))
+
+	out := runCheck(t, store, serverConfig(t, home.URL), map[string]string{"GRAFANA_SERVER": evil.URL})
+
+	assert.Contains(t, out, "Session cookie:")
+	assert.Contains(t, out, home.URL)
+	assert.Contains(t, out, evil.URL)
+	assert.NotContains(t, out, "Session binding: bound")
+
+	unset := strings.Index(out, "unset GRAFANA_SERVER")
+	rebind := strings.Index(out, "login update --context dev --rebind")
+	require.GreaterOrEqual(t, unset, 0, out)
+	require.Greater(t, rebind, unset, out)
+
+	assert.Contains(t, out, "Configuration:")
+	assert.Contains(t, out, "Connectivity:")
+	assert.NotContains(t, out, attackCookie)
+	assert.Zero(t, cookied.Load())
 }
 
 // checkHome points $HOME at a fresh temporary directory for the duration of the test, so

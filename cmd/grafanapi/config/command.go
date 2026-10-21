@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -425,8 +426,22 @@ func checkContext(cmd *cobra.Command, gCtx *config.Context, resolveOpts config.R
 	// probes below always need the cookie. Unlike Options.LoadConfig (which only resolves the
 	// current context via an Override), "config check" inspects every context, so it calls the
 	// per-context helper directly.
-	if _, err := config.ResolveContextSessionCookie(keychainStore, gCtx, resolveOpts); err != nil {
+	binding, err := config.ResolveContextSessionCookie(keychainStore, gCtx, resolveOpts)
+
+	switch {
+	case err != nil:
 		io.Warning(stdout, "Session cookie: %s\n", io.Yellow(summarizeError(err)))
+
+		var bindingErr *config.SessionBindingError
+		if errors.As(err, &bindingErr) {
+			printSuggestions(err)
+		}
+	case binding.State == config.BindingBound:
+		io.Success(stdout, "Session binding: bound to %s", io.Green(binding.Origin))
+	case binding.State == config.BindingMigrated:
+		io.Success(stdout, "Session binding: bound to %s (migrated from an unbound session)", io.Green(binding.Origin))
+	default:
+		io.Info(stdout, "Session binding: no stored session")
 	}
 
 	if err := gCtx.Validate(); err != nil {
