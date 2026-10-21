@@ -104,7 +104,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
    - `resources delete`: Delete resources from Grafana
    - `resources edit`: Edit resources interactively
    - `resources validate`: Validate resource manifests
-   - `resources serve`: Serve resources locally with live reload
+   - `resources serve`: Serve resources locally with live reload (binds 127.0.0.1 by default; the
+     printed URL carries a per-run access token)
 
 4. **explore**: Run a single ad-hoc query against a Grafana datasource (mirrors Grafana's Explore UI)
    - `explore DATASOURCE QUERY`: resolve a datasource (UID, then name), map the query string onto
@@ -228,7 +229,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
 - `explore/`: `explore` — thin Cobra wiring (flags, a `table` `format.Codec` adapter) over
   `internal/explore`; no domain logic lives here
 - `datasources/`: `datasources` — thin Cobra wiring (flags, a `table` `format.Codec` adapter)
-  calling the generated Grafana client directly; no domain logic to extract for a single list call
+  calling the generated Grafana client directly; no domain logic to extract for a single list call.
+  Its table cells go through `termsafe.Cell` (name/UID/type are server-controlled); json/yaml stay raw
 - `installskill/`: `install-skill` — writes the `skill.Files` embedded FS to `<--to>/skills/grafanapi`
   (`os.RemoveAll` then `fs.WalkDir`, directories `0o750`/files `0o600`); no config/auth dependency
 - `session/`: `session refresh` / `session keepalive install|status|uninstall` — a **standalone**
@@ -255,7 +257,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   title or rule name is arbitrary user input, one embedded tab or newline is read by the tabwriter
   as a column or row terminator (silently shifting or splitting the row), and a `Cf` bidi override
   makes a terminal re-order the rest of the line without changing a byte of the layout (the
-  json/yaml codecs keep the raw value).
+  json/yaml codecs keep the raw value). `cell` delegates to `termsafe.Runes` (byte-identical to
+  the predicate it used before the extraction).
   `newTableWriter` deliberately drops the
   `tabwriter.TabIndent` the repo's other table renderers pass: that flag pads a *leading* empty
   cell with raw tabs, and FOLDER is empty for every row in degraded mode, which would shift whole
@@ -290,7 +293,12 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   the rule ops (positional uids Cobra already counted plus a bool flag); `pull`/`push` keep
   `resources`' own flag validation and byte-identical messages (`--path is required`,
   `max-concurrent must be greater than zero`)
-- `fail/`: Error handling and detailed error messages
+- `fail/`: Error handling and detailed error messages. `DetailedError.Error()` scrubs `Summary`,
+  `Suggestions` and `DocsLink` with `termsafe.Cell` and a non-yaml `Parent` with `termsafe.Text`; a
+  `yaml.Error` parent is scrubbed only when colour is off (with colour on, stripping would remove the
+  legitimate highlighting). `Details` is **never** scrubbed: every producer is local and
+  `ValidationError.AnnotatedSource` is intentionally coloured. Only errors *returned* by a command pass
+  through here; `config check` and `session refresh` print some error text directly
 - `io/`: Output formatting and user messages
 
 **skill/** - Embedded Claude Code skill (repo root, not under `internal/` or `cmd/`)
@@ -307,6 +315,27 @@ grafanapi follows the Cobra command pattern with eight main command groups:
 - Environment variable overrides for non-secret fields (GRAFANA_SERVER, GRAFANA_ORG_ID, GRAFANA_STACK_ID)
 - Automatic Stack ID discovery for Grafana Cloud
 - TLS configuration support
+- `server_url.go`: the server-URL and redirect policy every cookie-carrying path shares.
+  `ValidateServerURL` accepts `https://`, or `http://` only on a loopback host (`localhost` by name,
+  `127.0.0.0/8`, `::1`; `0.0.0.0`, Docker service names and `host.docker.internal` are refused),
+  with no userinfo; a path is allowed. `ServerOrigin` only **normalises** (no policy) to
+  `<scheme>://<host>:<port>` — host lower-cased with one trailing dot dropped, port **always
+  explicit** (443/80 by default), non-ASCII hosts refused (an IDN must be configured in punycode, so
+  no `idna` dependency and no later conversion that could change a stored value). That string is
+  persisted by the Keychain origin binding and must never change. Failures are `*ServerURLError`
+  (wraps `ErrInvalidServerURL`, fixed `Reason`, never echoes the input) and `*UnsafeRedirectError`
+  (wraps `ErrUnsafeRedirect`, `From`/`To` are **origins only**, never a path or query).
+  `SetSessionCookie(req, server, cookie)` is the one place outside the rotating round-tripper that
+  writes the `Cookie` header, and only for a validated server and a same-origin request;
+  `SameOriginRedirects(server)` is the `CheckRedirect` every `http.Client` we build uses (refuses any
+  hop off the origin, stops after 10). Refuse by default, never strip-and-follow: a followed hop
+  would have to decide what to do with a credential, and refusing keeps that decision out of the
+  tool. Per path: the k8s and openapi clients carry no `CheckRedirect` of their own and rely on the
+  origin-bound round-tripper (`WrapWithSession`), which re-checks every request, redirect hops
+  included; the rotating round-tripper guards on its **own** `server` from `cfg.Server`, not on
+  `src.server`, so the two concerns stay independent; the raw-HTTP clients (`session`, `explore`,
+  `alerts`, rotate, bootdata) use `CheckRedirect: SameOriginRedirects`; the `serve` dashboard proxy
+  composes it with its own redirect handling.
 - `session_source.go`: `SessionSource` — a shared, mutable session cookie holder (mutex +
   generation counter) built once per context at credential-resolution time when a cookie is
   loaded from the Keychain. `Rotate()` POSTs `/api/user/auth-tokens/rotate` with the current
@@ -318,7 +347,8 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   e.g. tests), or the underlying transport unchanged (no cookie). On a truly-dead session (rotate
   itself gets `401`/`403`), the original `401` is returned unchanged so the existing
   `cmd/grafanapi/fail` stale-session rendering fires — rotation is purely a transparent retry
-  layer in front of that path. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
+  layer in front of that path. The cookie is attached only to the server origin: an off-origin
+  request is refused before `Current()`, so it can never trigger a rotation. Bootdata/stack-ID discovery (`stack_id.go`) is intentionally
   **not** wired into rotation (pre-auth, single non-retryable probe, fails soft already).
   `Refresh(ctx) (string, error)` (added for `session refresh`) is a 3-line force-now wrapper —
   `Current()` → `Rotate(ctx, gen)` — that reuses `Rotate`'s single-flight join instead of
@@ -339,10 +369,13 @@ grafanapi follows the Cobra command pattern with eight main command groups:
   (`grafana.ClientFromContext`)
 - `query.go`: `QueryFieldForType`/`BuildQuery` — datasource-type → request-field mapping
   (`expr`/`rawSql`/`target`/`query`), `--param`/`--interval`/`--instant` handling
-- `run.go`: `Run` — raw `POST /api/ds/query` over `httputils.NewTransport` wrapped with
-  `GrafanaConfig.WrapWithSession` (so a `401` rotates-and-retries like every other authenticated
-  path), decode, and per-`refId` error surfacing
-- `render.go`: `RenderTable` — `text/tabwriter` rendering for the default `table` output format
+- `run.go`: `Run` — raw `POST /api/ds/query` (client `CheckRedirect: config.SameOriginRedirects`)
+  over `httputils.NewTransport` wrapped with `GrafanaConfig.WrapWithSession` (so a `401`
+  rotates-and-retries like every other authenticated path), decode, and per-`refId` error
+  surfacing
+- `render.go`: `RenderTable` — `text/tabwriter` rendering for the default `table` output format.
+  Cells, headers, frame names and refIDs go through `termsafe.Cell` **before** `truncate`, which
+  measures runes (so a dropped sequence cannot make a cell look longer than it renders)
 - **Deliberate raw-HTTP decision**: the query path decodes the raw `/api/ds/query` response body
   into these local structs instead of calling the generated client's
   `Datasources.QueryMetricsWithExpressions`, because the vendored `models.Frame`/`models.Field`
@@ -383,9 +416,9 @@ mode.
   rather than `null`. Optional output fields (`updated`, `lastEvaluation`) are `*time.Time` with
   `omitempty`, so a rule the server reported no timestamp for has no key rather than
   `0001-01-01T00:00:00Z`
-- `state.go`: local wire structs for the `{status,data}` envelope of
-  `GET /api/prometheus/grafana/api/v1/rules` plus `RuleState`, `RuleStates` and `FetchRuleStates` —
-  raw HTTP over
+- `state.go` (client `CheckRedirect: config.SameOriginRedirects`): local wire structs for the
+  `{status,data}` envelope of `GET /api/prometheus/grafana/api/v1/rules` plus `RuleState`,
+  `RuleStates` and `FetchRuleStates` — raw HTTP over
   `httputils.NewTransport` wrapped with `GrafanaConfig.WrapWithSession` (rotate-on-401), bounded
   `stateTimeout`/`maxErrorBodySnippet`, `401` returned as an **unwrapped**
   `runtime.NewAPIError(..., 401)`. `FetchRuleStates` returns `RuleStates` — **two** maps, not just
@@ -696,10 +729,44 @@ mode.
 - File watching with fsnotify
 - Dashboard and folder preview handlers
 - Script execution for generated resources
+- The dashboard-proxy client's `CheckRedirect` composes `config.SameOriginRedirects` with its own handling, and
+  a refused hop is logged as the origin-only typed error.
 - Cookie injection and rotate-on-401 are transport-level here too: `server.go`'s
   `httputil.ReverseProxy` and `server/grafana/requests.go`'s dashboard-proxy client both wrap their
   `Transport` (built from `httputils.NewTransport`) with `(GrafanaConfig).WrapWithSession`, so a
   `401` from Grafana triggers the same rotate-and-retry as the k8s/openapi paths
+- `guard.go`: the **outermost** middleware (registered before `middleware.RequestLogger`, so a
+  `?token=` query is never logged; `reject` logs method and path only). Order: Host allowlist
+  (`421`) -> a present `?token` is redeemed or rejected **even when a valid cookie is already
+  held** (GET/HEAD with the right token -> cookie + `303` to a fixed `/`, never derived from
+  `r.URL`; anything else `401`; `next` is never called, so the token cannot reach a handler or the
+  proxy) -> cookie (`401`) -> Origin and `Sec-Fetch-Site` (`403`). `allowedHosts(listenHost, port, ifaceAddrs)` builds
+  the Host set (a wildcard bind allows the non-link-local interface IPs present **at startup**
+  only, so a changed IP gives `421` until restart)
+- Token/cookie design: `rand.Text()` per run (128-bit, `Server.token`), compared in constant time.
+  Cookie `grafanapi_serve_<port>`, `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Max-Age` (a
+  browser-session cookie), no `Secure` (plain http on loopback would drop it), plus
+  `Referrer-Policy: no-referrer` on the redirect. Cookies are scoped by host, not port, so other
+  servers on the same host receive it; two checks keep their *pages* out (a request with an `Origin`
+  must carry this server's own; a `Sec-Fetch-Site` that is present must be `same-origin` or
+  `none`, which also covers the no-`Origin` subresource GETs a same-site page on another local
+  port can send), but the cookie is not protection against a hostile local server. A request with
+  neither header is a non-browser client and passes
+- Proxy Origin rule: the guard has already vetted any `Origin` as this server's own, so the
+  `ReverseProxy.Rewrite` replaces it with **Grafana's own origin** (no Origin in -> none out)
+  instead of deleting it, because `SetURL` sends Grafana's Host and the browser's Origin could never
+  match it. Rewrite also drops the browser `Cookie` (it holds the serve token; session cookie
+  injection is the transport's job) and `ModifyResponse` strips `Set-Cookie`. Grafana's CSRF
+  behaviour on the rewritten Origin is reasoned, not verified against a live instance
+- Lifecycle: `Listen(ctx)` (a `net.ListenConfig`, resolves the real port, e.g. for `:0`) ->
+  `URL()` (tokenized, uses the bound port) -> `Serve(ctx, ln)` (shuts down on ctx cancel,
+  returns nil); `handler(ctx)` is unexported. The `http.Server` carries `ReadHeaderTimeout`,
+  `ReadTimeout`, `WriteTimeout` and `IdleTimeout`. The websocket survives them because
+  `net/http`'s `Hijack` clears the connection deadlines (gorilla clears them again when
+  `HandshakeTimeout` is 0); `TestServe_WebsocketSurvivesServerTimeouts` pins the behaviour.
+  The upgrader's `CheckOrigin` is `guard.originAllowed`
+- `livereload.Initialize` is guarded by a `sync.Once`: it used to start a new global hub per call,
+  and `connections` is mutated by that hub's `run()` loop
 
 **internal/grafana/** - Grafana API client
 - Wraps grafana-openapi-client-go
@@ -752,7 +819,7 @@ generation is stdlib `text/template`, inspection is stdlib `encoding/xml` token 
   narrower derived range)
 
 **internal/session/** - Session cookie verification and stale-session errors
-- `VerifyCookie`: validates a cookie via `GET /api/user`
+- `VerifyCookie`: validates a cookie via `GET /api/user` (client uses `CheckRedirect: config.SameOriginRedirects`)
 - `ErrUnauthorized`: sentinel returned by `VerifyCookie` on a 401; recognized centrally by
   `cmd/grafanapi/fail.convertAuthErrors`
 - Only used by `login`/`login update` (which always paste a fresh cookie and validate it
@@ -762,8 +829,22 @@ generation is stdlib `text/template`, inspection is stdlib `encoding/xml` token 
 **internal/secrets/** - Secret management
 - Secure handling of sensitive configuration data (currently just TLS key data; the session cookie is never serialized to disk)
 
+**internal/termsafe/** - Terminal-safe rendering of server-controlled text (leaf package, stdlib only)
+- `Cell` drops every escape sequence whole (CSI, OSC, DCS, SOS, PM, APC and other ESC-introduced
+  sequences, 7-bit and 8-bit C1 forms) and then replaces each remaining control or Unicode format rune
+  with a space; an unterminated string sequence (OSC/DCS/SOS/PM/APC) is dropped to the end of the value.
+  `Text` is `Cell` for multi-line messages (keeps `\n` and `\t`, still replaces `\r`)
+- `Runes` is the per-rune rule alone, with no sequence parsing; it exists only so alerts' `cell` stays
+  byte-identical. New callers use `Cell`
+- Tag characters (U+E0000 block, `Cf`) are removed. Deliberate non-goal: U+2028/U+2029 and variation
+  selectors pass through (not terminal control)
+- The json/yaml codecs must **not** use it: they carry raw values and callers are told to treat them as
+  untrusted. Callers: `explore`, `datasources`, `alerts` tables, `fail.DetailedError`, `internal/logs`
+
 **internal/logs/** - Structured logging
 - slog-based logging with verbosity levels
+- The record message goes through `termsafe.Cell`, and `prepareString` no longer rewrites a literal
+  `\x1b` in a quoted value into a real ESC (it used to re-create the byte the earlier cut had removed)
 - Integration with k8s klog
 
 ### Key Design Patterns
@@ -1011,7 +1092,10 @@ Wraps k8s.io/client-go's dynamic client for Grafana:
 
 ```
 1. Start HTTP server (Chi router)
-   - Reverse proxy to Grafana
+   - Listen on --address (default 127.0.0.1), print the tokenized URL
+   - Guard middleware first: Host allowlist (421) -> ?token redeem/reject -> cookie (401) ->
+     Origin / Sec-Fetch-Site (403); only then the request logger and the routes
+   - Reverse proxy to Grafana (vetted Origin rewritten to Grafana's, no browser Cookie)
    - Custom handlers for dashboards/folders
    - WebSocket for live reload
 
@@ -1359,11 +1443,37 @@ The codebase is designed for extension:
 - Nothing in this package decrypts, prints or logs a secret: there is no `decrypt=true` call site
   and no contact-point delete.
 
+**Terminal Output**:
+- Server-controlled text (datasource names, label values, error messages, log lines) is scrubbed by
+  `internal/termsafe` before it reaches a terminal: escape sequences are removed, other control and
+  format characters (bidi overrides, tag characters) become spaces
+- `-o json` / `-o yaml` are raw by design and must be treated as untrusted data; `jq -r` prints
+  control characters verbatim
+- Scrubbing removes terminal control only. It cannot stop plain-text prompt injection in output an
+  agent reads
+
 **Network Security**:
 - TLS verification enabled by default
-- Option to disable (insecure-skip-verify) for dev/test
+- Option to disable (insecure-skip-verify) for dev/test; still accepted, but an active attacker can
+  then read the session cookie, so never for a remote production host
+- Server URL must be `https://`, or `http://` on loopback only (`config.ValidateServerURL`, enforced
+  in `Validate`, `login`/`login update`, and again on every cookied request)
+- The session cookie is bound to the server origin: `SetSessionCookie` and the round-trippers refuse
+  any request off that origin
+- Redirects off the server origin are refused on every client we build
+  (`config.SameOriginRedirects`), never followed; the one exception is a cookieless openapi
+  request (Common Gotchas, item 8)
 - Custom CA certificates supported
 - Client certificate authentication supported
+
+**Local serve server**:
+- `resources serve` binds `127.0.0.1` by default; a non-loopback `--address` prints a warning,
+  because the server acts with the user's Grafana session
+- Every request passes `internal/server/guard.go`: Host allowlist (DNS rebinding, `421`), a per-run
+  access token redeemed once into an `HttpOnly` `SameSite=Strict` cookie (`401`), and a same-origin
+  check on `Origin` and `Sec-Fetch-Site` (`403`; also applied to the live-reload websocket upgrade)
+- The proxy never forwards the browser's `Cookie` and strips Grafana's `Set-Cookie`
+- The token cookie is host-scoped, not port-scoped: it reaches other servers on the same host
 
 **Resource Management**:
 - Manager metadata prevents accidental overwrites
@@ -1400,6 +1510,21 @@ The codebase is designed for extension:
    caveats carry over from 401: `convertNetworkErrors` runs first and swallows anything wrapped in
    a `*url.Error`, and a typed generated response (the folders client) must be converted with
    `internal/alerts.asAPIError` or `errors.As` misses it entirely.
+
+8. **A Redirect Off the Server Origin Is an Error, Not a Hop**: a proxy that redirects http→https or
+   to a canonical host now fails with "Refused a redirect away from the configured Grafana server";
+   the fix is `server` set to the final URL (scheme, host, port, sub-path). A redirect on the rotate
+   endpoint shows as a **stale session (exit 2) plus a warning line**; check `server` before
+   re-logging in. Refusals render **origins only**: `convertServerPolicyErrors` sets `Parent` to the
+   typed error and drops the `*url.Error`, which carries the full Location, path and query. It must
+   stay ahead of `convertNetworkErrors` in the converter chain. Two accepted limits qualify the
+   statements that every `http.Client` we build uses `SameOriginRedirects` and that refusals render
+   origins only. (a) A **cookieless** openapi request still follows a cross-origin redirect:
+   `WrapWithSession` returns the transport unchanged when there is no cookie, so no round-tripper
+   guards it, and go-openapi uses Go's default `CheckRedirect`; nothing secret is sent, since there
+   is no cookie. (b) Per-group k8s discovery failures stringify their inner errors (an accepted
+   limit), so `errors.As` cannot reach the typed refusal and such a redirect can render
+   with the generic message and the `*url.Error` text, Location query included.
 
 ### Future Architecture Directions
 
@@ -1553,7 +1678,9 @@ Based on TODO comments in code:
     - *Fix*: Extract when the planned read-only `grafanapi api PATH` passthrough group lands — that
       group adds a fifth call site and is the natural home for the shared seam. Deliberately
       deferred (YAGNI) until then: extracting it for a single new caller would leave a one-user
-      helper next to three unmigrated copies
+      helper next to three unmigrated copies. The shared seam must carry `CheckRedirect:
+      config.SameOriginRedirects` (and the session-wrapped transport), or the fifth call site
+      silently follows redirects
 
 14. **Alerting Write Limits (`alerts pull`/`push`, `alerts rules pause|resume|delete`)**
     - *Current*: five accepted limits, all documented in the alerting guide and the command help

@@ -75,15 +75,29 @@ func NewNamespacedRESTConfig(ctx context.Context, cfg Context) NamespacedRESTCon
 }
 
 // sessionCookieRoundTripper injects the Grafana session cookie into every outbound request
-// before delegating to the wrapped RoundTripper.
+// that targets the configured server's origin before delegating to the wrapped RoundTripper.
+// A request to any other origin (a redirect hop, say) is refused without being sent.
 type sessionCookieRoundTripper struct {
+	server string
 	cookie string
 	next   http.RoundTripper
 }
 
 func (rt *sessionCookieRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	req.Header.Set("Cookie", CookieHeaderValue(rt.cookie))
+	clone := req.Clone(req.Context())
+	if err := SetSessionCookie(clone, rt.server, rt.cookie); err != nil {
+		closeRequestBody(req)
 
-	return rt.next.RoundTrip(req)
+		return nil, err
+	}
+
+	return rt.next.RoundTrip(clone)
+}
+
+// closeRequestBody closes req.Body when there is one: the http.RoundTripper contract requires
+// RoundTrip to close the body even when it returns an error without sending the request.
+func closeRequestBody(req *http.Request) {
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
 }

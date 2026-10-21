@@ -1,0 +1,434 @@
+package server
+
+import (
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/grafana/grafana-app-sdk/logging"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func fakeIfaces(cidrs ...string) func() ([]net.Addr, error) {
+	return func() ([]net.Addr, error) {
+		addrs := make([]net.Addr, 0, len(cidrs))
+
+		for _, c := range cidrs {
+			ip, ipNet, err := net.ParseCIDR(c)
+			if err != nil {
+				return nil, err
+			}
+
+			addrs = append(addrs, &net.IPNet{IP: ip, Mask: ipNet.Mask})
+		}
+
+		return addrs, nil
+	}
+}
+
+const testToken = "test-token-0123456789"
+
+type recordingLogger struct {
+	logging.NoOpLogger
+
+	lines []string
+}
+
+func (l *recordingLogger) Warn(msg string, ctx ...any) {
+	l.lines = append(l.lines, fmt.Sprint(append([]any{msg}, ctx...)...))
+}
+
+func testGuard() *guard {
+	return newGuard([]string{"localhost:8080", "127.0.0.1:8080", "[::1]:8080"}, testToken, 8080, &logging.NoOpLogger{})
+}
+
+func TestAllowedHosts(t *testing.T) {
+	loopback := []string{"localhost:8080", "127.0.0.1:8080", "[::1]:8080"}
+
+	tests := []struct {
+		name   string
+		listen string
+		port   int
+		ifaces func() ([]net.Addr, error)
+		want   []string
+	}{
+		{name: "loopback bind", listen: "127.0.0.1", port: 8080, want: loopback},
+		{name: "localhost bind", listen: "localhost", port: 8080, want: loopback},
+		{name: "explicit address", listen: "192.168.1.10", port: 8080, want: append(append([]string{}, loopback...), "192.168.1.10:8080")},
+		{
+			name: "wildcard skips link-local", listen: "0.0.0.0", port: 8080,
+			ifaces: fakeIfaces("10.0.0.5/24", "fe80::1/64", "2001:db8::5/64"),
+			want:   append(append([]string{}, loopback...), "10.0.0.5:8080", "[2001:db8::5]:8080"),
+		},
+		{
+			name: "empty listen is wildcard", listen: "", port: 8080,
+			ifaces: fakeIfaces("10.0.0.5/24"),
+			want:   append(append([]string{}, loopback...), "10.0.0.5:8080"),
+		},
+		{
+			name: "port 80 adds bare hosts", listen: "127.0.0.1", port: 80,
+			want: []string{"localhost:80", "localhost", "127.0.0.1:80", "127.0.0.1", "[::1]:80", "[::1]"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := allowedHosts(tt.listen, tt.port, tt.ifaces)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, tt.want, got)
+		})
+	}
+}
+
+func TestAllowedHosts_InterfaceError(t *testing.T) {
+	_, err := allowedHosts("0.0.0.0", 8080, func() ([]net.Addr, error) { return nil, assert.AnError })
+	require.ErrorIs(t, err, assert.AnError)
+}
+
+func TestGuardMiddleware_Host(t *testing.T) {
+	g := testGuard()
+
+	tests := []struct {
+		host string
+		want int
+	}{
+		{"localhost:8080", http.StatusOK},
+		{"127.0.0.1:8080", http.StatusOK},
+		{"[::1]:8080", http.StatusOK},
+		{"LOCALHOST:8080", http.StatusOK},
+		{"evil.example.com:8080", http.StatusMisdirectedRequest},
+		{"127.0.0.1:9999", http.StatusMisdirectedRequest},
+		{"", http.StatusMisdirectedRequest},
+		{"::1:8080", http.StatusMisdirectedRequest},
+		{"localhost.:8080", http.StatusMisdirectedRequest},
+		{"[::ffff:127.0.0.1]:8080", http.StatusMisdirectedRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			called := false
+			h := g.middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+			req.Host = tt.host
+			req.Header.Set("Cookie", g.cookieName+"="+testToken)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, tt.want == http.StatusOK, called)
+		})
+	}
+}
+
+func serveGuarded(t *testing.T, g *guard, method, target string, cookie bool) (*httptest.ResponseRecorder, bool) {
+	t.Helper()
+
+	called := false
+	h := g.middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), method, target, nil)
+	req.Host = "127.0.0.1:8080"
+
+	if cookie {
+		req.Header.Set("Cookie", g.cookieName+"="+testToken)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	return rec, called
+}
+
+func TestGuardMiddleware_Token(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		target     string
+		cookie     bool
+		wantCode   int
+		wantNext   bool
+		wantCookie bool
+	}{
+		{name: "no cookie no query", method: http.MethodGet, target: "/", wantCode: http.StatusUnauthorized},
+		{name: "valid cookie no query", method: http.MethodGet, target: "/", cookie: true, wantCode: http.StatusOK, wantNext: true},
+		{name: "valid token GET", method: http.MethodGet, target: "/?token=" + testToken, wantCode: http.StatusSeeOther, wantCookie: true},
+		{name: "valid token HEAD", method: http.MethodHead, target: "/?token=" + testToken, wantCode: http.StatusSeeOther, wantCookie: true},
+		{name: "valid token POST", method: http.MethodPost, target: "/?token=" + testToken, wantCode: http.StatusUnauthorized},
+		{name: "wrong token GET", method: http.MethodGet, target: "/?token=nope", wantCode: http.StatusUnauthorized},
+		{name: "empty token GET", method: http.MethodGet, target: "/?token=", wantCode: http.StatusUnauthorized},
+		{name: "protocol-relative path", method: http.MethodGet, target: "//evil.example.com/?token=" + testToken, wantCode: http.StatusSeeOther, wantCookie: true},
+		{name: "cookie plus token GET", method: http.MethodGet, target: "/?token=" + testToken, cookie: true, wantCode: http.StatusSeeOther, wantCookie: true},
+		{name: "cookie plus token POST", method: http.MethodPost, target: "/api/ds/query?token=" + testToken, cookie: true, wantCode: http.StatusUnauthorized},
+		{name: "cookie plus wrong token GET", method: http.MethodGet, target: "/?token=nope", cookie: true, wantCode: http.StatusUnauthorized},
+		{name: "token after other param", method: http.MethodPost, target: "/x?a=1&token=" + testToken, cookie: true, wantCode: http.StatusUnauthorized},
+		{name: "semicolon separated token", method: http.MethodGet, target: "/x?a=1;token=" + testToken, cookie: true, wantCode: http.StatusUnauthorized},
+		{name: "escaped key", method: http.MethodGet, target: "/x?%74oken=" + testToken, cookie: true, wantCode: http.StatusSeeOther, wantCookie: true},
+		{name: "undecodable value", method: http.MethodGet, target: "/x?token=%zz", cookie: true, wantCode: http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, called := serveGuarded(t, testGuard(), tt.method, tt.target, tt.cookie)
+
+			assert.Equal(t, tt.wantCode, rec.Code)
+			assert.Equal(t, tt.wantNext, called)
+
+			if !tt.wantCookie {
+				assert.Empty(t, rec.Result().Cookies())
+				return
+			}
+
+			assert.Equal(t, "/", rec.Header().Get("Location"))
+			assert.Equal(t, "no-referrer", rec.Header().Get("Referrer-Policy"))
+
+			cookies := rec.Result().Cookies()
+			require.Len(t, cookies, 1)
+
+			c := cookies[0]
+			assert.Equal(t, "grafanapi_serve_8080", c.Name)
+			assert.Equal(t, testToken, c.Value)
+			assert.Equal(t, "/", c.Path)
+			assert.True(t, c.HttpOnly)
+			assert.Equal(t, http.SameSiteStrictMode, c.SameSite)
+			assert.False(t, c.Secure)
+			assert.Zero(t, c.MaxAge)
+			assert.True(t, c.Expires.IsZero())
+		})
+	}
+}
+
+func TestGuardMiddleware_WrongCookie(t *testing.T) {
+	g := testGuard()
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("next must not run") }))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Cookie", g.cookieName+"=wrong")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.NotContains(t, rec.Body.String(), testToken)
+}
+
+func TestGuardMiddleware_HostCheckRunsFirst(t *testing.T) {
+	g := testGuard()
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("next must not run") }))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Host = "evil.example.com:8080"
+	req.Header.Set("Cookie", g.cookieName+"="+testToken)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusMisdirectedRequest, rec.Code)
+}
+
+func TestGuardMiddleware_RejectionLogOmitsToken(t *testing.T) {
+	logger := &recordingLogger{}
+	g := newGuard([]string{"127.0.0.1:8080"}, testToken, 8080, logger)
+
+	// A wrong token is the realistic leak: the attacker-supplied value must not be logged either.
+	serveGuarded(t, g, http.MethodPost, "/api/ds/query?token="+testToken, true)
+	serveGuarded(t, g, http.MethodGet, "/?token=guess-value", false)
+
+	require.Len(t, logger.lines, 2)
+
+	for _, line := range logger.lines {
+		assert.NotContains(t, line, testToken)
+		assert.NotContains(t, line, "guess-value")
+		assert.NotContains(t, line, "token=")
+	}
+}
+
+func serveGuardedOrigin(t *testing.T, g *guard, method, origin string, cookie bool) (*httptest.ResponseRecorder, bool) {
+	t.Helper()
+
+	called := false
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+	req := httptest.NewRequestWithContext(t.Context(), method, "/api/ds/query", nil)
+	req.Host = "127.0.0.1:8080"
+
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+
+	if cookie {
+		req.Header.Set("Cookie", g.cookieName+"="+testToken)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	return rec, called
+}
+
+func TestGuardMiddleware_Origin(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string
+		want   int
+	}{
+		{name: "no origin", origin: "", want: http.StatusOK},
+		{name: "ipv4 loopback", origin: "http://127.0.0.1:8080", want: http.StatusOK},
+		{name: "localhost", origin: "http://localhost:8080", want: http.StatusOK},
+		{name: "ipv6 loopback", origin: "http://[::1]:8080", want: http.StatusOK},
+		{name: "mixed case", origin: "http://LocalHost:8080", want: http.StatusOK},
+		{name: "foreign host", origin: "http://evil.example.com", want: http.StatusForbidden},
+		{name: "foreign host same port", origin: "http://evil.example.com:8080", want: http.StatusForbidden},
+		{name: "same-site other port", origin: "http://localhost:3000", want: http.StatusForbidden},
+		{name: "https", origin: "https://127.0.0.1:8080", want: http.StatusForbidden},
+		{name: "null", origin: "null", want: http.StatusForbidden},
+		{name: "unparseable", origin: "http://[::1", want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, called := serveGuardedOrigin(t, testGuard(), http.MethodPost, tt.origin, true)
+
+			assert.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, tt.want == http.StatusOK, called)
+			assertNoCORSHeaders(t, rec)
+		})
+	}
+}
+
+func TestGuardMiddleware_OriginOnPort80(t *testing.T) {
+	g := newGuard([]string{"localhost:80", "localhost"}, testToken, 80, &logging.NoOpLogger{})
+
+	called := false
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", nil)
+	req.Host = "localhost"
+	req.Header.Set("Origin", "http://localhost")
+	req.Header.Set("Cookie", g.cookieName+"="+testToken)
+
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	assert.True(t, called)
+}
+
+func TestGuardMiddleware_PreflightWithoutCookieIsUnauthorized(t *testing.T) {
+	rec, called := serveGuardedOrigin(t, testGuard(), http.MethodOptions, "http://evil.example.com", false)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, called)
+	assertNoCORSHeaders(t, rec)
+}
+
+func TestGuardMiddleware_OriginRejectionIsLogged(t *testing.T) {
+	logger := &recordingLogger{}
+	g := newGuard([]string{"127.0.0.1:8080"}, testToken, 8080, logger)
+
+	serveGuardedOrigin(t, g, http.MethodPost, "http://evil.example.com", true)
+
+	require.Len(t, logger.lines, 1)
+	assert.Contains(t, logger.lines[0], "http://evil.example.com")
+	assert.NotContains(t, logger.lines[0], testToken)
+}
+
+func TestGuardMiddleware_SecFetchSite(t *testing.T) {
+	tests := []struct {
+		name   string
+		site   string
+		origin string
+		want   int
+	}{
+		{name: "absent", site: "", want: http.StatusOK},
+		{name: "same-origin", site: "same-origin", want: http.StatusOK},
+		{name: "none", site: "none", want: http.StatusOK},
+		{name: "same-site", site: "same-site", want: http.StatusForbidden},
+		{name: "cross-site", site: "cross-site", want: http.StatusForbidden},
+		{name: "unknown value", site: "bogus", want: http.StatusForbidden},
+		{name: "same-origin with allowed origin", site: "same-origin", origin: "http://127.0.0.1:8080", want: http.StatusOK},
+		{name: "same-origin with foreign origin", site: "same-origin", origin: "http://evil.example.com", want: http.StatusForbidden},
+		{name: "cross-site with allowed origin", site: "cross-site", origin: "http://127.0.0.1:8080", want: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := testGuard()
+			called := false
+			h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/ds/query", nil)
+			req.Host = "127.0.0.1:8080"
+			req.Header.Set("Cookie", g.cookieName+"="+testToken)
+
+			if tt.site != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.site)
+			}
+
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.want, rec.Code)
+			assert.Equal(t, tt.want == http.StatusOK, called)
+			assertNoCORSHeaders(t, rec)
+
+			if tt.want == http.StatusForbidden {
+				assert.Contains(t, rec.Body.String(), "cross-origin request rejected")
+			}
+		})
+	}
+}
+
+func TestGuardMiddleware_SecFetchSiteWithoutCookieIsUnauthorized(t *testing.T) {
+	g := testGuard()
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("next must not be called") }))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestGuardMiddleware_SecFetchSiteRejectionIsLogged(t *testing.T) {
+	logger := &recordingLogger{}
+	g := newGuard([]string{"127.0.0.1:8080"}, testToken, 8080, logger)
+
+	h := g.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/ds/query", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Cookie", g.cookieName+"="+testToken)
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	require.Len(t, logger.lines, 1)
+	assert.Contains(t, logger.lines[0], "same-site")
+	assert.NotContains(t, logger.lines[0], testToken)
+}
+
+func assertNoCORSHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+
+	for name := range rec.Header() {
+		assert.False(t, strings.HasPrefix(strings.ToLower(name), "access-control-"), name)
+	}
+}

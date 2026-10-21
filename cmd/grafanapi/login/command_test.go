@@ -1348,3 +1348,111 @@ func Test_LoginUpdateCommand_keychainReadErrorNeedsRebind(t *testing.T) {
 	require.Equal(t, 0, f.prompter.secretN)
 	require.Equal(t, 0, *f.newHits)
 }
+
+func Test_LoginCommand_rejectsCleartextServer(t *testing.T) {
+	initialContents := "contexts:"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", "http://grafana.example.com", "--cookie-stdin"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("https"),
+		},
+	}
+	testCase.Run(t)
+
+	written, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.Equal(t, initialContents, string(written))
+
+	_, err = store.Get(keychain.Account("default"))
+	require.ErrorIs(t, err, keychain.ErrNotFound)
+}
+
+func Test_LoginCommand_rejectsCleartextServerBeforePrompting(t *testing.T) {
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", "http://grafana.example.com"},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("https"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.secretN, "the cookie must never be prompted for a cleartext server")
+}
+
+func Test_LoginCommand_acceptsLoopbackHTTPServer(t *testing.T) {
+	// httptest servers listen on http://127.0.0.1:<port>, which is the loopback exception.
+	server := newTestUserServer(t, http.StatusOK)
+	require.Contains(t, server.URL, "http://127.0.0.1:")
+
+	configFile := testutils.CreateTempFile(t, "contexts:")
+
+	store := &fakeKeychainStore{}
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "the-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"--config", configFile, "--server", server.URL},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandSuccess(),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 1, prompter.secretN)
+}
+
+func Test_LoginUpdateCommand_rejectsCleartextServer(t *testing.T) {
+	initialContents := "current-context: default\ncontexts:\n  default:\n    grafana:\n      server: http://grafana.example.com\n"
+	configFile := testutils.CreateTempFile(t, initialContents)
+
+	store := &fakeKeychainStore{}
+	require.NoError(t, store.Set(keychain.Account("default"), "stale-cookie"))
+	restoreStore := login.SetKeychainStore(store)
+	defer restoreStore()
+
+	prompter := &fakePrompter{secret: "fresh-cookie"}
+	restorePrompter := login.SetPrompter(prompter)
+	defer restorePrompter()
+
+	testCase := testutils.CommandTestCase{
+		Cmd:     login.Command(),
+		Command: []string{"update", "--config", configFile},
+		Assertions: []testutils.CommandAssertion{
+			testutils.CommandErrorContains("https"),
+		},
+	}
+	testCase.Run(t)
+
+	require.Equal(t, 0, prompter.secretN, "the cookie must never be prompted for a cleartext server")
+
+	cookie, err := store.Get(keychain.Account("default"))
+	require.NoError(t, err)
+	require.Equal(t, "stale-cookie", cookie)
+}

@@ -81,7 +81,9 @@ It is never accepted as a command-line flag value or environment variable: it is
 an interactive, no-echo prompt, or — with --cookie-stdin — from stdin, for scripting and CI. On
 success, the context (server, org-id/stack-id, TLS) is written to the configuration file and the
 cookie itself is stored in the macOS Keychain, never in the plaintext configuration file.
-The stored session is bound to the server's origin (scheme, host, port) and is only ever sent there.`,
+The stored session is bound to the server's origin (scheme, host, port) and is only ever sent there.
+
+The server must use https://; plain http:// is only accepted for a loopback address (localhost, 127.x.x.x, ::1).`,
 		Example: "\n\tgrafanapi login --server https://grafana.example.com\n" +
 			"\tpbpaste | grafanapi login --server https://grafana.example.com --cookie-stdin",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -109,7 +111,7 @@ type Options struct {
 func (opts *Options) BindFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&opts.ConfigFile, "config", "", "Path to the configuration file to use")
 	flags.StringVar(&opts.Context, "context", "", "Name of the context to create or update (defaults to the current context, or \"default\")")
-	flags.StringVar(&opts.Server, "server", "", "Grafana server URL; skips the interactive server prompt")
+	flags.StringVar(&opts.Server, "server", "", "Grafana server URL (https://, or http:// for localhost only); skips the interactive server prompt")
 	flags.Int64Var(&opts.OrgID, "org-id", 0, "Organization ID, for on-prem Grafana; skips Grafana Cloud stack-id discovery")
 	flags.Int64Var(&opts.StackID, "stack-id", 0, "Grafana Cloud stack ID; skips stack-id discovery")
 	flags.BoolVar(&opts.CookieStdin, "cookie-stdin", false, "Read the session cookie from stdin instead of the interactive prompt (requires --server)")
@@ -173,6 +175,10 @@ func runLogin(cmd *cobra.Command, opts *Options) error {
 
 	if server == "" {
 		return errors.New("login: a Grafana server URL is required (pass --server or enter one at the prompt)")
+	}
+
+	if err := config.ValidateServerURL(server); err != nil {
+		return fmt.Errorf("login: %w", err)
 	}
 
 	var cookie string

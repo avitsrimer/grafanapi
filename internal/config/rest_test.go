@@ -9,8 +9,10 @@ import (
 	authlib "github.com/grafana/authlib/types"
 	"github.com/grafana/grafanapi/internal/config"
 	"github.com/grafana/grafanapi/internal/keychain"
+	"github.com/grafana/grafanapi/internal/testutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/rest"
 )
 
 func TestNewNamespacedRESTConfig_UsesBootdataStack(t *testing.T) {
@@ -277,4 +279,89 @@ func (rt *scriptedSessionRoundTripper) RoundTrip(req *http.Request) (*http.Respo
 	}
 
 	return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{}, Body: http.NoBody}, nil
+}
+
+func TestNewNamespacedRESTConfig_RefusesCrossOriginRedirect(t *testing.T) {
+	trap := testutils.NewCookieTrap(t)
+	// Only /apis redirects: the stack-id probe made while the config is built (/bootdata) is
+	// covered by the bootdata tests and must not muddy this one.
+	grafanaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apis" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		http.Redirect(w, r, trap.URL+"/apis?token=s3cret", http.StatusFound)
+	}))
+	defer grafanaServer.Close()
+
+	ctx := config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        grafanaServer.URL,
+			OrgID:         1,
+			SessionCookie: "abc123",
+		},
+	}
+
+	restCfg := config.NewNamespacedRESTConfig(t.Context(), ctx)
+
+	client, err := rest.HTTPClientFor(&restCfg.Config)
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, grafanaServer.URL+"/apis", nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, config.ErrUnsafeRedirect)
+	assert.Equal(t, 0, trap.Requests(), "the redirect target must never be contacted")
+	assert.Empty(t, trap.LastCookie())
+}
+
+func TestNewNamespacedRESTConfig_FollowsSameOriginRedirectWithCookie(t *testing.T) {
+	var cookies []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookies = append(cookies, r.Header.Get("Cookie"))
+
+		if r.URL.Path == "/apis" {
+			http.Redirect(w, r, "/apis-final", http.StatusFound)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer server.Close()
+
+	ctx := config.Context{
+		Grafana: &config.GrafanaConfig{
+			Server:        server.URL,
+			OrgID:         1,
+			SessionCookie: "abc123",
+		},
+	}
+
+	restCfg := config.NewNamespacedRESTConfig(t.Context(), ctx)
+
+	client, err := rest.HTTPClientFor(&restCfg.Config)
+	require.NoError(t, err)
+
+	cookies = nil // drop the bootdata probe made while building the config
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/apis", nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, []string{"grafana_session=abc123", "grafana_session=abc123"}, cookies)
 }

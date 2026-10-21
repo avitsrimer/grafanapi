@@ -393,3 +393,93 @@ func TestErrorToDetailedError_SessionBinding(t *testing.T) {
 		}
 	})
 }
+
+func TestErrorToDetailedError_ServerPolicyErrors(t *testing.T) {
+	redirectErr := &config.UnsafeRedirectError{From: "https://grafana.example.com:443", To: "https://other.example:443"}
+	serverErr := &config.ServerURLError{Reason: "server must use https:// (plain http:// is only allowed for localhost, 127.0.0.1 and ::1)"}
+
+	tests := []struct {
+		name        string
+		err         error
+		wantSummary string
+	}{
+		{
+			name:        "redirect in url.Error",
+			err:         &url.Error{Op: "Get", URL: "https://other.example/cb?token=s3cret", Err: redirectErr},
+			wantSummary: "Refused a redirect away from the configured Grafana server",
+		},
+		{
+			name:        "redirect in fmt.Errorf",
+			err:         fmt.Errorf("explore: query request: %w", redirectErr),
+			wantSummary: "Refused a redirect away from the configured Grafana server",
+		},
+		{
+			name:        "redirect in url.Error in fmt.Errorf",
+			err:         fmt.Errorf("explore: query request: %w", &url.Error{Op: "Post", URL: "https://other.example/cb?token=s3cret", Err: redirectErr}),
+			wantSummary: "Refused a redirect away from the configured Grafana server",
+		},
+		{
+			name:        "server URL in url.Error",
+			err:         &url.Error{Op: "Get", URL: "http://grafana.example.com/api", Err: serverErr},
+			wantSummary: "Invalid Grafana server URL",
+		},
+		{
+			name:        "server URL in fmt.Errorf",
+			err:         fmt.Errorf("explore: query request: %w", serverErr),
+			wantSummary: "Invalid Grafana server URL",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			detailedErr := fail.ErrorToDetailedError(tc.err)
+
+			require.NotNil(t, detailedErr)
+			assert.Equal(t, tc.wantSummary, detailedErr.Summary)
+			assert.Nil(t, detailedErr.ExitCode)
+			assert.NotEmpty(t, detailedErr.Suggestions)
+		})
+	}
+}
+
+func TestErrorToDetailedError_RedirectRefusalRendersOriginsOnly(t *testing.T) {
+	redirectErr := &config.UnsafeRedirectError{From: "https://grafana.example.com:443", To: "https://other.example:443"}
+	err := fmt.Errorf("explore: query request: %w", &url.Error{
+		Op:  "Post",
+		URL: "https://other.example/cb?token=s3cret",
+		Err: redirectErr,
+	})
+
+	rendered := fail.ErrorToDetailedError(err).Error()
+
+	assert.Contains(t, rendered, "https://grafana.example.com:443")
+	assert.Contains(t, rendered, "https://other.example:443")
+	assert.NotContains(t, rendered, "s3cret")
+	assert.NotContains(t, rendered, "/cb")
+}
+
+func TestErrorToDetailedError_ServerPolicyDoesNotClaimOtherErrors(t *testing.T) {
+	t.Run("plain url.Error stays a network error", func(t *testing.T) {
+		detailedErr := fail.ErrorToDetailedError(&url.Error{Op: "Get", URL: "https://grafana.example.com/api", Err: errors.New("connection refused")})
+
+		assert.Equal(t, "Network error", detailedErr.Summary)
+	})
+
+	t.Run("401 stays a stale session with exit 2", func(t *testing.T) {
+		detailedErr := fail.ErrorToDetailedError(&runtime.APIError{OperationName: "getVersion", Code: 401})
+
+		assert.Equal(t, "Grafana session is stale or unauthorized", detailedErr.Summary)
+		require.NotNil(t, detailedErr.ExitCode)
+		assert.Equal(t, 2, *detailedErr.ExitCode)
+	})
+
+	t.Run("validation error from Validate keeps the config rendering", func(t *testing.T) {
+		cfg := config.GrafanaConfig{Server: "http://grafana.example.com"}
+		validateErr := cfg.Validate("ctx")
+		require.Error(t, validateErr)
+
+		detailedErr := fail.ErrorToDetailedError(validateErr)
+
+		assert.Equal(t, "Invalid configuration", detailedErr.Summary)
+	})
+}

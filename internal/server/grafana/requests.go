@@ -42,26 +42,39 @@ func AuthenticateAndProxyHandler(cfg *config.Context) http.HandlerFunc {
 		// not wrapped in any debug-logging round-tripper: dumping the full request (headers
 		// included, unredacted) would put the session cookie WrapWithSession sets into logs
 		// reachable via -vvv. There is no separate AuthenticateRequest call setting the cookie
-		// here: WrapWithSession's wrapped transport runs on every request and unconditionally
-		// overwrites the Cookie header, so it always wins.
+		// here: WrapWithSession's wrapped transport sets it on every request, but only on one
+		// bound to the configured server origin, so it always wins there and never leaves it.
 		client := &http.Client{
 			Timeout:   proxyClientTimeout,
 			Transport: cfg.Grafana.WrapWithSession(transport),
 		}
 
-		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		sameOrigin := config.SameOriginRedirects(cfg.Grafana.Server)
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			// Being redirected to the login page means authentication is misconfigured.
 			// We interrupt the redirect and let the rest of AuthenticateAndProxyHandler
-			// handle that case.
+			// handle that case. No request is sent for it, whatever its origin.
 			if strings.HasSuffix(req.URL.Path, "/login") {
 				return http.ErrUseLastResponse
 			}
 
-			return nil
+			// Any other redirect must stay on the configured server's origin.
+			return sameOrigin(req, via)
 		}
 
 		resp, err := client.Do(req)
 		if err != nil {
+			// A refused redirect is logged as its origin-only typed error: the *url.Error
+			// net/http wraps it in carries the full Location, path and query included.
+			var unsafe *config.UnsafeRedirectError
+			var invalid *config.ServerURLError
+			switch {
+			case errors.As(err, &unsafe):
+				err = unsafe
+			case errors.As(err, &invalid):
+				err = invalid
+			}
+
 			httputils.Error(r, w, http.StatusText(http.StatusInternalServerError), err, http.StatusInternalServerError)
 			return
 		}

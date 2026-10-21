@@ -12,6 +12,11 @@ Unlike "grafanapi login", "login update" never re-asks for the server: it loads 
 that stored server (GET /api/user), and — only on success — overwrites the cookie in the macOS
 Keychain. The configuration file itself is never modified.
 
+The session is bound to the server's origin (scheme, host, port). Moving a context to another server,
+or binding a session stored by an older version from a non-default configuration, needs --rebind.
+
+The stored server must use https://; plain http:// is only accepted for a loopback address (localhost, 127.x.x.x, ::1).
+
 ```
 grafanapi login update [flags]
 ```
@@ -32,6 +37,7 @@ grafanapi login update [flags]
       --context string   Name of the context to update (defaults to the current context)
       --cookie-stdin     Read the session cookie from stdin instead of the interactive prompt
   -h, --help             help for update
+      --rebind           Allow binding this context's session to a different server than the one it is bound to; only use it from a shell whose environment you trust
 ```
 
 ### Options inherited from parent commands

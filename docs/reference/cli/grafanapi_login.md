@@ -11,6 +11,9 @@ It is never accepted as a command-line flag value or environment variable: it is
 an interactive, no-echo prompt, or — with --cookie-stdin — from stdin, for scripting and CI. On
 success, the context (server, org-id/stack-id, TLS) is written to the configuration file and the
 cookie itself is stored in the macOS Keychain, never in the plaintext configuration file.
+The stored session is bound to the server's origin (scheme, host, port) and is only ever sent there.
+
+The server must use https://; plain http:// is only accepted for a loopback address (localhost, 127.x.x.x, ::1).
 
 ```
 grafanapi login [flags]
@@ -32,7 +35,7 @@ grafanapi login [flags]
       --cookie-stdin     Read the session cookie from stdin instead of the interactive prompt (requires --server)
   -h, --help             help for login
       --org-id int       Organization ID, for on-prem Grafana; skips Grafana Cloud stack-id discovery
-      --server string    Grafana server URL; skips the interactive server prompt
+      --server string    Grafana server URL (https://, or http:// for localhost only); skips the interactive server prompt
       --stack-id int     Grafana Cloud stack ID; skips stack-id discovery
 ```
 

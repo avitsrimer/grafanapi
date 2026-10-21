@@ -35,7 +35,9 @@ that stored server (GET /api/user), and — only on success — overwrites the c
 Keychain. The configuration file itself is never modified.
 
 The session is bound to the server's origin (scheme, host, port). Moving a context to another server,
-or binding a session stored by an older version from a non-default configuration, needs --rebind.`,
+or binding a session stored by an older version from a non-default configuration, needs --rebind.
+
+The stored server must use https://; plain http:// is only accepted for a loopback address (localhost, 127.x.x.x, ::1).`,
 		Example: "\n\tgrafanapi login update\n\tgrafanapi login update --context staging\n" +
 			"\tpbpaste | grafanapi login update --cookie-stdin",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -95,6 +97,10 @@ func runLoginUpdate(cmd *cobra.Command, opts *UpdateOptions) error {
 	existing := cfg.Contexts[name]
 	if existing == nil || existing.Grafana == nil || existing.Grafana.Server == "" {
 		return fmt.Errorf("login update: context %q is not configured (run: grafanapi login --context %s)", name, name)
+	}
+
+	if err := config.ValidateServerURL(existing.Grafana.Server); err != nil {
+		return fmt.Errorf("login update: %w", err)
 	}
 
 	newOrigin, err := config.ServerOrigin(existing.Grafana.Server)
