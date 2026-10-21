@@ -319,7 +319,7 @@ func convertSessionBindingErrors(err error) (*DetailedError, bool) {
 				"Run the command again from a shell without GRAFANA_SERVER, GRAFANAPI_CONFIG, " +
 					"XDG_CONFIG_HOME or --config: the stored session is then bound automatically to the " +
 					"server in your own configuration file",
-				"Or, from that clean shell, run grafanapi login update --context " + bindingErr.Context,
+				"Or, from that clean shell, run grafanapi login update --context " + shellQuote(bindingErr.Context),
 				neverPasteCookieSuggestion,
 			},
 			ExitCode: &exitCode,
@@ -335,7 +335,7 @@ func convertSessionBindingErrors(err error) (*DetailedError, bool) {
 				bindingErr.ServerOrigin, bindingErr.Context, bindingErr.BoundOrigin),
 			fmt.Sprintf("Only if you really moved context %q to %s: from a shell without those overrides, "+
 				"run grafanapi login update --context %s --rebind",
-				bindingErr.Context, bindingErr.ServerOrigin, bindingErr.Context),
+				bindingErr.Context, bindingErr.ServerOrigin, shellQuote(bindingErr.Context)),
 			neverPasteCookieSuggestion,
 		},
 	}, true
@@ -412,4 +412,18 @@ func legacyAuthField(err error) (string, bool) {
 	}
 
 	return "", false
+}
+
+// shellQuote returns name in a form that a shell reads back as one literal argument: unchanged
+// when it only holds [A-Za-z0-9._-], otherwise wrapped in single quotes. A context name is a free
+// YAML key, so "my dev" would otherwise be pasted as two arguments.
+func shellQuote(name string) string {
+	safe := name != "" && strings.IndexFunc(name, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '_' && r != '-'
+	}) < 0
+	if safe {
+		return name
+	}
+
+	return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'"
 }

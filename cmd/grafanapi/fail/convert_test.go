@@ -351,12 +351,45 @@ func TestErrorToDetailedError_SessionBinding(t *testing.T) {
 		assert.Equal(t, err, detailedErr.Parent)
 	})
 
-	t.Run("rendering never contains a cookie", func(t *testing.T) {
+	t.Run("rendering carries only origins and the context", func(t *testing.T) {
+		// SessionBindingError has no cookie field, so the rendering can hold nothing but the origins
+		// and the context name; pin exactly that, instead of a guarantee a wrapper could break.
 		for _, bindingErr := range []*config.SessionBindingError{mismatch, unbound} {
-			detailedErr := fail.ErrorToDetailedError(fmt.Errorf("cookie %s in scope: %w", "(omitted)", bindingErr))
+			assert.Contains(t, bindingErr.Error(), `"dev"`)
+			assert.Contains(t, bindingErr.Error(), bindingErr.ServerOrigin)
 
-			rendered := detailedErr.Error() + detailedErr.Summary + strings.Join(detailedErr.Suggestions, "\n")
-			assert.NotContains(t, rendered, cookie)
+			if bindingErr.BoundOrigin != "" {
+				assert.Contains(t, bindingErr.Error(), bindingErr.BoundOrigin)
+			}
+
+			detailedErr := fail.ErrorToDetailedError(bindingErr)
+			assert.NotContains(t, detailedErr.Error()+detailedErr.Summary+strings.Join(detailedErr.Suggestions, "\n"), cookie)
+		}
+	})
+
+	t.Run("context name is shell-quoted in the suggested commands", func(t *testing.T) {
+		tests := []struct {
+			context string
+			want    string
+		}{
+			{"dev", "--context dev"},
+			{"my.dev_1-x", "--context my.dev_1-x"},
+			{"my dev", "--context 'my dev'"},
+			{"it's", `--context 'it'\''s'`},
+			{"a;rm", "--context 'a;rm'"},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.context, func(t *testing.T) {
+				for _, bindingErr := range []*config.SessionBindingError{
+					{Context: tc.context, BoundOrigin: "https://grafana.example.com:443", ServerOrigin: "https://evil.example:443"},
+					{Context: tc.context, ServerOrigin: "https://evil.example:443"},
+				} {
+					detailedErr := fail.ErrorToDetailedError(bindingErr)
+
+					assert.Contains(t, strings.Join(detailedErr.Suggestions, "\n"), tc.want)
+				}
+			})
 		}
 	})
 }
