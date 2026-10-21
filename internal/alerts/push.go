@@ -47,34 +47,19 @@ import (
 //
 // Result.Applied and Result.Failed are sorted the way the plan is, so the output of a push does
 // not depend on which write finished first.
+//
+// # Rule-scoped push
+//
+// With opts.RuleUIDs the push is about those rules only. Each named rule is looked up in the bundle
+// (a uid the bundle does not hold is an error before any request) and in Grafana (an unknown uid is
+// an error wrapping ErrRuleNotFound, whatever opts.StopOnError says), and the group PUT carries the
+// rule group as Grafana holds it at the time of the push - every other rule, the interval and the
+// order, never the file's - with the named rules replaced by the file's versions, sent whole. So an
+// edit to a sibling in the file is not pushed, and a sibling Grafana gained or lost since the pull
+// is neither deleted nor resurrected. The bundle's contact points and policy tree are neither
+// fetched nor written, and no group is created.
 func Push(ctx context.Context, gClient *goapi.GrafanaHTTPAPI, local Bundle, opts PushOptions) (Result, error) {
-	if gClient == nil {
-		return Result{}, errors.New("alerts: no grafana client configured")
-	}
-
-	remote, err := Pull(ctx, gClient, PullOptions{
-		Groups:        localGroupRefs(local.Groups),
-		MaxConcurrent: opts.MaxConcurrent,
-	})
-	if err != nil {
-		return Result{}, err
-	}
-
-	changes, err := Plan(local, remote)
-	if err != nil {
-		return Result{}, err
-	}
-
-	if opts.DryRun {
-		opts.StopOnError = false
-	}
-
-	run := &pushRun{gClient: gClient, local: local, remote: remote, opts: opts}
-	applyErr := run.apply(ctx, changes)
-
-	sortResult(&run.result)
-
-	return run.result, applyErr
+	return push(ctx, gClient, local, opts, scopeBundles)
 }
 
 // FailedChange is one plan entry that could not be applied, with the error explaining why. The
@@ -100,6 +85,9 @@ type PushOptions struct {
 	// MaxConcurrent bounds the in-flight rule-group writes, and the fetches that precede them.
 	// Zero or negative means DefaultMaxConcurrent.
 	MaxConcurrent int
+	// RuleUIDs, when non-empty, restricts the push to the rules with these uids: see Push, "Rule-scoped
+	// push". The rest of the bundle is ignored.
+	RuleUIDs []string
 	// OrgID is the current context's organization, used for a rule the remote side cannot supply
 	// one for. Zero means "unknown" - a Grafana Cloud context addresses a stack rather than an org
 	// - in which case the file's own orgID is kept.
@@ -621,4 +609,58 @@ func sortResult(result *Result) {
 	slices.SortStableFunc(result.Failed, func(a, b FailedChange) int {
 		return compareChanges(a.Change, b.Change)
 	})
+}
+
+// push is Push with the scoping step as a parameter, so a test can prove the plan of a rule-scoped
+// push is what guards the write rather than the builder that feeds it.
+func push(
+	ctx context.Context,
+	gClient *goapi.GrafanaHTTPAPI,
+	local Bundle,
+	opts PushOptions,
+	scope scopeFunc,
+) (Result, error) {
+	if gClient == nil {
+		return Result{}, errors.New("alerts: no grafana client configured")
+	}
+
+	var (
+		remote  Bundle
+		changes []Change
+		err     error
+	)
+
+	if len(opts.RuleUIDs) > 0 {
+		local, remote, err = scopedBundles(ctx, gClient, local, opts, scope)
+		if err != nil {
+			return Result{}, err
+		}
+
+		changes, err = Plan(local, remote)
+	} else {
+		remote, err = Pull(ctx, gClient, PullOptions{
+			Groups:        localGroupRefs(local.Groups),
+			MaxConcurrent: opts.MaxConcurrent,
+		})
+		if err != nil {
+			return Result{}, err
+		}
+
+		changes, err = Plan(local, remote)
+	}
+
+	if err != nil {
+		return Result{}, err
+	}
+
+	if opts.DryRun {
+		opts.StopOnError = false
+	}
+
+	run := &pushRun{gClient: gClient, local: local, remote: remote, opts: opts}
+	applyErr := run.apply(ctx, changes)
+
+	sortResult(&run.result)
+
+	return run.result, applyErr
 }
